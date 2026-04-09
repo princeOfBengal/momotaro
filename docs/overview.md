@@ -21,7 +21,7 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 momotaro/
 ├── server/              # Express API server
 │   └── src/
-│       ├── index.js           # App entry point
+│       ├── index.js           # App entry point + graceful shutdown
 │       ├── config.js          # Env-var configuration
 │       ├── db/database.js     # SQLite init + migrations
 │       ├── routes/            # API route handlers
@@ -30,15 +30,19 @@ momotaro/
 │       └── watcher/           # File system watcher
 ├── client/              # React SPA
 │   └── src/
-│       ├── api/client.js      # All API calls in one place
+│       ├── api/client.js      # All API calls + device ID + timeout
 │       ├── pages/             # Route-level components
 │       ├── components/        # Shared UI components
 │       └── context/           # React context (sidebar)
-├── library/             # Default manga storage (mounted volume in Docker)
-├── data/                # Runtime data: DB, thumbnails, CBZ cache
+├── assets/              # Source artwork / logo files
+├── data/                # Runtime data: DB, thumbnails, CBZ cache (gitignored)
 ├── docker-compose.yml
 └── docs/                # This documentation
 ```
+
+## First-Time Setup
+
+When no libraries are configured, the Library page shows a "Welcome to Momotaro" prompt with a button that navigates directly to the Libraries tab in Settings. There is no default library created automatically — the user must add at least one library path before the app will scan for manga.
 
 ## Development Setup
 
@@ -46,7 +50,7 @@ momotaro/
 # Server (runs on :3000)
 cd server && npm install && npm run dev
 
-# Client (runs on :5173, proxies /api to :3000)
+# Client (runs on :5173, proxies /api and /thumbnails to :3000)
 cd client && npm install && npm run dev
 ```
 
@@ -62,11 +66,10 @@ docker compose up --build
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `3000` | Server listen port |
-| `LIBRARY_PATH` | `./library` | Root manga library directory |
 | `DATA_PATH` | `./data` | Where DB, thumbnails, CBZ cache are stored |
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
 | `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Extracted CBZ pages |
-| `SCAN_ON_STARTUP` | `true` | Re-scan library when server starts |
+| `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts |
 | `METADATA_FETCH_ENABLED` | `true` | Auto-fetch AniList metadata on scan |
-| `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (rate limiting) |
+| `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |

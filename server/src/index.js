@@ -52,10 +52,24 @@ async function start() {
   fs.mkdirSync(config.CBZ_CACHE_DIR, { recursive: true });
   fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
 
+  // Graceful shutdown
+  let server;
+  async function shutdown(signal) {
+    console.log(`[Server] ${signal} received — shutting down gracefully`);
+    server?.close(() => {
+      console.log('[Server] HTTP server closed');
+      process.exit(0);
+    });
+    // Force exit if server hasn't closed within 10 s
+    setTimeout(() => process.exit(1), 10_000).unref();
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+
   // Initialize database (runs migrations)
   const db = getDb();
 
-  app.listen(config.PORT, '0.0.0.0', () => {
+  server = app.listen(config.PORT, '0.0.0.0', () => {
     console.log(`[Server] Momotaro running on port ${config.PORT}`);
   });
 

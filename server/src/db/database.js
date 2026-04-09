@@ -11,6 +11,9 @@ function getDb() {
     db = new Database(config.DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    db.pragma('synchronous = NORMAL');   // WAL + NORMAL is safe and faster than FULL
+    db.pragma('cache_size = -32000');    // 32 MB page cache
+    db.pragma('temp_store = MEMORY');    // temp tables in RAM
     migrate(db);
   }
   return db;
@@ -53,8 +56,10 @@ function migrate(db) {
       path         TEXT    NOT NULL,
       type         TEXT    NOT NULL,
       number       REAL,
+      volume       REAL,
       title        TEXT,
       page_count   INTEGER NOT NULL DEFAULT 0,
+      file_mtime   INTEGER,
       created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
       UNIQUE(manga_id, folder_name)
     );
@@ -108,11 +113,14 @@ function migrate(db) {
       PRIMARY KEY (list_id, manga_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_chapters_manga_id    ON chapters(manga_id);
-    CREATE INDEX IF NOT EXISTS idx_pages_chapter_id     ON pages(chapter_id);
-    CREATE INDEX IF NOT EXISTS idx_progress_manga_id    ON progress(manga_id);
-    CREATE INDEX IF NOT EXISTS idx_rlm_list_id          ON reading_list_manga(list_id);
-    CREATE INDEX IF NOT EXISTS idx_rlm_manga_id         ON reading_list_manga(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_manga_library_id  ON manga(library_id);
+    CREATE INDEX IF NOT EXISTS idx_manga_title        ON manga(title);
+    CREATE INDEX IF NOT EXISTS idx_manga_updated_at   ON manga(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_chapters_manga_id  ON chapters(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_pages_chapter_id   ON pages(chapter_id);
+    CREATE INDEX IF NOT EXISTS idx_progress_manga_id  ON progress(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_rlm_list_id        ON reading_list_manga(list_id);
+    CREATE INDEX IF NOT EXISTS idx_rlm_manga_id       ON reading_list_manga(manga_id);
   `);
 
   // Seed the two built-in reading lists
@@ -120,22 +128,29 @@ function migrate(db) {
     db.prepare("INSERT OR IGNORE INTO reading_lists (name, is_default) VALUES (?, 1)").run(name);
   }
 
-  // Upgrade older single-library databases to multi-library schema.
-  // Must run before we try to reference the library_id column.
   upgradeToMultiLibrary(db);
 
-  // Safe to create now — library_id is guaranteed to exist after the migration
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_manga_library_id ON manga(library_id)`);
+  // Column-level migrations — safe to run on every startup
+  addColumnIfMissing(db, 'libraries', 'show_in_all', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'chapters',  'volume',      'REAL');
+  addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
+}
 
-  // Add show_in_all to libraries if not present (older installations)
-  upgradeLibraryShowInAll(db);
+/**
+ * Add a column to a table if it doesn't already exist.
+ */
+function addColumnIfMissing(db, table, column, definition) {
+  const has = db.prepare(
+    `SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`
+  ).get(column);
+  if (!has) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    console.log(`[DB] Added ${column} to ${table}.`);
+  }
 }
 
 /**
  * One-time migration for installations that predate multi-library support.
- * The old schema had `folder_name TEXT UNIQUE` without a library_id column.
- * We recreate the manga table to add library_id and change the unique
- * constraint to UNIQUE(path) (paths are globally unique on the filesystem).
  */
 function upgradeToMultiLibrary(db) {
   const hasLibraryId = db.prepare(
@@ -148,7 +163,6 @@ function upgradeToMultiLibrary(db) {
   ).get();
   const tvExpr = hasTrackVolumes ? 'COALESCE(m.track_volumes, 0)' : '0';
 
-  // Create libraries table if somehow not yet created
   db.exec(`
     CREATE TABLE IF NOT EXISTS libraries (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,7 +173,6 @@ function upgradeToMultiLibrary(db) {
     );
   `);
 
-  // Recreate manga with new schema (library_id, UNIQUE path)
   db.exec(`
     CREATE TABLE manga_new (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,13 +212,6 @@ function upgradeToMultiLibrary(db) {
   `);
 
   console.log('[DB] Migrated to multi-library schema.');
-}
-
-function upgradeLibraryShowInAll(db) {
-  const has = db.prepare("SELECT 1 FROM pragma_table_info('libraries') WHERE name = 'show_in_all'").get();
-  if (has) return;
-  db.exec("ALTER TABLE libraries ADD COLUMN show_in_all INTEGER NOT NULL DEFAULT 1");
-  console.log('[DB] Added show_in_all column to libraries.');
 }
 
 module.exports = { getDb };

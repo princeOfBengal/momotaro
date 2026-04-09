@@ -93,20 +93,27 @@ function getFolderPages(dirPath) {
 
 /**
  * Get sorted image list from a CBZ file.
- * Extracts to CBZ cache directory if not already extracted.
+ * Extracts to CBZ cache directory on first access; re-extracts if the CBZ
+ * file has been modified since the last extraction (mtime-based validation).
  */
 function getCbzPages(cbzPath, chapterId) {
   const cacheDir = path.join(config.CBZ_CACHE_DIR, String(chapterId));
+  const mtimeMarker = path.join(cacheDir, '.mtime');
 
-  // If already extracted, return cached pages
   if (fs.existsSync(cacheDir)) {
     try {
-      const files = fs.readdirSync(cacheDir).filter(isImage).sort(naturalSort);
-      if (files.length > 0) {
-        return files.map(f => ({ filename: f, path: path.join(cacheDir, f) }));
+      const currentMtime = String(Math.floor(fs.statSync(cbzPath).mtimeMs / 1000));
+      const cachedMtime  = fs.readFileSync(mtimeMarker, 'utf8').trim();
+
+      if (currentMtime === cachedMtime) {
+        const files = fs.readdirSync(cacheDir).filter(isImage).sort(naturalSort);
+        if (files.length > 0) {
+          return files.map(f => ({ filename: f, path: path.join(cacheDir, f) }));
+        }
       }
+      // mtime mismatch — fall through to re-extract
     } catch {
-      // Fall through to re-extract
+      // Missing marker or stat failed — fall through to re-extract
     }
   }
 
@@ -132,6 +139,12 @@ function extractCbz(cbzPath, outputDir) {
       fs.writeFileSync(destPath, entry.getData());
       pages.push({ filename: entry.name || destName, path: destPath });
     });
+
+    // Write mtime marker so future calls can validate the cache
+    try {
+      const mtime = String(Math.floor(fs.statSync(cbzPath).mtimeMs / 1000));
+      fs.writeFileSync(path.join(outputDir, '.mtime'), mtime);
+    } catch { /* non-critical */ }
 
     return pages;
   } catch (err) {

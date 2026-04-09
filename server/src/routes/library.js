@@ -386,20 +386,21 @@ router.post('/scan', asyncWrapper(async (req, res) => {
 let _statsCache = null;
 let _statsCacheTime = 0;
 
-function getDirSizeSync(dirPath) {
+async function getDirSizeAsync(dirPath) {
   let total = 0;
   try {
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    await Promise.all(entries.map(async entry => {
       const full = path.join(dirPath, entry.name);
       try {
         if (entry.isFile()) {
-          total += fs.statSync(full).size;
+          total += (await fs.promises.stat(full)).size;
         } else if (entry.isDirectory()) {
-          total += getDirSizeSync(full);
+          total += await getDirSizeAsync(full);
         }
-      } catch {}
-    }
-  } catch {}
+      } catch { /* skip inaccessible entries */ }
+    }));
+  } catch { /* skip inaccessible directories */ }
   return total;
 }
 
@@ -416,51 +417,46 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   const { total_chapters } = db.prepare('SELECT COUNT(*) as total_chapters FROM chapters').get();
   const { total_pages }    = db.prepare('SELECT COALESCE(SUM(page_count), 0) as total_pages FROM chapters').get();
 
-  // Genre counts
-  const genreCounts = {};
-  for (const { genres } of db.prepare("SELECT genres FROM manga WHERE genres IS NOT NULL AND genres != '[]'").all()) {
-    for (const g of safeJsonParse(genres, [])) {
-      genreCounts[g] = (genreCounts[g] || 0) + 1;
-    }
-  }
-  const total_genres = Object.keys(genreCounts).length;
-  const top_genres = Object.entries(genreCounts)
-    .map(([genre, count]) => ({ genre, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 10);
+  // Genre counts — aggregated in SQLite via json_each
+  const genreRows = db.prepare(`
+    SELECT value as genre, COUNT(*) as count
+    FROM manga, json_each(manga.genres)
+    WHERE manga.genres IS NOT NULL AND manga.genres != '[]'
+    GROUP BY value
+    ORDER BY count DESC
+  `).all();
+  const total_genres = genreRows.length;
+  const top_genres   = genreRows.slice(0, 10).map(r => ({ genre: r.genre, count: r.count }));
 
-  // Estimated read time — build a chapter→page_count map then walk completed_chapters
-  const chapterPages = {};
-  for (const { id, page_count } of db.prepare('SELECT id, page_count FROM chapters').all()) {
-    chapterPages[id] = page_count;
-  }
-  let estimated_read_time_minutes = 0;
-  for (const { completed_chapters } of db.prepare('SELECT completed_chapters FROM progress').all()) {
-    for (const chId of safeJsonParse(completed_chapters, [])) {
-      estimated_read_time_minutes += (chapterPages[chId] || 40) * 0.5; // ~0.5 min/page
-    }
-  }
+  // Estimated read time via a single JOIN — no JS iteration over all chapters
+  const { estimated_read_time_minutes } = db.prepare(`
+    SELECT COALESCE(
+      ROUND(SUM(COALESCE(c.page_count, 40) * 0.5)),
+      0
+    ) as estimated_read_time_minutes
+    FROM progress p, json_each(p.completed_chapters) je
+    JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
+  `).get();
 
-  // Popular manga (by completed chapters count)
+  // Popular manga — sorted by completed chapter count in SQL
   const top_manga = db.prepare(`
-    SELECT p.manga_id as id, m.title, m.cover_image, p.completed_chapters
+    SELECT p.manga_id as id, m.title, m.cover_image,
+           json_array_length(p.completed_chapters) as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
-  `).all()
-    .map(r => ({
-      id: r.id,
-      title: r.title,
-      cover_url: r.cover_image ? `/thumbnails/${r.cover_image}` : null,
-      chapters_read: safeJsonParse(r.completed_chapters, []).length,
-    }))
-    .sort((a, b) => b.chapters_read - a.chapters_read)
-    .slice(0, 10);
+    ORDER BY chapters_read DESC
+    LIMIT 10
+  `).all().map(r => ({
+    id: r.id,
+    title: r.title,
+    cover_url: r.cover_image ? `/thumbnails/${r.cover_image}` : null,
+    chapters_read: r.chapters_read,
+  }));
 
-  // Total disk size (cached — may take a moment on first call)
-  let total_size_bytes = 0;
-  for (const { path: p } of db.prepare('SELECT path FROM manga WHERE path IS NOT NULL').all()) {
-    total_size_bytes += getDirSizeSync(p);
-  }
+  // Total disk size — async so it doesn't block the event loop
+  const mangaPaths = db.prepare('SELECT path FROM manga WHERE path IS NOT NULL').all();
+  const sizes = await Promise.all(mangaPaths.map(({ path: p }) => getDirSizeAsync(p)));
+  const total_size_bytes = sizes.reduce((sum, s) => sum + s, 0);
 
   _statsCache = {
     total_manga,
@@ -468,7 +464,7 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     total_pages,
     total_size_bytes,
     total_genres,
-    estimated_read_time_minutes: Math.round(estimated_read_time_minutes),
+    estimated_read_time_minutes: Math.round(estimated_read_time_minutes || 0),
     top_genres,
     top_manga,
   };

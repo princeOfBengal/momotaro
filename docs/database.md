@@ -2,6 +2,18 @@
 
 SQLite database at `$DATA_PATH/momotaro.db`. Initialized and migrated in [server/src/db/database.js](../server/src/db/database.js).
 
+## Connection Settings
+
+Applied on every startup via `db.pragma()`:
+
+| Pragma | Value | Effect |
+|---|---|---|
+| `journal_mode` | `WAL` | Write-ahead logging — allows concurrent reads during a write |
+| `foreign_keys` | `ON` | Enforces FK constraints and `ON DELETE CASCADE` |
+| `synchronous` | `NORMAL` | Safe with WAL; avoids the fsync overhead of `FULL` |
+| `cache_size` | `-32000` | 32 MB in-process page cache to reduce repeated disk reads |
+| `temp_store` | `MEMORY` | Temporary sort/join tables live in RAM |
+
 ## Tables
 
 ### `libraries`
@@ -52,6 +64,7 @@ One row per chapter folder or CBZ file.
 | `volume` | REAL | Parsed volume number (null if chapter-only) |
 | `title` | TEXT | Optional chapter title |
 | `page_count` | INTEGER | |
+| `file_mtime` | INTEGER | Unix timestamp (seconds) of the chapter file/folder at last scan — used to skip re-processing unchanged chapters |
 | `created_at` | INTEGER | |
 
 **Unique constraint:** `(manga_id, folder_name)`
@@ -86,15 +99,24 @@ One row per manga (UNIQUE on `manga_id`).
 | `updated_at` | INTEGER | Unix timestamp |
 
 ### `settings`
-Key-value store for app-wide configuration.
+Key-value store for server-wide configuration (not per-device state).
 
 | Key | Value Description |
 |---|---|
-| `anilist_token` | OAuth access token |
-| `anilist_user_id` | Logged-in user's AniList ID |
-| `anilist_username` | Display name |
 | `anilist_client_id` | OAuth app client ID |
 | `anilist_client_secret` | OAuth app client secret |
+
+### `device_anilist_sessions`
+Per-device AniList login state. Keyed by a UUID generated in the browser (`localStorage` key `momotaro_device_id`) and sent as the `X-Device-ID` request header.
+
+| Column | Type | Notes |
+|---|---|---|
+| `device_id` | TEXT PK | UUID from browser localStorage |
+| `anilist_token` | TEXT | OAuth access token for this device |
+| `anilist_user_id` | TEXT | AniList user ID |
+| `anilist_username` | TEXT | Display name |
+| `anilist_avatar` | TEXT | Avatar URL |
+| `updated_at` | INTEGER | Unix timestamp |
 
 ### `reading_lists`
 User-created (and two built-in) reading lists.
@@ -120,26 +142,22 @@ Junction table linking manga to lists.
 ## Indexes
 
 ```sql
-idx_manga_library_id     ON manga(library_id)
-idx_chapters_manga_id    ON chapters(manga_id)
-idx_pages_chapter_id     ON pages(chapter_id)
-idx_progress_manga_id    ON progress(manga_id)
-idx_rlm_list_id          ON reading_list_manga(list_id)
-idx_rlm_manga_id         ON reading_list_manga(manga_id)
+idx_manga_library_id  ON manga(library_id)
+idx_manga_title       ON manga(title)           -- speeds up ORDER BY title (default sort)
+idx_manga_updated_at  ON manga(updated_at DESC) -- speeds up ORDER BY updated_at
+idx_chapters_manga_id ON chapters(manga_id)
+idx_pages_chapter_id  ON pages(chapter_id)
+idx_progress_manga_id ON progress(manga_id)
+idx_rlm_list_id       ON reading_list_manga(list_id)
+idx_rlm_manga_id      ON reading_list_manga(manga_id)
 ```
 
 ## Migrations
 
-The `migrate()` function in `database.js` runs on every startup with `CREATE TABLE IF NOT EXISTS`, so it is safe to run repeatedly.
+The `migrate()` function in `database.js` runs on every startup using `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, making it safe to run repeatedly.
 
-Two explicit migration functions handle older installs:
+Column-level additions use the shared `addColumnIfMissing(db, table, column, definition)` helper, which checks `pragma_table_info` before running `ALTER TABLE`. This replaces the old per-feature upgrade functions.
 
-- **`upgradeToMultiLibrary`** — Adds `library_id` to `manga` and switches the unique constraint from `folder_name` to `path`. Runs once, detected by checking `pragma_table_info`.
-- **`upgradeLibraryShowInAll`** — Adds `show_in_all` column to `libraries` if missing.
+One structural migration is still handled separately:
 
-## Pragmas
-
-```sql
-PRAGMA journal_mode = WAL;    -- Better concurrent read performance
-PRAGMA foreign_keys = ON;     -- Enforce FK constraints
-```
+- **`upgradeToMultiLibrary`** — Recreates the `manga` table to add `library_id` and change the unique constraint from `folder_name` to `path`. Runs once, detected by checking `pragma_table_info`.

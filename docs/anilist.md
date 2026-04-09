@@ -4,6 +4,14 @@ Momotaro integrates with AniList for:
 1. **Metadata enrichment** — fetch titles, descriptions, genres, cover art
 2. **Progress sync** — push reading progress back to the user's AniList list
 
+## Per-Device Login
+
+AniList login is **per device** (per browser). Each browser generates a UUID on first load, stores it in `localStorage` as `momotaro_device_id`, and sends it as the `X-Device-ID` header on every API request.
+
+The server stores login state in the `device_anilist_sessions` table keyed by `device_id`. Logging in on one device does not affect any other device's session. Logging out only clears the session for the requesting device.
+
+The OAuth client credentials (`anilist_client_id`, `anilist_client_secret`) are still global — stored in the `settings` table — since they belong to the server's registered AniList application, not to individual users.
+
 ## OAuth Setup
 
 AniList uses OAuth 2.0. The user must create an AniList API application and supply the client ID and secret in Settings.
@@ -14,7 +22,7 @@ AniList uses OAuth 2.0. The user must create an AniList API application and supp
 3. AniList redirects back to `<origin>/anilist/callback` with `?code=...`
 4. `AnilistCallback.jsx` POSTs the code to `POST /api/auth/anilist/exchange`
 5. Server exchanges code for access token via AniList token endpoint
-6. Token stored in `settings` table under `anilist_token`
+6. Token stored in `device_anilist_sessions` for the requesting device's `X-Device-ID`
 
 Relevant files:
 - [server/src/metadata/anilist.js](../server/src/metadata/anilist.js) — All AniList GraphQL queries
@@ -36,9 +44,11 @@ The server searches AniList by the manga's folder name / title, picks the best m
 
 Triggered **asynchronously** after every `PUT /api/progress/:mangaId` call. The HTTP response is sent first; sync happens in the background.
 
+The `PUT /api/progress/:mangaId` handler extracts `X-Device-ID` from the request header and passes it to `syncToAniList()`. That function looks up the token from `device_anilist_sessions` for that device. If the device has no AniList session, sync is skipped silently.
+
 Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `syncToAniList()`:
 
-1. Check `anilist_token` and `anilist_user_id` exist in settings — skip if not logged in
+1. Look up `anilist_token` and `anilist_user_id` from `device_anilist_sessions` for the request's `device_id` — skip if not logged in
 2. Check `manga.anilist_id` — skip if no AniList match
 3. Skip if `completedChapters` is empty
 4. Determine tracking mode from `manga.track_volumes`:
@@ -48,6 +58,14 @@ Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `
 6. Fall back to `completedChapters.length` if no numbered entries exist
 7. Determine status: `COMPLETED` if `completedChapters.length >= totalChapters`, else `CURRENT`
 8. Call `saveMediaListEntry(token, anilistId, status, { chapters: N })` or `{ volumes: N }`
+
+## Rate Limiting
+
+`anilistRequest()` in `anilist.js` handles HTTP 429 responses automatically:
+
+- Reads the `retry-after` response header (defaults to 60 s if absent)
+- Waits up to 90 s, then retries — up to 3 attempts
+- Throws `'AniList rate limit exceeded after 3 retries'` if all retries fail
 
 ## GraphQL Queries Used
 

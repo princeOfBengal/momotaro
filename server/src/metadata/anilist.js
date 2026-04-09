@@ -45,16 +45,28 @@ function buildHeaders(token) {
   return headers;
 }
 
-async function anilistRequest(query, variables, token) {
+async function anilistRequest(query, variables, token, attempt = 0) {
   const resp = await fetch(ANILIST_URL, {
     method: 'POST',
     headers: buildHeaders(token),
     body: JSON.stringify({ query, variables }),
   });
 
+  // Rate limited — back off and retry up to 3 times
+  if (resp.status === 429) {
+    if (attempt < 3) {
+      const retryAfter = parseInt(resp.headers.get('retry-after') || '60', 10);
+      const delay = Math.min(retryAfter * 1000, 90_000);
+      console.warn(`[AniList] Rate limited — retrying in ${delay / 1000}s (attempt ${attempt + 1}/3)`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return anilistRequest(query, variables, token, attempt + 1);
+    }
+    throw new Error('AniList rate limit exceeded after 3 retries');
+  }
+
   const json = await resp.json();
 
-  // If the token is invalid, retry without it
+  // If the token is invalid, retry without it (unauthenticated metadata fetch)
   if (!resp.ok) {
     const isInvalidToken = json?.errors?.some(e =>
       e.message?.toLowerCase().includes('invalid token') ||

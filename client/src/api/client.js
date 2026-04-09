@@ -10,17 +10,28 @@ function getDeviceId() {
 }
 
 async function apiFetch(path, options = {}) {
-  const resp = await fetch(`${BASE}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Device-ID': getDeviceId(),
-      ...options.headers,
-    },
-    ...options,
-  });
-  const json = await resp.json();
-  if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
-  return json.data !== undefined ? json.data : json;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+
+  try {
+    const resp = await fetch(`${BASE}${path}`, {
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-ID': getDeviceId(),
+        ...options.headers,
+      },
+      ...options,
+    });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    return json.data !== undefined ? json.data : json;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Request timed out');
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export const api = {

@@ -49,7 +49,9 @@ router.get('/pages/:id/image', asyncWrapper(async (req, res) => {
 
   res.setHeader('Content-Type', mimeType);
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  fs.createReadStream(filePath).pipe(res);
+  const stream = fs.createReadStream(filePath);
+  req.on('close', () => stream.destroy());
+  stream.pipe(res);
 }));
 
 module.exports = router;

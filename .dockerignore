@@ -1,0 +1,11 @@
+*/node_modules/
+client/dist/
+data/
+library/
+.git/
+.claude/
+assets/
+.env
+.env.*
+.DS_Store
+Thumbs.db

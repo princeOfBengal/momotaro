@@ -23,5 +23,6 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     restart: unless-stopped

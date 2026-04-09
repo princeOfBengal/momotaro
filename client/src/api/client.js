@@ -1,9 +1,16 @@
 const BASE = import.meta.env.VITE_API_BASE || '';
 
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 function getDeviceId() {
   let id = localStorage.getItem('momotaro_device_id');
   if (!id) {
-    id = crypto.randomUUID();
+    id = crypto.randomUUID?.() ?? generateUUID();
     localStorage.setItem('momotaro_device_id', id);
   }
   return id;

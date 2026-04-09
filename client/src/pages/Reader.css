@@ -1,0 +1,34 @@
+.reader-page {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: #000;
+  position: relative;
+  transition: padding 0.25s ease;
+  outline: none;
+}
+
+/* Background color variants */
+.reader-page.bg-black { background: #000; }
+.reader-page.bg-gray  { background: #2a2a2a; }
+.reader-page.bg-white { background: #e8e8e8; }
+
+/* Grayscale mode */
+.reader-grayscale img { filter: grayscale(1); }
+
+/* When bars are visible, inset the content so it sits between the bars */
+.reader-page.bars-visible {
+  padding-top: 52px;
+  padding-bottom: 52px;
+}
+
+.reader-loading {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: #000;
+  color: var(--text-secondary);
+}

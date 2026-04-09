@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="#1a1a1a"/>
+
+  <!-- Manga panels layout -->
+  <!-- Large left panel -->
+  <rect x="56" y="64" width="176" height="256" rx="10" fill="#e85d04"/>
+  <!-- Top-right panel -->
+  <rect x="248" y="64" width="208" height="120" rx="10" fill="#c24d00"/>
+  <!-- Bottom-right panel -->
+  <rect x="248" y="200" width="208" height="120" rx="10" fill="#f48c06"/>
+
+  <!-- Lines on large left panel (manga page lines) -->
+  <rect x="76" y="108" width="136" height="10" rx="5" fill="rgba(0,0,0,0.25)"/>
+  <rect x="76" y="130" width="100" height="10" rx="5" fill="rgba(0,0,0,0.25)"/>
+  <rect x="76" y="152" width="120" height="10" rx="5" fill="rgba(0,0,0,0.20)"/>
+
+  <!-- Bottom full-width panel -->
+  <rect x="56" y="336" width="400" height="112" rx="10" fill="#2a2a2a"/>
+  <!-- Subtle border on bottom panel -->
+  <rect x="56" y="336" width="400" height="112" rx="10" fill="none" stroke="#e85d04" stroke-width="3"/>
+
+  <!-- "M" in bottom panel -->
+  <text x="256" y="428" font-family="'Arial Black', Arial, sans-serif" font-size="72" font-weight="900" fill="#e85d04" text-anchor="middle">M</text>
+</svg>

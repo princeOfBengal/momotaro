@@ -1,0 +1,75 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const config = require('./config');
+const { getDb } = require('./db/database');
+const { runFullScan } = require('./scanner/libraryScanner');
+const { startWatcher } = require('./watcher');
+const { errorHandler } = require('./middleware/errorHandler');
+
+const libraryRoutes = require('./routes/library');
+const chapterRoutes = require('./routes/chapters');
+const pageRoutes = require('./routes/pages');
+const progressRoutes = require('./routes/progress');
+const { router: settingsRoutes } = require('./routes/settings');
+const metadataRoutes = require('./routes/metadata');
+const optimizeRoutes = require('./routes/optimize');
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+// Serve generated thumbnails
+fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
+app.use('/thumbnails', express.static(config.THUMBNAIL_DIR));
+
+// API routes
+app.use('/api', libraryRoutes);
+app.use('/api', chapterRoutes);
+app.use('/api', pageRoutes);
+app.use('/api', progressRoutes);
+app.use('/api', settingsRoutes);
+app.use('/api', metadataRoutes);
+app.use('/api', optimizeRoutes);
+
+// Health check
+app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
+
+// Serve built React client (production)
+const clientDist = path.join(__dirname, '../../client/dist');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
+
+app.use(errorHandler);
+
+async function start() {
+  fs.mkdirSync(config.CBZ_CACHE_DIR, { recursive: true });
+  fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
+
+  // Initialize database (runs migrations)
+  const db = getDb();
+
+  app.listen(config.PORT, '0.0.0.0', () => {
+    console.log(`[Server] Momotaro running on port ${config.PORT}`);
+  });
+
+  // Start file watchers for all libraries
+  const libraries = db.prepare('SELECT * FROM libraries').all();
+  startWatcher(libraries);
+
+  // Initial scan
+  if (config.SCAN_ON_STARTUP) {
+    await runFullScan();
+  }
+}
+
+start().catch(err => {
+  console.error('[Server] Fatal error:', err);
+  process.exit(1);
+});

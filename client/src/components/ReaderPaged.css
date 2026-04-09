@@ -1,0 +1,132 @@
+.reader-paged {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  user-select: none;
+  overflow: hidden;
+  /* Prevent browser handling of pinch-zoom, pan, and tap-highlight
+     so our custom gesture logic gets exclusive control */
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.reader-paged-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: scale(var(--reader-zoom, 1));
+  transform-origin: center center;
+  overflow: hidden;
+}
+
+/* Animation wrapper — full size flex container */
+.reader-paged-anim-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* Page transition animations */
+@keyframes page-slide-next {
+  from { opacity: 0.5; transform: translateX(24px); }
+  to   { opacity: 1;   transform: translateX(0); }
+}
+@keyframes page-slide-prev {
+  from { opacity: 0.5; transform: translateX(-24px); }
+  to   { opacity: 1;   transform: translateX(0); }
+}
+.page-anim-next { animation: page-slide-next 0.18s ease-out forwards; }
+.page-anim-prev { animation: page-slide-prev 0.18s ease-out forwards; }
+
+/* Base image styles */
+.reader-page-img {
+  display: block;
+  pointer-events: none;
+}
+
+/* ── Scale types (applied to .reader-paged-inner) ── */
+
+/* Screen: contain within both dimensions */
+.scale-screen .reader-page-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+/* Fit Width: stretch to full width */
+.scale-fit-width {
+  overflow-y: auto;
+  align-items: flex-start;
+}
+.scale-fit-width .reader-page-img {
+  width: 100%;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+/* Fit Width (Shrink Only): shrink if wider than container, never upscale */
+.scale-fit-width-shrink .reader-page-img {
+  max-width: 100%;
+  height: auto;
+  max-height: none;
+}
+
+/* Fit Height: fill the full height */
+.scale-fit-height .reader-page-img {
+  height: 100%;
+  width: auto;
+  max-height: none;
+  max-width: none;
+}
+
+/* Original: natural image size, scrollable if oversized */
+.scale-original {
+  overflow: auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+.scale-original .reader-page-img {
+  max-width: none;
+  max-height: none;
+  width: auto;
+  height: auto;
+}
+
+/* ── Double-page layout ── */
+.double-page .reader-paged-anim-wrapper {
+  flex-direction: row;
+  gap: 2px;
+}
+.double-page .reader-page-img {
+  max-height: 100%;
+  max-width: 50%;
+  width: auto;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Pan cursor states */
+.reader-paged.pannable { cursor: grab; }
+.reader-paged.panning  { cursor: grabbing; }
+
+/* Tap zones */
+.tap-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 25%;
+  z-index: 10;
+  cursor: pointer;
+}
+.tap-left  { left: 0; }
+.tap-right { right: 0; }

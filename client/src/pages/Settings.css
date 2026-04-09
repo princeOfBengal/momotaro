@@ -1,0 +1,431 @@
+/* ── Page shell ── */
+.sp-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Left nav sidebar ── */
+.sp-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 24px 0;
+}
+
+.sp-sidebar-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  padding: 0 16px 10px;
+  margin: 0;
+}
+
+.sp-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 16px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.sp-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sp-nav-item.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.sp-nav-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+/* ── Right content area ── */
+.sp-content {
+  flex: 1;
+  padding: 32px 40px;
+  min-width: 0;
+  max-width: 800px;
+  overflow-y: auto;
+}
+
+/* ── Section header (title + optional action button) ── */
+.sp-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.sp-section-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.sp-section-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  max-width: 520px;
+}
+
+/* ── Status banner ── */
+.sp-status {
+  font-size: 13px;
+  padding: 9px 13px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+.sp-status-success { background: rgba(76, 175, 80, 0.15); color: #4caf50; }
+.sp-status-error   { background: rgba(244, 67, 54, 0.15);  color: #f44336; }
+
+/* ── AniList card styles (kept from original Settings.css) ── */
+.settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-saved-note {
+  font-size: 11px;
+  color: #4caf50;
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.settings-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
+  box-sizing: border-box;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.settings-input::placeholder {
+  color: var(--text-muted);
+}
+
+.settings-token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-token-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-oauth-intro {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.settings-steps {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+  padding-left: 20px;
+}
+.settings-steps a { color: var(--accent); text-decoration: none; }
+.settings-steps a:hover { text-decoration: underline; }
+.settings-steps code {
+  background: var(--bg-hover);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.settings-user-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+}
+
+.settings-username {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.settings-profile-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.settings-profile-link:hover { text-decoration: underline; }
+
+/* ── Statistics section ── */
+
+/* Tiles strip */
+.stat-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 28px;
+}
+
+.stat-tile {
+  flex: 1;
+  min-width: 110px;
+  padding: 18px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  border-right: 1px solid var(--border);
+  text-align: center;
+}
+.stat-tile:last-child { border-right: none; }
+
+.stat-tile-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.stat-tile-icon {
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.stat-tile-icon svg { width: 100%; height: 100%; }
+
+.stat-tile-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* Two-column ranked lists */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.stat-list-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stat-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stat-list-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+}
+
+.stat-list-col-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.stat-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.stat-list-item:last-child { border-bottom: none; }
+
+.stat-list-rank {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 14px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.stat-list-bar {
+  width: 3px;
+  height: 24px;
+  border-radius: 2px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.stat-list-bar.dim { background: var(--border); }
+
+.stat-list-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex-shrink: 0;
+  background: var(--bg-hover);
+}
+
+.stat-list-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-list-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.stat-list-empty {
+  padding: 20px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-tile { min-width: 90px; padding: 14px 8px 10px; }
+  .stat-tile-value { font-size: 12px; }
+}
+
+/* ── Reading Settings section helpers ── */
+.rs-group {
+  margin-bottom: 28px;
+}
+
+.rs-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.rs-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.rs-setting-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* Override setting-group-label color to be more readable on light card bg */
+.settings-card .setting-group-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Make setting-row label readable against settings-card bg */
+.settings-card .setting-row-label {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+/* ── Shared small button modifier ── */
+.btn-sm {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .sp-layout { flex-direction: column; }
+  .sp-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0;
+  }
+  .sp-sidebar-heading { display: none; }
+  .sp-nav-item { white-space: nowrap; padding: 8px 14px; font-size: 13px; }
+  .sp-content { padding: 20px 16px; }
+  .sp-section-head { flex-direction: column; }
+}

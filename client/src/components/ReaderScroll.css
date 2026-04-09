@@ -1,0 +1,34 @@
+.reader-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: transparent;
+}
+
+.scroll-page-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  line-height: 0;
+}
+
+.scroll-page-img {
+  /* Zoom scales the max-width via --reader-zoom set on the root .reader-page */
+  width: calc(min(900px, 100vw) * var(--reader-zoom, 1));
+  max-width: none;
+  height: auto;
+  display: block;
+}
+
+/* Webtoon mode: full device width, no gaps */
+.reader-scroll.webtoon .scroll-page-wrap {
+  margin: 0;
+  padding: 0;
+}
+.reader-scroll.webtoon .scroll-page-img {
+  width: calc(100vw * var(--reader-zoom, 1));
+  max-width: none;
+}

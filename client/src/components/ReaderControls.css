@@ -1,0 +1,298 @@
+.reader-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  height: 52px;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  transition: opacity 0.25s, transform 0.25s;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reader-bar.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.reader-bar-top {
+  top: 0;
+  transform: translateY(-100%);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.reader-bar-bottom {
+  bottom: 0;
+  transform: translateY(100%);
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.reader-bar.visible.reader-bar-top  { transform: translateY(0); }
+.reader-bar.visible.reader-bar-bottom { transform: translateY(0); }
+
+.reader-bar-titles {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+
+.reader-manga-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 400px;
+}
+
+.reader-chapter-title {
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
+}
+
+/* Top bar right-side buttons */
+.reader-top-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Buttons */
+.reader-btn {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  background: rgba(255,255,255,0.1);
+  color: white;
+  white-space: nowrap;
+  transition: background 0.15s;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.reader-btn:hover { background: rgba(255,255,255,0.2); }
+.reader-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.reader-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.reader-btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+}
+.reader-btn-icon svg { fill: currentColor; flex-shrink: 0; }
+
+/* Page info + scrubber */
+.reader-page-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+.reader-page-info span {
+  font-size: 12px;
+  color: rgba(255,255,255,0.7);
+}
+.reader-scrubber {
+  width: 100%;
+  max-width: 300px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Zoom bar */
+.reader-zoom-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.reader-zoom-slider {
+  width: 90px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.reader-zoom-label {
+  font-size: 11px;
+  color: rgba(255,255,255,0.6);
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Settings panel */
+.reader-settings {
+  position: fixed;
+  top: 52px;
+  right: 0;
+  width: 300px;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
+  background: rgba(18, 18, 18, 0.98);
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Tabs */
+.settings-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.settings-tab {
+  flex: 1;
+  padding: 10px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.settings-tab:hover { color: var(--text-secondary); }
+.settings-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab content */
+.settings-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px;
+}
+
+/* Setting groups */
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setting-group-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Options row */
+.setting-options {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.setting-options-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+/* Setting buttons */
+.setting-btn {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: background 0.15s;
+  text-align: center;
+}
+.setting-btn:hover { background: var(--border); color: var(--text-primary); }
+.setting-btn.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Color swatch buttons */
+.setting-btn-color-black { border-left: 3px solid #000; }
+.setting-btn-color-gray  { border-left: 3px solid #888; }
+.setting-btn-color-white { border-left: 3px solid #ddd; }
+
+/* Toggle row */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.setting-row-info { flex: 1; min-width: 0; }
+.setting-row-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.setting-row-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Toggle switch */
+.toggle-switch {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+.toggle-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s;
+  pointer-events: none;
+}
+.toggle-switch.on .toggle-thumb { transform: translateX(18px); }
+
+/* Select */
+.setting-select {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+}
+.setting-select:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 600px) {
+  .reader-zoom-slider { width: 60px; }
+  .reader-manga-title { max-width: 160px; }
+  .reader-settings { width: 100vw; }
+}

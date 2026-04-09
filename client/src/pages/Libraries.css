@@ -1,0 +1,306 @@
+.lp-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.lp-main {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 36px 24px 60px;
+}
+
+/* ── Page header ── */
+.lp-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.lp-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.lp-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  max-width: 520px;
+}
+
+/* ── Add form card ── */
+.lp-add-card {
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 20px;
+}
+
+.lp-add-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 16px;
+}
+
+/* ── Shared form ── */
+.lp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lp-form-fields {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+}
+
+.lp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lp-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.lp-input {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.lp-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.lp-input::placeholder {
+  color: var(--text-muted);
+}
+
+.lp-input-mono {
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.lp-form-error {
+  font-size: 12px;
+  color: #f44336;
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid rgba(244, 67, 54, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.lp-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ── Library cards ── */
+.lp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lp-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  transition: border-color 0.15s;
+}
+
+.lp-card:hover {
+  border-color: var(--border-hover, color-mix(in srgb, var(--border) 60%, var(--accent)));
+}
+
+.lp-card-editing {
+  border-color: var(--accent);
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.lp-card-edit-header {
+  margin-bottom: 14px;
+}
+
+.lp-card-edit-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.lp-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.lp-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lp-lib-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.lp-lib-badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 9px;
+  flex-shrink: 0;
+}
+
+.lp-card-path-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.lp-folder-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.lp-lib-path {
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-card-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.lp-toggle-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.lp-toggle {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.lp-toggle.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.lp-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  transition: left 0.15s;
+  pointer-events: none;
+}
+
+.lp-toggle.on .lp-toggle-thumb {
+  left: 16px;
+}
+
+.lp-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lp-btn-danger {
+  color: #f44336;
+}
+.lp-btn-danger:hover {
+  background: rgba(244, 67, 54, 0.1);
+  border-color: rgba(244, 67, 54, 0.4);
+}
+
+/* ── Empty state ── */
+.lp-empty {
+  text-align: center;
+  padding: 80px 20px;
+  color: var(--text-secondary);
+}
+
+.lp-empty-icon {
+  font-size: 56px;
+  margin-bottom: 16px;
+}
+
+.lp-empty h2 {
+  font-size: 20px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.lp-empty p {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* ── Responsive ── */
+@media (max-width: 580px) {
+  .lp-page-header { flex-direction: column; }
+  .lp-form-fields { grid-template-columns: 1fr; }
+  .lp-card { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .lp-card-actions { width: 100%; justify-content: flex-end; }
+}

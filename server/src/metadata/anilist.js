@@ -11,6 +11,14 @@ const MEDIA_FIELDS = `
   genres
   averageScore
   coverImage { large medium }
+  staff(perPage: 10, sort: [RELEVANCE]) {
+    edges {
+      role
+      node {
+        name { full }
+      }
+    }
+  }
 `;
 
 const AUTO_SEARCH_QUERY = `
@@ -110,6 +118,18 @@ function normalizeMedia(m) {
         .replace(/&gt;/g, '>')
         .trim()
     : null;
+
+  // Extract author/artist from staff edges (Story & Art, Story, Art roles)
+  let author = null;
+  if (m.staff?.edges?.length > 0) {
+    const AUTHOR_ROLES = new Set(['Story & Art', 'Story', 'Art']);
+    const names = m.staff.edges
+      .filter(e => AUTHOR_ROLES.has(e.role) && e.node?.name?.full)
+      .map(e => e.node.name.full);
+    const unique = [...new Set(names)];
+    if (unique.length > 0) author = unique.join(', ');
+  }
+
   return {
     anilist_id: m.id,
     title: titleStr,
@@ -119,6 +139,7 @@ function normalizeMedia(m) {
     genres: m.genres || [],
     score: m.averageScore ? m.averageScore / 10 : null,
     cover_url: m.coverImage?.large || m.coverImage?.medium || null,
+    author,
     source: 'anilist',
     mal_id: null,
   };

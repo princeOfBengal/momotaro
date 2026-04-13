@@ -7,11 +7,17 @@ client/dist/
 
 # Runtime data (database, thumbnails, cached files)
 data/
-library/
+library*/
 *.db
 *.db-shm
 *.db-wal
 *.db.lock
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Build artifacts / archives
+*.tar.gz
 
 # Environment variables
 .env

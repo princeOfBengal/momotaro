@@ -37,8 +37,15 @@ Triggered automatically on scan (if `METADATA_FETCH_ENABLED=true`) or manually v
 The server searches AniList by the manga's folder name / title, picks the best match, and stores:
 - `anilist_id`, `mal_id`
 - `title`, `description`, `status`, `year`, `genres`, `score`
+- `author` — extracted from the AniList `staff` edges (see below)
 - `track_volumes` — set to `1` if the AniList entry tracks volumes rather than chapters (e.g. light novels)
 - `cover_image` — downloaded and saved as thumbnail
+
+### Author Extraction from Staff
+
+The `MEDIA_FIELDS` GraphQL fragment requests `staff(perPage: 10, sort: [RELEVANCE]) { edges { role node { name { full } } } }`. After fetching, `normalizeMedia()` filters edges to roles `"Story & Art"`, `"Story"`, and `"Art"`, deduplicates the resulting names, and joins them with `", "`. The result is stored in `manga.author`.
+
+If no staff edges match those roles the field is stored as `null` and the author label is omitted on the manga page.
 
 ## Progress Sync
 
@@ -73,10 +80,14 @@ All in `server/src/metadata/anilist.js`:
 
 | Function | Query | Purpose |
 |---|---|---|
-| `searchAnilistManga(token, title)` | `Page.media` | Search by title, returns top results |
-| `getAnilistManga(token, id)` | `Media(id)` | Fetch by known AniList ID |
-| `saveMediaListEntry(token, id, status, progress)` | `SaveMediaListEntry` mutation | Update user's list entry |
-| `getAnilistUser(token)` | `Viewer` | Get logged-in user ID |
+| `fetchFromAniList(title, token)` | `Media(search)` | Auto-fetch best match by title |
+| `searchAniList(query, token, page)` | `Page.media` | Manual search, returns up to 10 results |
+| `fetchByAniListId(id, token)` | `Media(id)` | Fetch by known AniList ID |
+| `saveMediaListEntry(token, id, status, opts)` | `SaveMediaListEntry` mutation | Update user's list entry |
+| `getMediaListEntry(token, userId, mediaId)` | `MediaList` | Fetch user's existing list entry |
+| `getViewer(token)` | `Viewer` | Get logged-in user profile |
+
+All media queries use the shared `MEDIA_FIELDS` fragment which includes `staff` edges for author extraction.
 
 ## `track_volumes` Flag
 

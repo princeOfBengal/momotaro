@@ -122,6 +122,9 @@ export const api = {
   // Optimize
   optimizeManga: (id) => apiFetch(`/api/manga/${id}/optimize`, { method: 'POST' }),
 
+  // Info
+  getMangaInfo: (id) => apiFetch(`/api/manga/${id}/info`),
+
   // Statistics
   getStats: () => apiFetch('/api/stats'),
 

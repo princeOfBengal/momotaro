@@ -35,8 +35,32 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 |---|---|---|
 | GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
+| GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
 | PATCH | `/api/manga/:id` | Update manga settings `{ track_volumes? }` |
 | DELETE | `/api/manga/:id` | Remove manga from DB and delete files on disk |
+
+### Search (`?search=`)
+
+The `search` parameter is matched against title, **author/artist name** (partial, case-insensitive), and genres.
+
+- **Single term** — matches any manga whose title, author, or any genre contains the term as a substring. Artist first and last names both match because the comparison is a substring search against the full stored name.
+- **Comma-separated terms** — treated as a genre filter; manga must have **all** listed genres (exact match, case-insensitive). Author is not checked in this mode.
+
+The same logic applies to the reading-list manga endpoint (`GET /api/reading-lists/:id/manga?search=`).
+
+### `GET /api/manga/:id/info` response
+
+```json
+{
+  "data": {
+    "path": "/library/My Manga",
+    "file_count": 842,
+    "size_mb": 312.47
+  }
+}
+```
+
+`file_count` and `size_mb` are computed by an async recursive directory walk at request time (not cached).
 
 ---
 
@@ -94,6 +118,8 @@ Page images are streamed with `fs.createReadStream`. The stream is destroyed if 
 | GET | `/api/anilist/search?q=&page=` | Search AniList by title (manual search) |
 | GET | `/api/manga/:id/anilist-status` | Get user's AniList list entry for this manga |
 | PATCH | `/api/manga/:id/anilist-progress` | Manually update AniList progress |
+
+Both `refresh-metadata` and `apply-metadata` write the `author` field in addition to the standard metadata fields. See [anilist.md](./anilist.md) for how the author name is extracted from the AniList staff list.
 
 ---
 

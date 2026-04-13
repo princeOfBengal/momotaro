@@ -107,6 +107,47 @@ CBZ files are extracted to `CBZ_CACHE_DIR/<chapterId>/` on first access. Subsequ
 
 Image files are renamed to zero-padded indices (`00000.jpg`, `00001.png`, …) to ensure correct sort order regardless of original archive entry names.
 
+## Local JSON Metadata
+
+`localMetadata.js` → `findLocalMetadata(mangaPath)` searches for a JSON sidecar file in the manga directory (or its first chapter subdirectory) and maps it onto the internal metadata shape.
+
+**File priority order:**
+
+1. Explicit names: `metadata.json`, `info.json`, `gallery.json`, `comic.json`, `book.json`
+2. Image sidecar (e.g. `cover.png.json`)
+3. Any other `*.json` file
+
+**Fields extracted:**
+
+| Internal field | JSON keys tried (in order) |
+|---|---|
+| `title` | `title`, `Title`, `name`, `Name` |
+| `author` | `artist`, `Artist`, `author`, `Author`, `circle`, `Circle` |
+| `description` | `description`, `Description`, `summary`, `Summary` |
+| `genres` | `tags`, `Tags`, `genres`, `Genres`, `categories`, `Categories` |
+| `year` | `year`, `Year`, `published`, `date` (first 4 chars parsed as year) |
+| `score` | `score`, `Score`, `rating`, `Rating` (auto-scaled from 0–100 to 0–10 if > 10) |
+
+Local metadata is only applied when `metadata_source` is not `'anilist'` — AniList-sourced metadata is never overwritten by a local file.
+
+## Stale Record Pruning
+
+The scanner removes DB entries that no longer reflect the filesystem. Pruning happens at two levels:
+
+### Chapter-level (inside `scanMangaDirectory`)
+
+After building the list of valid chapter entries on disk, any DB chapter whose `folder_name` is not in that list is deleted. This runs on every call to `scanMangaDirectory`, including watcher-triggered calls.
+
+### Manga-level (inside `scanMangaDirectory` and `scanLibrary`)
+
+**No chapters found:** After the chapter-deletion pass, if `chapterEntries` is empty (the folder contains no recognisable chapter files or CBZ archives), the manga record is deleted and the function returns early. This covers empty folders, folders containing only metadata/image files, and folders where all chapters were deleted.
+
+**Unreadable folder:** If `fs.readdirSync` throws (permissions error, or folder disappeared between the watcher event firing and the scan executing), the manga record is deleted before returning to avoid orphaned DB rows.
+
+**Deleted folder (library-level pass):** After `scanLibrary` finishes iterating over all currently-present directories, it queries all manga belonging to that library and deletes any whose `path` no longer exists on disk. This handles the case where a manga folder is deleted between full scans — the file watcher does not catch directory removal events (only `unlink` for files, not `unlinkDir`).
+
+In all pruning cases, the thumbnail file at `THUMBNAIL_DIR/<cover_image>` is also deleted. The `ON DELETE CASCADE` constraint on `chapters`, `pages`, and `progress` handles child-record cleanup automatically.
+
 ## Thumbnail Generation
 
 Sharp resizes the first page of the lowest-numbered chapter to `300×430 px` WebP and saves it to `THUMBNAIL_DIR/<mangaId>.webp`. Aspect ratio is preserved with `cover` fit (cropped to fill). Thumbnails are only generated when none exists yet — re-scanning an existing manga will not regenerate its cover.
@@ -114,3 +155,5 @@ Sharp resizes the first page of the lowest-numbered chapter to `300×430 px` Web
 ## File Watcher
 
 `chokidar` watches all configured library paths at depth 0 (top-level entries only). Changes are debounced 3000 ms per manga directory to avoid thrashing during multi-file copy operations. On change, `scanMangaDirectory()` is called for the affected manga only — not a full rescan.
+
+**Note:** The watcher listens to `add`, `addDir`, `change`, and `unlink` events but **not** `unlinkDir`. Deleting an entire manga folder will not trigger a watcher event. The manga record is cleaned up the next time a full library scan runs (via the library-level pruning pass described above).

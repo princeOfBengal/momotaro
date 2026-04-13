@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
+const config = require('../config');
 const { parseChapterInfo, getChapterPages, detectChapterType } = require('./chapterParser');
 const { generateThumbnail } = require('./thumbnailGenerator');
 const { findLocalMetadata } = require('./localMetadata');
@@ -36,6 +37,17 @@ async function withLimit(limit, items, fn) {
 
 function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Delete a manga record and its thumbnail file.
+ * CASCADE on the DB handles chapters / pages / progress automatically.
+ */
+function removeManga(db, manga) {
+  db.prepare('DELETE FROM manga WHERE id = ?').run(manga.id);
+  if (manga.cover_image) {
+    try { fs.unlinkSync(path.join(config.THUMBNAIL_DIR, manga.cover_image)); } catch (_) {}
+  }
 }
 
 /**
@@ -86,6 +98,18 @@ async function scanLibrary(library) {
     }
   }
 
+  // Remove DB entries for manga whose folder no longer exists on disk
+  const db = getDb();
+  const libraryManga = db.prepare(
+    'SELECT id, path, cover_image FROM manga WHERE library_id = ?'
+  ).all(library.id);
+  for (const m of libraryManga) {
+    if (!fs.existsSync(m.path)) {
+      removeManga(db, m);
+      console.log(`[Scanner] Removed deleted manga: ${path.basename(m.path)}`);
+    }
+  }
+
   console.log(`[Scanner] Done scanning library "${library.name}".`);
 }
 
@@ -124,6 +148,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
           genres          = ?,
           year            = COALESCE(?, year),
           score           = COALESCE(?, score),
+          author          = COALESCE(?, author),
           metadata_source = 'local',
           updated_at      = unixepoch()
         WHERE id = ?
@@ -133,6 +158,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
         JSON.stringify(localMeta.genres),
         localMeta.year,
         localMeta.score,
+        localMeta.author,
         mangaId
       );
       console.log(`[Scanner] Applied local metadata for: ${folderName}`);
@@ -144,6 +170,9 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
   try {
     entries = fs.readdirSync(mangaPath);
   } catch {
+    // Folder unreadable or disappeared — remove the manga record we may have just created
+    const mangaRecord = db.prepare('SELECT id, cover_image FROM manga WHERE id = ?').get(mangaId);
+    if (mangaRecord) removeManga(db, mangaRecord);
     return;
   }
 
@@ -161,6 +190,14 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
     if (!scannedSet.has(row.folder_name)) {
       db.prepare('DELETE FROM chapters WHERE id = ?').run(row.id);
     }
+  }
+
+  // No recognised chapter files found — remove the manga entirely
+  if (chapterEntries.length === 0) {
+    const mangaRecord = db.prepare('SELECT id, cover_image FROM manga WHERE id = ?').get(mangaId);
+    if (mangaRecord) removeManga(db, mangaRecord);
+    console.log(`[Scanner] Removed manga with no chapters: ${folderName}`);
+    return;
   }
 
   let coverPage = null;

@@ -123,9 +123,19 @@ function normalizeLocalMeta(raw) {
     }
   }
 
+  // Author / artist — try common key names in priority order
+  const author =
+    str(raw.artist) ||
+    str(raw.Artist) ||
+    str(raw.author) ||
+    str(raw.Author) ||
+    str(raw.circle) ||
+    str(raw.Circle) ||
+    null;
+
   if (!title && genres.length === 0 && !description) return null;
 
-  return { title, description, genres, year, score };
+  return { title, description, genres, year, score, author };
 }
 
 /** Return a trimmed non-empty string, or null. */

@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import MangaCard from '../components/MangaCard';
 import './Library.css';
 
 export default function Library() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [manga, setManga] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -15,11 +16,11 @@ export default function Library() {
 
   // Libraries
   const [libraries, setLibraries] = useState([]);
-  const [activeLibrary, setActiveLibrary] = useState(null); // null = all
+  const [activeLibrary, setActiveLibrary] = useState(location.state?.library ?? null);
 
   // Reading lists
   const [readingLists, setReadingLists] = useState([]);
-  const [activeList, setActiveList] = useState(null); // null = not filtering by list
+  const [activeList, setActiveList] = useState(location.state?.list ?? null);
 
   // New list creation
   // Mobile drawer
@@ -139,7 +140,7 @@ export default function Library() {
           <input
             className="library-search"
             type="search"
-            placeholder="Search by title or genre (e.g. Romance, Drama)"
+            placeholder="Search by title, artist, or genre (e.g. Romance, Drama)"
             value={search}
             onChange={e => setSearch(e.target.value)}
           />

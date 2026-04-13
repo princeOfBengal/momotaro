@@ -26,6 +26,7 @@ function applyMetadataToDb(db, mangaId, result) {
       score           = ?,
       anilist_id      = ?,
       mal_id          = ?,
+      author          = ?,
       metadata_source = ?,
       updated_at      = unixepoch()
     WHERE id = ?
@@ -38,6 +39,7 @@ function applyMetadataToDb(db, mangaId, result) {
     result.score,
     result.anilist_id,
     result.mal_id,
+    result.author ?? null,
     result.source,
     mangaId
   );

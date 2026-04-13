@@ -20,21 +20,25 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 
 - Loads manga via `GET /api/library`
 - Sidebar filter by library or reading list
-- Search bar with 300 ms debounce (title or comma-separated genres)
+- Search bar with 300 ms debounce — matches against title, **author/artist name** (partial), or genre. Comma-separated terms filter by all listed genres simultaneously.
 - Sort by: A–Z, recently updated, year
 - Scan button triggers `POST /api/scan`
 - Click manga card → navigate to `/manga/:id`
+- **Filter initialisation from navigation state** — on mount, `activeLibrary` and `activeList` are seeded from `location.state.library` and `location.state.list` (React Router state). This allows the MangaDetail nav drawer to navigate back to a specific library or reading list without URL parameters.
 - **First-time setup state**: when no libraries are configured (`libraries.length === 0`) and no search or list filter is active, shows a "Welcome to Momotaro" prompt with a button that navigates to Settings → Library Management tab
 
 ### MangaDetail (`src/pages/MangaDetail.jsx`)
 
-- Shows cover, metadata (title, status, year, genres, score, description)
+- Shows cover, metadata (title, author/artist, status, year, genres, score, description)
+  - `author` is displayed below the title when present; the element is omitted entirely when `manga.author` is falsy
 - Chapter list sorted by `number ?? volume` (ascending)
 - Chapter display label logic:
   - `vol !== null && number !== null` → `Vol. N Ch. N`
   - `vol !== null` → `Volume N`
   - `number !== null` → `Chapter N` (or `Volume N` if `track_volumes`)
   - fallback → `folder_name`
+- **Nav drawer** — hamburger button (☰) in the navbar opens a slide-in drawer listing all libraries and reading lists. Clicking an entry navigates to `/` and passes `{ library: id }` or `{ list: id }` in React Router location state, which `Library` reads on mount to pre-select the filter.
+- **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, total file count, and folder size in MB. The request is made lazily on first open and the result is cached for the lifetime of the page.
 - "Refresh Metadata" button → `POST /api/manga/:id/refresh-metadata`
 - Manual AniList search modal → `GET /api/anilist/search?q=` → `POST /api/manga/:id/apply-metadata`
 - Progress badge on each chapter (read / current / unread)

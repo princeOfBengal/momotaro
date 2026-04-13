@@ -13,11 +13,13 @@ cd momotaro
 mkdir library
 # Drop manga folders into ./library/
 
-# Start the server
+# Build and start
 docker compose up -d --build
 ```
 
-Open **http://localhost:8080** in your browser. Click **Scan Library** to index your manga.
+Open **http://localhost:3000** in your browser. Click **Scan Library** to index your manga.
+
+Your library data (database, thumbnails) is stored in a Docker named volume (`momotaro_data`) so it persists across restarts and image rebuilds.
 
 ## Library Structure
 
@@ -66,14 +68,22 @@ Edit `docker-compose.yml` to change the port or library path:
 
 ```yaml
 services:
-  client:
+  momotaro:
     ports:
-      - "8080:80"   # Change 8080 to your preferred port
-  server:
+      - "3000:3000"   # Change the left side to your preferred host port
     volumes:
-      - /your/manga/path:/library:ro   # Point to your manga folder
-      - ./data:/app/data               # Database and thumbnails
+      - /your/manga/path:/app/library:ro   # Absolute path to your manga folder
+      - momotaro_data:/app/data            # Database and thumbnails (named volume)
 ```
+
+Available environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3000` | Internal port the server listens on |
+| `SCAN_ON_STARTUP` | `true` | Automatically scan library when the container starts |
+| `METADATA_FETCH_ENABLED` | `true` | Fetch metadata from AniList/MAL during scans |
+| `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |
 
 ## Development
 

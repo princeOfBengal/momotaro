@@ -134,6 +134,7 @@ function migrate(db) {
   addColumnIfMissing(db, 'libraries', 'show_in_all', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing(db, 'chapters',  'volume',      'REAL');
   addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
+  addColumnIfMissing(db, 'manga',     'author',       'TEXT');
 }
 
 /**

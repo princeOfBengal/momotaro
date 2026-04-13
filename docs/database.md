@@ -37,6 +37,7 @@ One row per manga folder.
 | `folder_name` | TEXT | Bare folder name |
 | `path` | TEXT UNIQUE | Absolute path |
 | `title` | TEXT | Display title (from metadata or folder name) |
+| `author` | TEXT | Artist / author name (from local JSON or AniList staff) |
 | `description` | TEXT | From AniList/MAL |
 | `cover_image` | TEXT | Relative path under `THUMBNAIL_DIR` |
 | `status` | TEXT | e.g. `FINISHED`, `RELEASING` |

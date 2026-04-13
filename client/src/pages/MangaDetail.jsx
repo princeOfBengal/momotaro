@@ -380,6 +380,18 @@ export default function MangaDetail() {
   const [optimizePhase, setOptimizePhase] = useState('confirm'); // 'confirm' | 'running' | 'done'
   const [optimizeResult, setOptimizeResult] = useState(null);
 
+  // More Info
+  const [showInfo, setShowInfo] = useState(false);
+  const [infoData, setInfoData] = useState(null);
+  const [infoLoading, setInfoLoading] = useState(false);
+  const [infoError, setInfoError] = useState(null);
+
+  // Nav drawer (libraries + reading lists)
+  const [showNavDrawer, setShowNavDrawer] = useState(false);
+  const [navLibraries, setNavLibraries] = useState([]);
+  const [navLists, setNavLists] = useState([]);
+  const [navLoaded, setNavLoaded] = useState(false);
+
   useEffect(() => {
     setLoading(true);
     setAnilistStatus(null);
@@ -470,6 +482,11 @@ export default function MangaDetail() {
   if (loading) return (
     <div className="detail-page">
       <nav className="navbar">
+        <button className="detail-nav-hamburger" onClick={openNavDrawer} aria-label="Browse libraries">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+            <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
+          </svg>
+        </button>
         <Link to="/" className="btn btn-ghost">← Back</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
@@ -482,6 +499,11 @@ export default function MangaDetail() {
   if (error) return (
     <div className="detail-page">
       <nav className="navbar">
+        <button className="detail-nav-hamburger" onClick={openNavDrawer} aria-label="Browse libraries">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+            <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
+          </svg>
+        </button>
         <Link to="/" className="btn btn-ghost">← Back</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
@@ -536,6 +558,42 @@ export default function MangaDetail() {
     setShowOptimize(true);
   }
 
+  async function openNavDrawer() {
+    setShowNavDrawer(true);
+    if (navLoaded) return;
+    try {
+      const [libs, lists] = await Promise.all([api.getLibraries(), api.getReadingLists()]);
+      setNavLibraries(libs);
+      setNavLists(lists);
+      setNavLoaded(true);
+    } catch { /* silently ignore — drawer still opens */ }
+  }
+
+  function goToLibrary(libraryId) {
+    setShowNavDrawer(false);
+    navigate('/', { state: { library: libraryId } });
+  }
+
+  function goToList(listId) {
+    setShowNavDrawer(false);
+    navigate('/', { state: { list: listId } });
+  }
+
+  async function handleOpenInfo() {
+    setShowInfo(true);
+    if (infoData) return; // already fetched
+    setInfoLoading(true);
+    setInfoError(null);
+    try {
+      const data = await api.getMangaInfo(id);
+      setInfoData(data);
+    } catch (err) {
+      setInfoError(err.message);
+    } finally {
+      setInfoLoading(false);
+    }
+  }
+
   async function handleDeleteConfirmed() {
     setDeleting(true);
     try {
@@ -551,6 +609,11 @@ export default function MangaDetail() {
   return (
     <div className="detail-page">
       <nav className="navbar">
+        <button className="detail-nav-hamburger" onClick={openNavDrawer} aria-label="Browse libraries">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+            <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
+          </svg>
+        </button>
         <Link to="/" className="btn btn-ghost">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
@@ -588,6 +651,10 @@ export default function MangaDetail() {
 
           <div className="detail-info">
             <h1 className="detail-title">{manga.title}</h1>
+
+            {manga.author && (
+              <p className="detail-author">{manga.author}</p>
+            )}
 
             <div className="detail-meta">
               {manga.status && <span className={`detail-status status-${manga.status.toLowerCase()}`}>{manga.status}</span>}
@@ -636,6 +703,9 @@ export default function MangaDetail() {
               </button>
               <button className="btn btn-ghost" onClick={openOptimizeModal}>
                 Optimize
+              </button>
+              <button className="btn btn-ghost" onClick={handleOpenInfo}>
+                More Info
               </button>
               {readingLists.length > 0 && (
                 <div className="rl-dropdown-wrap" ref={listDropdownRef}>
@@ -910,6 +980,79 @@ export default function MangaDetail() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Nav drawer */}
+      {showNavDrawer && (
+        <div className="detail-nav-backdrop" onClick={() => setShowNavDrawer(false)} />
+      )}
+      <div className={`detail-nav-drawer${showNavDrawer ? ' open' : ''}`}>
+        <div className="detail-nav-drawer-header">
+          <span className="detail-nav-drawer-title">Browse</span>
+          <button className="detail-nav-drawer-close" onClick={() => setShowNavDrawer(false)} aria-label="Close">✕</button>
+        </div>
+        <div className="detail-nav-drawer-body">
+          {navLibraries.length > 1 && (
+            <>
+              <p className="detail-nav-section-label">Libraries</p>
+              <button className="detail-nav-item" onClick={() => goToLibrary(null)}>
+                All Libraries
+              </button>
+              {navLibraries.map(lib => (
+                <button key={lib.id} className="detail-nav-item" onClick={() => goToLibrary(lib.id)}>
+                  {lib.name}
+                  <span className="detail-nav-count">{lib.manga_count}</span>
+                </button>
+              ))}
+              <div className="detail-nav-divider" />
+            </>
+          )}
+          {navLists.length > 0 && (
+            <>
+              <p className="detail-nav-section-label">Reading Lists</p>
+              {navLists.map(list => (
+                <button key={list.id} className="detail-nav-item" onClick={() => goToList(list.id)}>
+                  {list.name}
+                  <span className="detail-nav-count">{list.manga_count}</span>
+                </button>
+              ))}
+            </>
+          )}
+          {!navLoaded && (
+            <div className="detail-nav-loading"><div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} /></div>
+          )}
+        </div>
+      </div>
+
+      {showInfo && (
+        <div className="modal-backdrop" onClick={() => setShowInfo(false)}>
+          <div className="modal-box info-modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">More Info</h2>
+              <button className="modal-close" onClick={() => setShowInfo(false)}>✕</button>
+            </div>
+            <div className="info-modal-body">
+              {infoLoading && <div className="loading-center"><div className="spinner" /></div>}
+              {infoError && <p className="info-modal-error">{infoError}</p>}
+              {infoData && (
+                <dl className="info-modal-list">
+                  <div className="info-modal-row">
+                    <dt className="info-modal-label">File Path</dt>
+                    <dd className="info-modal-value info-modal-path">{infoData.path}</dd>
+                  </div>
+                  <div className="info-modal-row">
+                    <dt className="info-modal-label">Files Found</dt>
+                    <dd className="info-modal-value">{infoData.file_count.toLocaleString()}</dd>
+                  </div>
+                  <div className="info-modal-row">
+                    <dt className="info-modal-label">Folder Size</dt>
+                    <dd className="info-modal-value">{infoData.size_mb.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB</dd>
+                  </div>
+                </dl>
+              )}
+            </div>
           </div>
         </div>
       )}

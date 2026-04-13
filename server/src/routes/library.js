@@ -185,10 +185,10 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   if (search) {
     const terms = search.split(',').map(t => t.trim()).filter(Boolean);
     if (terms.length === 1) {
-      query += ` AND (m.title LIKE ? OR EXISTS (
+      query += ` AND (m.title LIKE ? OR m.author LIKE ? OR EXISTS (
         SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) LIKE LOWER(?)
       ))`;
-      params.push(`%${terms[0]}%`, `%${terms[0]}%`);
+      params.push(`%${terms[0]}%`, `%${terms[0]}%`, `%${terms[0]}%`);
     } else {
       for (const term of terms) {
         query += ` AND EXISTS (
@@ -256,11 +256,11 @@ router.get('/library', asyncWrapper(async (req, res) => {
   if (search) {
     const terms = search.split(',').map(t => t.trim()).filter(Boolean);
     if (terms.length === 1) {
-      // Single term: title LIKE or genre LIKE (partial, case-insensitive)
-      query += ` AND (m.title LIKE ? OR EXISTS (
+      // Single term: title LIKE, author LIKE, or genre LIKE (partial, case-insensitive)
+      query += ` AND (m.title LIKE ? OR m.author LIKE ? OR EXISTS (
         SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) LIKE LOWER(?)
       ))`;
-      params.push(`%${terms[0]}%`, `%${terms[0]}%`);
+      params.push(`%${terms[0]}%`, `%${terms[0]}%`, `%${terms[0]}%`);
     } else {
       // Comma-separated: manga must have ALL listed genres (exact, case-insensitive)
       for (const term of terms) {
@@ -379,6 +379,48 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
 router.post('/scan', asyncWrapper(async (req, res) => {
   res.json({ message: 'Scan started' });
   runFullScan().catch(err => console.error('[Scan] Error:', err.message));
+}));
+
+// GET /api/manga/:id/info — file path, file count, and folder size
+router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT id, path FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  async function walkDir(dirPath) {
+    let fileCount = 0;
+    let sizeBytes = 0;
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      const results = await Promise.all(entries.map(async entry => {
+        const full = path.join(dirPath, entry.name);
+        try {
+          if (entry.isFile()) {
+            const { size } = await fs.promises.stat(full);
+            return { fileCount: 1, sizeBytes: size };
+          } else if (entry.isDirectory()) {
+            return walkDir(full);
+          }
+        } catch { /* skip inaccessible entries */ }
+        return { fileCount: 0, sizeBytes: 0 };
+      }));
+      for (const r of results) {
+        fileCount += r.fileCount;
+        sizeBytes += r.sizeBytes;
+      }
+    } catch { /* skip inaccessible directory */ }
+    return { fileCount, sizeBytes };
+  }
+
+  const { fileCount, sizeBytes } = await walkDir(manga.path);
+
+  res.json({
+    data: {
+      path:       manga.path,
+      file_count: fileCount,
+      size_mb:    Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+    },
+  });
 }));
 
 // ── Statistics ───────────────────────────────────────────────────────────────

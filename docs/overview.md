@@ -5,7 +5,7 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
+| --- | --- |
 | Backend | Node.js + Express |
 | Database | SQLite via `better-sqlite3` |
 | Image processing | `sharp` (WebP thumbnails) |
@@ -17,7 +17,7 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 
 ## Directory Structure
 
-```
+```text
 momotaro/
 ├── server/              # Express API server
 │   └── src/
@@ -26,7 +26,7 @@ momotaro/
 │       ├── db/database.js     # SQLite init + migrations
 │       ├── routes/            # API route handlers
 │       ├── scanner/           # Library scanning logic
-│       ├── metadata/          # AniList / Jikan integration
+│       ├── metadata/          # AniList / Jikan / Doujinshi.info integration
 │       └── watcher/           # File system watcher
 ├── client/              # React SPA
 │   └── src/
@@ -64,7 +64,7 @@ docker compose up --build
 ## Environment Variables
 
 | Variable | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `PORT` | `3000` | Server listen port |
 | `DATA_PATH` | `./data` | Where DB, thumbnails, CBZ cache are stored |
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |

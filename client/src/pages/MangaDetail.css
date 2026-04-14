@@ -618,6 +618,44 @@
   background: var(--bg-hover);
   color: var(--text-muted);
 }
+.meta-status-badge.meta-status-doujinshi {
+  background: rgba(255, 152, 0, 0.15);
+  color: #ff9800;
+}
+.meta-status-badge.meta-status-doujinshi a {
+  color: inherit;
+  text-decoration: none;
+}
+.meta-status-badge.meta-status-doujinshi a:hover { text-decoration: underline; }
+
+/* Metadata source picker (inside modal) */
+.meta-source-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.meta-source-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.meta-source-select {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 5px 8px;
+  cursor: pointer;
+  outline: none;
+}
+
+.meta-source-select:focus {
+  border-color: var(--accent);
+}
 
 .metadata-msg {
   font-size: 13px;

@@ -113,6 +113,114 @@ function AnilistSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
   );
 }
 
+// ── Doujinshi.Info Search Modal ────────────────────────────────────────────────
+function DoujinshiSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
+  const [query, setQuery] = useState(defaultQuery || '');
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [applying, setApplying] = useState(null);
+  const [searchError, setSearchError] = useState(null);
+
+  const doSearch = useCallback(async (q) => {
+    if (!q.trim()) return;
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const data = await api.searchDoujinshi(q.trim());
+      setResults(data);
+      if (data.length === 0) setSearchError('No results found.');
+    } catch (err) {
+      setSearchError('Search failed: ' + err.message);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (defaultQuery) doSearch(defaultQuery);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleApply(result) {
+    setApplying(result.doujinshi_id);
+    try {
+      const updated = await api.applyDoujinshiMetadata(mangaId, result.doujinshi_id);
+      onApplied(updated);
+    } catch (err) {
+      alert('Failed to apply: ' + err.message);
+      setApplying(null);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter') doSearch(query);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Search Doujinshi.info</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="modal-search-row">
+          <input
+            className="modal-search-input"
+            type="text"
+            placeholder="Search title..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            autoFocus
+          />
+          <button
+            className="btn btn-primary"
+            onClick={() => doSearch(query)}
+            disabled={searching || !query.trim()}
+          >
+            {searching ? '...' : 'Search'}
+          </button>
+        </div>
+
+        <div className="modal-results">
+          {searchError && <p className="modal-error">{searchError}</p>}
+          {results.map(r => (
+            <div key={r.doujinshi_id} className="modal-result-row">
+              {r.cover_url && (
+                <img
+                  className="modal-result-cover"
+                  src={r.cover_url}
+                  alt={r.title}
+                  loading="lazy"
+                />
+              )}
+              <div className="modal-result-info">
+                <p className="modal-result-title">{r.title}</p>
+                <p className="modal-result-meta">
+                  {r.year && <span>{r.year}</span>}
+                  {r.status && <span>{r.status}</span>}
+                </p>
+                {r.genres && r.genres.length > 0 && (
+                  <p className="modal-result-genres">
+                    {r.genres.slice(0, 4).join(' · ')}
+                  </p>
+                )}
+              </div>
+              <button
+                className="btn btn-primary modal-result-btn"
+                disabled={applying === r.doujinshi_id}
+                onClick={() => handleApply(r)}
+              >
+                {applying === r.doujinshi_id ? '...' : 'Use'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── AniList Status Panel ───────────────────────────────────────────────────────
 const STATUS_LABELS = {
   CURRENT:   'Reading',
@@ -349,6 +457,8 @@ export default function MangaDetail() {
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaMessage, setMetaMessage] = useState(null); // { type: 'success'|'error'|'notfound', text }
   const [showSearch, setShowSearch] = useState(false);
+  const [showDoujinshiSearch, setShowDoujinshiSearch] = useState(false);
+  const [metaSource, setMetaSource] = useState('anilist'); // 'anilist' | 'doujinshi'
   const [savingTrackSetting, setSavingTrackSetting] = useState(false);
 
   // AniList reading status
@@ -471,12 +581,40 @@ export default function MangaDetail() {
     }
   }
 
+  async function handleFetchDoujinshiMetadata() {
+    setFetchingMeta(true);
+    setMetaMessage(null);
+    try {
+      const result = await api.refreshDoujinshiMetadata(id);
+      if (result.found) {
+        setManga(prev => ({ ...prev, ...result.data, chapters: prev.chapters, progress: prev.progress }));
+        setCoverBust(Date.now());
+        setMetaMessage({ type: 'success', text: 'Metadata fetched from Doujinshi.info.' });
+      } else {
+        setMetaMessage({ type: 'notfound', text: result.message || 'No match found on Doujinshi.info.' });
+      }
+    } catch (err) {
+      setMetaMessage({ type: 'error', text: 'Error: ' + err.message });
+    } finally {
+      setFetchingMeta(false);
+    }
+  }
+
   function handleMetadataApplied(updated) {
     setManga(prev => ({ ...prev, ...updated, chapters: prev.chapters, progress: prev.progress }));
     setCoverBust(Date.now());
     setShowSearch(false);
+    setShowDoujinshiSearch(false);
     setShowMetaModal(true);
     setMetaMessage({ type: 'success', text: 'Metadata applied from AniList.' });
+  }
+
+  function handleDoujinshiMetadataApplied(updated) {
+    setManga(prev => ({ ...prev, ...updated, chapters: prev.chapters, progress: prev.progress }));
+    setCoverBust(Date.now());
+    setShowDoujinshiSearch(false);
+    setShowMetaModal(true);
+    setMetaMessage({ type: 'success', text: 'Metadata applied from Doujinshi.info.' });
   }
 
   if (loading) return (
@@ -822,25 +960,48 @@ export default function MangaDetail() {
         <div className="modal-backdrop" onClick={() => setShowMetaModal(false)}>
           <div className="modal-box meta-modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h2 className="modal-title">AniList Metadata</h2>
+              <h2 className="modal-title">Metadata</h2>
               <button className="modal-close" onClick={() => setShowMetaModal(false)}>✕</button>
             </div>
             <div className="meta-modal-body">
+              <div className="meta-source-row">
+                <label className="meta-source-label">Source</label>
+                <select
+                  className="meta-source-select"
+                  value={metaSource}
+                  onChange={e => { setMetaSource(e.target.value); setMetaMessage(null); }}
+                >
+                  <option value="anilist">AniList</option>
+                  <option value="doujinshi">Doujinshi.info</option>
+                </select>
+              </div>
+
               <p className="meta-modal-desc">
-                Link this manga to an AniList entry to populate its title, cover image, description,
-                genres, score, and release status. Linked metadata will not be overwritten by local JSON files.
+                {metaSource === 'anilist'
+                  ? 'Link this manga to an AniList entry to populate its title, cover image, description, genres, score, and release status.'
+                  : 'Link this manga to a Doujinshi.info entry to populate its title, cover image, year, and tags.'}
+                {' '}Linked metadata will not be overwritten by local JSON files.
               </p>
 
               <div className="meta-modal-status-row">
                 {hasMetadata ? (
                   manga.metadata_source === 'local'
                     ? <span className="meta-status-badge meta-status-local">Local file</span>
-                    : <span className="meta-status-badge meta-status-anilist">
-                        Linked to AniList
-                        {manga.anilist_id && (
-                          <a href={`https://anilist.co/manga/${manga.anilist_id}`} target="_blank" rel="noreferrer"> ↗</a>
-                        )}
-                      </span>
+                    : manga.metadata_source === 'anilist'
+                      ? <span className="meta-status-badge meta-status-anilist">
+                          Linked to AniList
+                          {manga.anilist_id && (
+                            <a href={`https://anilist.co/manga/${manga.anilist_id}`} target="_blank" rel="noreferrer"> ↗</a>
+                          )}
+                        </span>
+                      : manga.metadata_source === 'doujinshi'
+                        ? <span className="meta-status-badge meta-status-doujinshi">
+                            Linked to Doujinshi.info
+                            {manga.doujinshi_id && (
+                              <a href={`https://doujinshi.info/book/${manga.doujinshi_id}`} target="_blank" rel="noreferrer"> ↗</a>
+                            )}
+                          </span>
+                        : <span className="meta-status-badge meta-status-anilist">Linked</span>
                 ) : (
                   <span className="meta-status-badge meta-status-none">No metadata linked</span>
                 )}
@@ -852,37 +1013,71 @@ export default function MangaDetail() {
                 </div>
               )}
 
-              <div className="meta-modal-actions">
-                <div className="meta-modal-action-row">
-                  <div className="meta-modal-action-info">
-                    <span className="meta-modal-action-label">{hasMetadata ? 'Re-fetch Metadata' : 'Fetch Metadata'}</span>
-                    <span className="meta-modal-action-desc">
-                      Automatically search AniList by this manga's title and apply the closest match.
-                    </span>
+              {metaSource === 'anilist' ? (
+                <div className="meta-modal-actions">
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">{hasMetadata ? 'Re-fetch Metadata' : 'Fetch Metadata'}</span>
+                      <span className="meta-modal-action-desc">
+                        Automatically search AniList by this manga's title and apply the closest match.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleFetchMetadata}
+                      disabled={fetchingMeta}
+                    >
+                      {fetchingMeta ? 'Fetching…' : hasMetadata ? 'Re-fetch' : 'Fetch'}
+                    </button>
                   </div>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={handleFetchMetadata}
-                    disabled={fetchingMeta}
-                  >
-                    {fetchingMeta ? 'Fetching…' : hasMetadata ? 'Re-fetch' : 'Fetch'}
-                  </button>
-                </div>
-                <div className="meta-modal-action-row">
-                  <div className="meta-modal-action-info">
-                    <span className="meta-modal-action-label">Search Manually</span>
-                    <span className="meta-modal-action-desc">
-                      Browse AniList search results and choose the correct entry yourself.
-                    </span>
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">Search Manually</span>
+                      <span className="meta-modal-action-desc">
+                        Browse AniList search results and choose the correct entry yourself.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => { setShowMetaModal(false); setShowSearch(true); }}
+                    >
+                      Search
+                    </button>
                   </div>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => { setShowMetaModal(false); setShowSearch(true); }}
-                  >
-                    Search
-                  </button>
                 </div>
-              </div>
+              ) : (
+                <div className="meta-modal-actions">
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">{hasMetadata ? 'Re-fetch Metadata' : 'Fetch Metadata'}</span>
+                      <span className="meta-modal-action-desc">
+                        Automatically search Doujinshi.info by this manga's title and apply the closest match.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleFetchDoujinshiMetadata}
+                      disabled={fetchingMeta}
+                    >
+                      {fetchingMeta ? 'Fetching…' : hasMetadata ? 'Re-fetch' : 'Fetch'}
+                    </button>
+                  </div>
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">Search Manually</span>
+                      <span className="meta-modal-action-desc">
+                        Browse Doujinshi.info search results and choose the correct entry yourself.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => { setShowMetaModal(false); setShowDoujinshiSearch(true); }}
+                    >
+                      Search
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -894,6 +1089,15 @@ export default function MangaDetail() {
           defaultQuery={manga.title}
           onApplied={handleMetadataApplied}
           onClose={() => setShowSearch(false)}
+        />
+      )}
+
+      {showDoujinshiSearch && (
+        <DoujinshiSearchModal
+          mangaId={id}
+          defaultQuery={manga.title}
+          onApplied={handleDoujinshiMetadataApplied}
+          onClose={() => setShowDoujinshiSearch(false)}
         />
       )}
 

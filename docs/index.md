@@ -13,6 +13,7 @@ Quick-reference documentation for the Momotaro self-hosted manga server.
 | [reader.md](./reader.md) | Reader modes, gesture system internals, progress saving, controls visibility |
 | [frontend.md](./frontend.md) | React routing, pages, components, API client, PWA config |
 | [anilist.md](./anilist.md) | Per-device OAuth, metadata fetch, progress sync, rate limiting, `track_volumes` flag |
+| [doujinshi.md](./doujinshi.md) | Email/password auth, search mechanics (space→underscore workaround), normalization, metadata priority |
 
 ## Quick Start
 
@@ -30,6 +31,7 @@ docker compose up --build                 # UI  on :8080
 - **Single SQLite DB** — `better-sqlite3` with WAL mode, `synchronous = NORMAL`, and a 32 MB page cache. All writes are synchronous on the server thread; no connection pooling needed.
 - **Incremental scanning** — The scanner stores each chapter's file mtime in `chapters.file_mtime`. On re-scan, chapters whose mtime is unchanged and already have indexed pages are skipped entirely, making repeated scans of large libraries fast.
 - **Per-device AniList login** — Each browser generates a UUID stored in `localStorage` (`momotaro_device_id`) and sends it as `X-Device-ID` on every request. The server stores AniList tokens in `device_anilist_sessions` keyed by device ID. Logging in on one device does not affect any other.
+- **Server-wide Doujinshi.info login** — Doujinshi.info credentials (access token + refresh token) are stored in the `settings` table and shared across all devices, unlike AniList which is per-device.
 - **File-first** — Manga and chapter records reflect the filesystem. The scanner upserts rows on every scan. Deleting a manga via the UI removes DB rows **and** the files on disk. The scanner also prunes stale records automatically: chapters missing from disk are removed during `scanMangaDirectory`; manga with no remaining chapters (empty folder, all chapters deleted) are removed at the end of the chapter pass; manga whose folder no longer exists are caught by a library-level cleanup pass at the end of each `scanLibrary` run.
 - **AniList sync is fire-and-forget** — `syncToAniList()` runs after the HTTP response is sent. It uses the `X-Device-ID` from the original request to look up the token. Errors are logged but never surfaced to the client. HTTP 429 responses are retried automatically (up to 3 times, honouring the `retry-after` header).
 - **All reader settings in localStorage** — No server-side user preferences. Settings persist per browser.

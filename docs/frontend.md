@@ -7,7 +7,7 @@ React 18 SPA bundled with Vite. Dev server on `:5173`, proxies `/api` and `/thum
 Defined in [client/src/App.jsx](../client/src/App.jsx):
 
 | Path | Component | Description |
-|---|---|---|
+| --- | --- | --- |
 | `/` | `Library` | Main manga grid |
 | `/manga/:mangaId` | `MangaDetail` | Manga info and chapter list |
 | `/read/:chapterId` | `Reader` | Full-screen reader |
@@ -39,8 +39,12 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
   - fallback → `folder_name`
 - **Nav drawer** — hamburger button (☰) in the navbar opens a slide-in drawer listing all libraries and reading lists. Clicking an entry navigates to `/` and passes `{ library: id }` or `{ list: id }` in React Router location state, which `Library` reads on mount to pre-select the filter.
 - **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, total file count, and folder size in MB. The request is made lazily on first open and the result is cached for the lifetime of the page.
-- "Refresh Metadata" button → `POST /api/manga/:id/refresh-metadata`
-- Manual AniList search modal → `GET /api/anilist/search?q=` → `POST /api/manga/:id/apply-metadata`
+- **Metadata button** opens a modal with a **Source dropdown** (AniList / Doujinshi.info, defaults to AniList). Each source exposes the same two actions:
+  - *Fetch* — auto-fetch by title (`refresh-metadata` or `refresh-doujinshi-metadata`)
+  - *Search Manually* — opens a search modal (`AnilistSearchModal` or `DoujinshiSearchModal`)
+- AniList search modal → `GET /api/anilist/search?q=` → `POST /api/manga/:id/apply-metadata`
+- Doujinshi.info search modal → `GET /api/doujinshi/search?q=` → `POST /api/manga/:id/apply-doujinshi-metadata`
+- The status badge in the modal reflects the current source: "Local file", "Linked to AniList", "Linked to Doujinshi.info", or "No metadata linked"
 - Progress badge on each chapter (read / current / unread)
 - Resume reading button (jumps to last read chapter+page)
 
@@ -53,8 +57,9 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 ### Settings (`src/pages/Settings.jsx`)
 
 - Accepts an optional `location.state.section` value on navigation to open a specific tab directly (e.g. the "Go to Library Management" button in the first-time setup state passes `{ section: 'libraries' }`)
-- **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device (see below)
-- **Libraries tab**: add, edit, delete library paths; trigger per-library scans
+- **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device
+- **Doujinshi.Info tab**: email + password login form; login state is server-wide (shared across all devices)
+- **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The **Bulk Metadata Pull** button shows a source dropdown (AniList / Doujinshi.info) before starting the pull
 
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
@@ -107,6 +112,20 @@ Notable helpers:
 ```js
 api.pageImageUrl(pageId)    // → "/api/pages/{id}/image"
 api.thumbnailUrl(filename)  // → "/thumbnails/{filename}"
+```
+
+Metadata methods:
+
+```js
+api.refreshMetadata(mangaId)                  // AniList auto-fetch by title
+api.refreshDoujinshiMetadata(mangaId)         // Doujinshi.info auto-fetch by title
+api.searchAnilist(q, page)                    // AniList manual search
+api.searchDoujinshi(q, page)                  // Doujinshi.info manual search
+api.applyMetadata(mangaId, anilistId)         // Apply AniList result by ID
+api.applyDoujinshiMetadata(mangaId, slug)     // Apply Doujinshi.info result by slug
+api.bulkMetadata(libraryId, source)           // Bulk pull — source: 'anilist' | 'doujinshi'
+api.doujinshiLogin(email, password)           // Doujinshi.info login
+api.doujinshiLogout()                         // Doujinshi.info logout
 ```
 
 ## Context

@@ -111,6 +111,8 @@ Page images are streamed with `fs.createReadStream`. The stream is destroyed if 
 
 ## Metadata
 
+### AniList
+
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/manga/:id/refresh-metadata` | Auto-fetch from AniList by title |
@@ -120,6 +122,33 @@ Page images are streamed with `fs.createReadStream`. The stream is destroyed if 
 | PATCH | `/api/manga/:id/anilist-progress` | Manually update AniList progress |
 
 Both `refresh-metadata` and `apply-metadata` write the `author` field in addition to the standard metadata fields. See [anilist.md](./anilist.md) for how the author name is extracted from the AniList staff list.
+
+### Doujinshi.info
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/manga/:id/refresh-doujinshi-metadata` | Auto-fetch from Doujinshi.info by title |
+| POST | `/api/manga/:id/apply-doujinshi-metadata` | Apply a specific result `{ slug }` |
+| GET | `/api/doujinshi/search?q=&page=` | Search Doujinshi.info by title (manual search) |
+
+Spaces in the `q` parameter are automatically replaced with underscores before the upstream request is made (see [doujinshi.md](./doujinshi.md#search-mechanics)).
+
+### Bulk Metadata Pull
+
+`POST /api/libraries/:id/bulk-metadata` accepts an optional body:
+
+```json
+{ "source": "anilist" }
+```
+
+`source` can be `"anilist"` (default) or `"doujinshi"`. The endpoint responds immediately and runs in the background.
+
+**Metadata priority** — the bulk pull respects source priority to avoid overwriting higher-quality metadata:
+
+- Source `anilist`: skips manga with `metadata_source = 'local'`
+- Source `doujinshi`: skips manga with `metadata_source = 'local'` or `'anilist'`
+
+Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
 
 ---
 
@@ -139,11 +168,12 @@ Both `refresh-metadata` and `apply-metadata` write the `author` field in additio
   "anilist_logged_in": true,
   "anilist_user_id": "67890",
   "anilist_username": "myuser",
-  "anilist_avatar": "https://..."
+  "anilist_avatar": "https://...",
+  "doujinshi_logged_in": true
 }
 ```
 
-`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only.
+`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only. `doujinshi_logged_in` is server-wide (true whenever a doujinshi token is stored in `settings`).
 
 ---
 
@@ -163,6 +193,25 @@ Both `refresh-metadata` and `apply-metadata` write the `author` field in additio
 ```
 
 Returns `{ username, avatar }` on success. Requires `X-Device-ID` header — returns 400 without it.
+
+---
+
+## Doujinshi.info Auth
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/auth/doujinshi/login` | Log in with email + password — stores token server-wide |
+| DELETE | `/api/auth/doujinshi` | Log out — clears doujinshi tokens from `settings` |
+
+**POST `/api/auth/doujinshi/login` body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "yourpassword"
+}
+```
+
+Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared across all devices. See [doujinshi.md](./doujinshi.md) for full details.
 
 ---
 

@@ -45,8 +45,9 @@ One row per manga folder.
 | `genres` | TEXT | JSON array, e.g. `["Action","Romance"]` |
 | `anilist_id` | INTEGER | AniList media ID |
 | `mal_id` | INTEGER | MyAnimeList ID |
+| `doujinshi_id` | TEXT | Doujinshi.info book slug, e.g. `glasses-in-summer-life` |
 | `score` | REAL | Average score from metadata source |
-| `metadata_source` | TEXT | `none`, `anilist`, `mal`, `local` |
+| `metadata_source` | TEXT | `none`, `anilist`, `jikan`, `doujinshi`, `local` |
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
 | `created_at` | INTEGER | |
 | `updated_at` | INTEGER | |
@@ -104,8 +105,10 @@ Key-value store for server-wide configuration (not per-device state).
 
 | Key | Value Description |
 |---|---|
-| `anilist_client_id` | OAuth app client ID |
-| `anilist_client_secret` | OAuth app client secret |
+| `anilist_client_id` | AniList OAuth app client ID |
+| `anilist_client_secret` | AniList OAuth app client secret |
+| `doujinshi_token` | Doujinshi.info JWT access token (15-minute expiry) |
+| `doujinshi_refresh_token` | Doujinshi.info refresh token for obtaining new access tokens |
 
 ### `device_anilist_sessions`
 Per-device AniList login state. Keyed by a UUID generated in the browser (`localStorage` key `momotaro_device_id`) and sent as the `X-Device-ID` request header.
@@ -158,6 +161,16 @@ idx_rlm_manga_id      ON reading_list_manga(manga_id)
 The `migrate()` function in `database.js` runs on every startup using `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, making it safe to run repeatedly.
 
 Column-level additions use the shared `addColumnIfMissing(db, table, column, definition)` helper, which checks `pragma_table_info` before running `ALTER TABLE`. This replaces the old per-feature upgrade functions.
+
+Columns added via `addColumnIfMissing` (safe to run on every startup):
+
+| Table | Column | Added for |
+| --- | --- | --- |
+| `libraries` | `show_in_all` | Multi-library "All Libraries" filter |
+| `chapters` | `volume` | Volume-level chapter tracking |
+| `chapters` | `file_mtime` | Incremental scan optimisation |
+| `manga` | `author` | AniList staff extraction |
+| `manga` | `doujinshi_id` | Doujinshi.info integration |
 
 One structural migration is still handled separately:
 

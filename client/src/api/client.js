@@ -77,6 +77,12 @@ export const api = {
   anilistLogout: () =>
     apiFetch('/api/auth/anilist', { method: 'DELETE' }),
 
+  // Doujinshi.info auth
+  doujinshiLogin: (email, password) =>
+    apiFetch('/api/auth/doujinshi/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  doujinshiLogout: () =>
+    apiFetch('/api/auth/doujinshi', { method: 'DELETE' }),
+
   // Libraries
   getLibraries: () => apiFetch('/api/libraries'),
   createLibrary: (body) =>
@@ -91,8 +97,13 @@ export const api = {
   // Metadata
   refreshMetadata: (mangaId) =>
     apiFetch(`/api/manga/${mangaId}/refresh-metadata`, { method: 'POST' }),
-  bulkMetadata: (libraryId) =>
-    apiFetch(`/api/libraries/${libraryId}/bulk-metadata`, { method: 'POST' }),
+  refreshDoujinshiMetadata: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/refresh-doujinshi-metadata`, { method: 'POST' }),
+  bulkMetadata: (libraryId, source = 'anilist') =>
+    apiFetch(`/api/libraries/${libraryId}/bulk-metadata`, {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    }),
   bulkOptimize: (libraryId) =>
     apiFetch(`/api/libraries/${libraryId}/bulk-optimize`, { method: 'POST' }),
   searchAnilist: (q, page = 1) =>
@@ -101,6 +112,13 @@ export const api = {
     apiFetch(`/api/manga/${mangaId}/apply-metadata`, {
       method: 'POST',
       body: JSON.stringify({ anilist_id: anilistId }),
+    }),
+  searchDoujinshi: (q, page = 1) =>
+    apiFetch(`/api/doujinshi/search?${new URLSearchParams({ q, page })}`),
+  applyDoujinshiMetadata: (mangaId, slug) =>
+    apiFetch(`/api/manga/${mangaId}/apply-doujinshi-metadata`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
     }),
 
   getAnilistStatus: (mangaId) => apiFetch(`/api/manga/${mangaId}/anilist-status`),

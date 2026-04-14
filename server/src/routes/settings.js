@@ -3,11 +3,15 @@ const fetch = require('node-fetch');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { getViewer } = require('../metadata/anilist');
+const { loginDoujinshi } = require('../metadata/doujinshi');
 
 const router = express.Router();
 
-const SECRET_KEYS = ['anilist_token', 'anilist_client_secret'];
-const USER_KEYS   = ['anilist_user_id', 'anilist_username', 'anilist_avatar'];
+const SECRET_KEYS = [
+  'anilist_token', 'anilist_client_secret',
+  'doujinshi_token', 'doujinshi_refresh_token',
+];
+const USER_KEYS = ['anilist_user_id', 'anilist_username', 'anilist_avatar'];
 
 function getSetting(db, key) {
   return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
@@ -61,6 +65,7 @@ router.get('/settings', asyncWrapper(async (req, res) => {
       anilist_user_id:           session?.anilist_user_id  || null,
       anilist_username:          session?.anilist_username || null,
       anilist_avatar:            session?.anilist_avatar   || null,
+      doujinshi_logged_in:       !!(raw['doujinshi_token']),
     },
   });
 }));
@@ -145,6 +150,35 @@ router.delete('/auth/anilist', asyncWrapper(async (req, res) => {
   const deviceId = req.headers['x-device-id'] || null;
   deleteDeviceSession(db, deviceId);
   res.json({ message: 'Logged out' });
+}));
+
+// POST /api/auth/doujinshi/login — email/password login (server-wide token)
+router.post('/auth/doujinshi/login', asyncWrapper(async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
+  }
+
+  let tokens;
+  try {
+    tokens = await loginDoujinshi(email, password);
+  } catch (err) {
+    return res.status(401).json({ error: err.message });
+  }
+
+  const db = getDb();
+  setSetting(db, 'doujinshi_token',         tokens.access_token);
+  setSetting(db, 'doujinshi_refresh_token',  tokens.refresh_token || '');
+
+  res.json({ data: { logged_in: true } });
+}));
+
+// DELETE /api/auth/doujinshi — logout (clears server-wide doujinshi token)
+router.delete('/auth/doujinshi', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  setSetting(db, 'doujinshi_token',         '');
+  setSetting(db, 'doujinshi_refresh_token',  '');
+  res.json({ message: 'Logged out of Doujinshi.info' });
 }));
 
 module.exports = { router, getSetting, getDeviceSession };

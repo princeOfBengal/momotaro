@@ -6,6 +6,7 @@ const sharp = require('sharp');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { fetchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
+const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
 const { getSetting } = require('./settings');
 const config = require('../config');
 
@@ -13,6 +14,10 @@ const router = express.Router();
 
 function getToken(db) {
   return getSetting(db, 'anilist_token');
+}
+
+function getDoujinshiToken(db) {
+  return getSetting(db, 'doujinshi_token');
 }
 
 function applyMetadataToDb(db, mangaId, result) {
@@ -26,6 +31,7 @@ function applyMetadataToDb(db, mangaId, result) {
       score           = ?,
       anilist_id      = ?,
       mal_id          = ?,
+      doujinshi_id    = ?,
       author          = ?,
       metadata_source = ?,
       updated_at      = unixepoch()
@@ -37,9 +43,10 @@ function applyMetadataToDb(db, mangaId, result) {
     result.year,
     JSON.stringify(result.genres),
     result.score,
-    result.anilist_id,
-    result.mal_id,
-    result.author ?? null,
+    result.anilist_id   ?? null,
+    result.mal_id       ?? null,
+    result.doujinshi_id ?? null,
+    result.author       ?? null,
     result.source,
     mangaId
   );
@@ -168,35 +175,119 @@ router.patch('/manga/:id/anilist-progress', asyncWrapper(async (req, res) => {
   res.json({ data: { entry: updated } });
 }));
 
-// POST /api/libraries/:id/bulk-metadata — auto-fetch AniList metadata for every manga in a library
+// GET /api/doujinshi/search?q=...&page=1 — manual search returning up to 10 results
+router.get('/doujinshi/search', asyncWrapper(async (req, res) => {
+  const { q, page = '1' } = req.query;
+  if (!q || !q.trim()) return res.status(400).json({ error: 'q parameter is required' });
+
+  const db = getDb();
+  const token = getDoujinshiToken(db);
+  const results = await searchDoujinshi(q.trim(), token, parseInt(page, 10));
+
+  res.json({ data: results });
+}));
+
+// POST /api/manga/:id/apply-doujinshi-metadata — apply a specific doujinshi entry by slug
+router.post('/manga/:id/apply-doujinshi-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const { slug } = req.body;
+  if (!slug) return res.status(400).json({ error: 'slug is required' });
+
+  const token = getDoujinshiToken(db);
+  const result = await fetchByDoujinshiSlug(slug, token);
+
+  if (!result) return res.status(404).json({ error: 'Entry not found on Doujinshi.info' });
+
+  applyMetadataToDb(db, manga.id, result);
+  await fetchAndStoreCover(db, manga.id, result.cover_url);
+
+  const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
+  res.json({
+    data: { ...updated, genres: safeJsonParse(updated.genres, []) },
+  });
+}));
+
+// POST /api/manga/:id/refresh-doujinshi-metadata — auto-fetch by title from Doujinshi.info
+router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const token = getDoujinshiToken(db);
+  const cleanTitle = manga.title.replace(/\s*\(.*?\)\s*/g, ' ').trim();
+  const result = await fetchFromDoujinshi(cleanTitle, token);
+
+  if (!result) {
+    return res.json({ found: false, message: 'No match found on Doujinshi.info for this title.' });
+  }
+
+  applyMetadataToDb(db, manga.id, result);
+  await fetchAndStoreCover(db, manga.id, result.cover_url);
+
+  const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
+  res.json({
+    found: true,
+    data: { ...updated, genres: safeJsonParse(updated.genres, []) },
+  });
+}));
+
+// POST /api/libraries/:id/bulk-metadata — auto-fetch metadata for every manga in a library
+// Body: { source: 'anilist' | 'doujinshi' }  (defaults to 'anilist')
+// Priority: skip manga with local JSON metadata; for doujinshi source also skip anilist-linked manga.
 router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
 
-  const mangaList = db.prepare('SELECT id, title FROM manga WHERE library_id = ?').all(library.id);
+  const source = (req.body?.source === 'doujinshi') ? 'doujinshi' : 'anilist';
+
+  const mangaList = db.prepare('SELECT id, title, metadata_source FROM manga WHERE library_id = ?').all(library.id);
 
   // Respond immediately — the pull runs in the background
-  res.json({ message: 'Bulk metadata pull started', total: mangaList.length });
+  res.json({ message: 'Bulk metadata pull started', total: mangaList.length, source });
 
-  const token = getToken(db);
+  const anilistToken    = getToken(db);
+  const doujinshiToken  = getDoujinshiToken(db);
+
   for (const manga of mangaList) {
+    // Respect priority: local JSON is never overwritten; AniList takes precedence over Doujinshi
+    if (manga.metadata_source === 'local') {
+      console.log(`[BulkMetadata] Skipping "${manga.title}" (local JSON metadata)`);
+      continue;
+    }
+    if (source === 'doujinshi' && manga.metadata_source === 'anilist') {
+      console.log(`[BulkMetadata] Skipping "${manga.title}" (already has AniList metadata)`);
+      continue;
+    }
+
     try {
-      const result = await fetchFromAniList(manga.title, token);
+      let result = null;
+      if (source === 'doujinshi') {
+        result = await fetchFromDoujinshi(manga.title, doujinshiToken);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } else {
+        result = await fetchFromAniList(manga.title, anilistToken);
+        // Space requests to stay well within AniList's rate limit (~90 req/min)
+        await new Promise(resolve => setTimeout(resolve, 700));
+      }
+
       if (result) {
         applyMetadataToDb(db, manga.id, result);
         await fetchAndStoreCover(db, manga.id, result.cover_url);
-        console.log(`[BulkMetadata] Applied: "${manga.title}" → "${result.title}"`);
+        console.log(`[BulkMetadata][${source}] Applied: "${manga.title}" → "${result.title}"`);
       } else {
-        console.log(`[BulkMetadata] No match for: "${manga.title}"`);
+        console.log(`[BulkMetadata][${source}] No match for: "${manga.title}"`);
       }
     } catch (err) {
-      console.warn(`[BulkMetadata] Error for "${manga.title}": ${err.message}`);
+      console.warn(`[BulkMetadata][${source}] Error for "${manga.title}": ${err.message}`);
+      // Still delay after errors to avoid hammering the API
+      await new Promise(resolve => setTimeout(resolve, source === 'doujinshi' ? 300 : 700));
     }
-    // Space requests to stay well within AniList's rate limit (~90 req/min)
-    await new Promise(resolve => setTimeout(resolve, 700));
   }
-  console.log(`[BulkMetadata] Finished for library "${library.name}" (${mangaList.length} titles)`);
+  console.log(`[BulkMetadata][${source}] Finished for library "${library.name}" (${mangaList.length} titles)`);
 }));
 
 // GET /api/manga/:id/anilist-status — fetch the logged-in user's list entry for this manga

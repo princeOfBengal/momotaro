@@ -72,6 +72,7 @@ function LibrariesSection() {
   const [scanning, setScanning] = useState(null);
   const [bulkPulling, setBulkPulling] = useState(null);
   const [bulkOptimizing, setBulkOptimizing] = useState(null);
+  const [bulkSourceDropdown, setBulkSourceDropdown] = useState(null); // lib.id of open dropdown
 
   useEffect(() => {
     api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
@@ -140,10 +141,11 @@ function LibrariesSection() {
     }
   }
 
-  async function handleBulkMetadata(lib) {
+  async function handleBulkMetadata(lib, source) {
+    setBulkSourceDropdown(null);
     setBulkPulling(lib.id);
     try {
-      await api.bulkMetadata(lib.id);
+      await api.bulkMetadata(lib.id, source);
     } catch (err) {
       alert('Bulk metadata pull failed: ' + err.message);
     } finally {
@@ -253,14 +255,32 @@ function LibrariesSection() {
                     >
                       {scanning === lib.id ? 'Scanning…' : 'Scan Now'}
                     </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => handleBulkMetadata(lib)}
-                      disabled={bulkPulling === lib.id || scanning === lib.id}
-                      title="Search AniList for each title in this library and apply the first match"
-                    >
-                      {bulkPulling === lib.id ? 'Pulling…' : 'Bulk Metadata Pull'}
-                    </button>
+                    <div className="lp-bulk-meta-wrap">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setBulkSourceDropdown(bulkSourceDropdown === lib.id ? null : lib.id)}
+                        disabled={bulkPulling === lib.id || scanning === lib.id}
+                        title="Search for metadata for each title in this library"
+                      >
+                        {bulkPulling === lib.id ? 'Pulling…' : 'Bulk Metadata Pull ▾'}
+                      </button>
+                      {bulkSourceDropdown === lib.id && (
+                        <div className="lp-bulk-meta-dropdown">
+                          <button
+                            className="lp-bulk-meta-option"
+                            onClick={() => handleBulkMetadata(lib, 'anilist')}
+                          >
+                            AniList
+                          </button>
+                          <button
+                            className="lp-bulk-meta-option"
+                            onClick={() => handleBulkMetadata(lib, 'doujinshi')}
+                          >
+                            Doujinshi.info
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleBulkOptimize(lib)}
@@ -478,6 +498,127 @@ function AnilistSection() {
                 : 'Enter your Client Secret above to enable login.'}
             </p>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Section: Doujinshi.Info ───────────────────────────────────────────────────
+
+function DoujinshiSection() {
+  const [settings, setSettings] = useState(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+
+  useEffect(() => {
+    api.getSettings().then(data => setSettings(data)).catch(() => {});
+  }, []);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    if (!email.trim() || !password.trim()) return;
+    setLoggingIn(true);
+    setStatusMsg(null);
+    try {
+      await api.doujinshiLogin(email.trim(), password);
+      setSettings(prev => ({ ...prev, doujinshi_logged_in: true }));
+      setEmail('');
+      setPassword('');
+      setStatusMsg({ type: 'success', text: 'Logged in to Doujinshi.info.' });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Login failed: ' + err.message });
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (!confirm('Log out of Doujinshi.info?')) return;
+    setLoggingOut(true);
+    try {
+      await api.doujinshiLogout();
+      setSettings(prev => ({ ...prev, doujinshi_logged_in: false }));
+      setStatusMsg({ type: 'success', text: 'Logged out of Doujinshi.info.' });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Logout failed: ' + err.message });
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (!settings) {
+    return <div className="loading-center"><div className="spinner" /></div>;
+  }
+
+  return (
+    <div>
+      <div className="sp-section-head">
+        <div>
+          <h2 className="sp-section-title">Doujinshi.Info</h2>
+          <p className="sp-section-desc">
+            Log in with your{' '}
+            <a href="https://doujinshi.info" target="_blank" rel="noreferrer">Doujinshi.info</a>
+            {' '}account to search and pull metadata for doujinshi titles.
+            An account is free to create.
+          </p>
+        </div>
+      </div>
+
+      {statusMsg && (
+        <div className={`sp-status sp-status-${statusMsg.type}`}>{statusMsg.text}</div>
+      )}
+
+      {settings.doujinshi_logged_in ? (
+        <div className="settings-card">
+          <p className="settings-username">Logged in to Doujinshi.info</p>
+          <p className="settings-hint">
+            Doujinshi.info metadata is available from the Metadata panel on any manga page,
+            and via Bulk Metadata Pull in Library Management.
+          </p>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={handleLogout}
+            disabled={loggingOut}
+            style={{ alignSelf: 'flex-start' }}
+          >
+            {loggingOut ? 'Logging out...' : 'Log Out'}
+          </button>
+        </div>
+      ) : (
+        <div className="settings-card">
+          <form className="settings-token-form" onSubmit={handleLogin}>
+            <label className="settings-label">Email</label>
+            <input
+              type="email"
+              className="settings-input"
+              placeholder="your@email.com"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              autoComplete="email"
+            />
+            <label className="settings-label" style={{ marginTop: 4 }}>Password</label>
+            <input
+              type="password"
+              className="settings-input"
+              placeholder="Your password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              autoComplete="current-password"
+            />
+            <div className="settings-token-actions">
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={loggingIn || !email.trim() || !password.trim()}
+              >
+                {loggingIn ? 'Logging in...' : 'Log In'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>
@@ -858,6 +999,16 @@ const SECTIONS = [
     ),
   },
   {
+    id: 'doujinshi',
+    label: 'Doujinshi.Info',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+      </svg>
+    ),
+  },
+  {
     id: 'reading',
     label: 'Reading Settings',
     icon: (
@@ -908,6 +1059,7 @@ export default function Settings() {
         <main className="sp-content">
           {section === 'statistics'  && <StatisticsSection />}
           {section === 'anilist'    && <AnilistSection />}
+          {section === 'doujinshi'  && <DoujinshiSection />}
           {section === 'reading'    && <ReadingSection />}
           {section === 'libraries'  && <LibrariesSection />}
         </main>

@@ -147,8 +147,9 @@ function normalizeMedia(m) {
 
 function cleanSearchTitle(title) {
   return title
-    .replace(/\[.*?\]/g, '')
-    .replace(/\(.*?\)/g, '')
+    .replace(/\{[^}]*\}/g, '')   // {curly bracket content}
+    .replace(/\[[^\]]*\]/g, '')  // [square bracket content]
+    .replace(/\([^)]*\)/g, '')   // (parenthesis content)
     .replace(/[-_]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

@@ -168,6 +168,37 @@ router.patch('/manga/:id/anilist-progress', asyncWrapper(async (req, res) => {
   res.json({ data: { entry: updated } });
 }));
 
+// POST /api/libraries/:id/bulk-metadata — auto-fetch AniList metadata for every manga in a library
+router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
+  if (!library) return res.status(404).json({ error: 'Library not found' });
+
+  const mangaList = db.prepare('SELECT id, title FROM manga WHERE library_id = ?').all(library.id);
+
+  // Respond immediately — the pull runs in the background
+  res.json({ message: 'Bulk metadata pull started', total: mangaList.length });
+
+  const token = getToken(db);
+  for (const manga of mangaList) {
+    try {
+      const result = await fetchFromAniList(manga.title, token);
+      if (result) {
+        applyMetadataToDb(db, manga.id, result);
+        await fetchAndStoreCover(db, manga.id, result.cover_url);
+        console.log(`[BulkMetadata] Applied: "${manga.title}" → "${result.title}"`);
+      } else {
+        console.log(`[BulkMetadata] No match for: "${manga.title}"`);
+      }
+    } catch (err) {
+      console.warn(`[BulkMetadata] Error for "${manga.title}": ${err.message}`);
+    }
+    // Space requests to stay well within AniList's rate limit (~90 req/min)
+    await new Promise(resolve => setTimeout(resolve, 700));
+  }
+  console.log(`[BulkMetadata] Finished for library "${library.name}" (${mangaList.length} titles)`);
+}));
+
 // GET /api/manga/:id/anilist-status — fetch the logged-in user's list entry for this manga
 router.get('/manga/:id/anilist-status', asyncWrapper(async (req, res) => {
   const db = getDb();

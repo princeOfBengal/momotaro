@@ -96,22 +96,18 @@ function sevenZipToCbz(sevenZipPath, destCbzPath) {
   }
 }
 
-// POST /api/manga/:id/optimize
-router.post('/manga/:id/optimize', asyncWrapper(async (req, res) => {
-  const db = getDb();
-  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
-  if (!manga) return res.status(404).json({ error: 'Manga not found' });
-  if (!fs.existsSync(manga.path)) {
-    return res.status(400).json({ error: 'Manga directory not found on disk' });
-  }
-
+/**
+ * Core optimize logic for a single manga. Renames/converts chapters to CBZ
+ * with standardized names, then rescans the manga directory.
+ */
+async function performOptimize(manga) {
   const summary = { renamed: 0, converted: 0, skipped: [], errors: [] };
 
   let entries;
   try {
     entries = fs.readdirSync(manga.path);
   } catch (err) {
-    return res.status(500).json({ error: 'Could not read directory: ' + err.message });
+    throw new Error('Could not read directory: ' + err.message);
   }
 
   // Collect all recognized chapter/volume entries with parsed info
@@ -195,7 +191,46 @@ router.post('/manga/:id/optimize', asyncWrapper(async (req, res) => {
     console.error('[Optimize] Rescan error:', err.message);
   }
 
+  return summary;
+}
+
+// POST /api/manga/:id/optimize
+router.post('/manga/:id/optimize', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+  if (!fs.existsSync(manga.path)) {
+    return res.status(400).json({ error: 'Manga directory not found on disk' });
+  }
+
+  const summary = await performOptimize(manga);
   res.json({ data: summary });
+}));
+
+// POST /api/libraries/:id/bulk-optimize — optimize every manga in a library
+router.post('/libraries/:id/bulk-optimize', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
+  if (!library) return res.status(404).json({ error: 'Library not found' });
+
+  const mangaList = db.prepare('SELECT * FROM manga WHERE library_id = ? AND path IS NOT NULL').all(library.id);
+
+  // Respond immediately — the optimize runs in the background
+  res.json({ message: 'Bulk optimize started', total: mangaList.length });
+
+  for (const manga of mangaList) {
+    if (!fs.existsSync(manga.path)) {
+      console.warn(`[BulkOptimize] Skipping "${manga.folder_name}" — path not found`);
+      continue;
+    }
+    try {
+      const summary = await performOptimize(manga);
+      console.log(`[BulkOptimize] "${manga.folder_name}": renamed=${summary.renamed} converted=${summary.converted} errors=${summary.errors.length}`);
+    } catch (err) {
+      console.warn(`[BulkOptimize] Error for "${manga.folder_name}": ${err.message}`);
+    }
+  }
+  console.log(`[BulkOptimize] Finished for library "${library.name}" (${mangaList.length} entries)`);
 }));
 
 module.exports = router;

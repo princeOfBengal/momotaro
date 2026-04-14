@@ -70,6 +70,8 @@ function LibrariesSection() {
   const [editId, setEditId] = useState(null);
   const [editError, setEditError] = useState(null);
   const [scanning, setScanning] = useState(null);
+  const [bulkPulling, setBulkPulling] = useState(null);
+  const [bulkOptimizing, setBulkOptimizing] = useState(null);
 
   useEffect(() => {
     api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
@@ -135,6 +137,28 @@ function LibrariesSection() {
     } catch (err) {
       alert('Scan failed: ' + err.message);
       setScanning(s => s === lib.id ? null : s);
+    }
+  }
+
+  async function handleBulkMetadata(lib) {
+    setBulkPulling(lib.id);
+    try {
+      await api.bulkMetadata(lib.id);
+    } catch (err) {
+      alert('Bulk metadata pull failed: ' + err.message);
+    } finally {
+      setBulkPulling(null);
+    }
+  }
+
+  async function handleBulkOptimize(lib) {
+    setBulkOptimizing(lib.id);
+    try {
+      await api.bulkOptimize(lib.id);
+    } catch (err) {
+      alert('Bulk optimize failed: ' + err.message);
+    } finally {
+      setBulkOptimizing(null);
     }
   }
 
@@ -228,6 +252,22 @@ function LibrariesSection() {
                       disabled={scanning === lib.id}
                     >
                       {scanning === lib.id ? 'Scanning…' : 'Scan Now'}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleBulkMetadata(lib)}
+                      disabled={bulkPulling === lib.id || scanning === lib.id}
+                      title="Search AniList for each title in this library and apply the first match"
+                    >
+                      {bulkPulling === lib.id ? 'Pulling…' : 'Bulk Metadata Pull'}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleBulkOptimize(lib)}
+                      disabled={bulkOptimizing === lib.id || scanning === lib.id}
+                      title="Rename and convert all chapters in this library to standardized CBZ format"
+                    >
+                      {bulkOptimizing === lib.id ? 'Optimizing…' : 'Bulk Optimize'}
                     </button>
                     <button
                       className="btn btn-ghost btn-sm"

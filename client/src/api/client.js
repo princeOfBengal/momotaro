@@ -91,6 +91,10 @@ export const api = {
   // Metadata
   refreshMetadata: (mangaId) =>
     apiFetch(`/api/manga/${mangaId}/refresh-metadata`, { method: 'POST' }),
+  bulkMetadata: (libraryId) =>
+    apiFetch(`/api/libraries/${libraryId}/bulk-metadata`, { method: 'POST' }),
+  bulkOptimize: (libraryId) =>
+    apiFetch(`/api/libraries/${libraryId}/bulk-optimize`, { method: 'POST' }),
   searchAnilist: (q, page = 1) =>
     apiFetch(`/api/anilist/search?${new URLSearchParams({ q, page })}`),
   applyMetadata: (mangaId, anilistId) =>

@@ -1206,11 +1206,126 @@
   color: var(--text-secondary);
 }
 
+/* ── Settings dropdown (mobile consolidated menu) ── */
+.detail-settings-wrap {
+  position: relative;
+}
+
+.detail-settings-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-settings-chevron {
+  width: 10px;
+  height: 6px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.detail-settings-trigger.open .detail-settings-chevron {
+  transform: rotate(180deg);
+}
+
+.detail-settings-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 160px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.detail-settings-item {
+  display: block;
+  width: 100%;
+  padding: 11px 16px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
+}
+.detail-settings-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.detail-settings-item:active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Show/hide helpers — toggled at the 640px breakpoint */
+.detail-mobile-only { display: none; }
+.detail-desktop-only { display: inline-flex; }
+
 @media (max-width: 640px) {
+  .detail-mobile-only  { display: block; }
+  .detail-desktop-only { display: none !important; }
+
+  /* Hero layout */
   .detail-hero { flex-direction: column; align-items: center; text-align: center; }
   .detail-cover { width: 160px; }
   .detail-meta, .detail-genres, .detail-actions { justify-content: center; }
   .detail-title { font-size: 22px; }
   .metadata-panel-header { flex-direction: column; align-items: flex-start; }
   .optimize-results { grid-template-columns: repeat(2, 1fr); }
+
+  /* Reduce page padding on phones */
+  .detail-main { padding: 20px 14px; }
+
+  /* Chapter rows: ensure a comfortable tap height */
+  .chapter-row { min-height: 52px; }
+
+  /* Hamburger: ensure adequate touch target */
+  .detail-nav-hamburger { width: 40px; height: 40px; }
+
+  /* AniList panel: shrink the fixed-width label so rows don't overflow */
+  .al-status-field { min-width: 90px; font-size: 11px; }
+
+  /* Action buttons should fill available width on narrow screens */
+  .detail-actions { gap: 8px; }
+  .detail-actions .btn { flex: 1; min-width: 0; justify-content: center; text-align: center; }
+
+  /* Settings dropdown trigger should stretch like the other buttons */
+  .detail-settings-wrap { flex: 1; min-width: 0; }
+  .detail-settings-trigger { width: 100%; justify-content: center; }
+
+  /* Dropdown opens upward on mobile to avoid clipping at the bottom of the action row */
+  .detail-settings-dropdown {
+    top: auto;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 180px;
+  }
+}
+
+/* ── Modals as bottom sheets on phones ── */
+@media (max-width: 600px) {
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal-box {
+    max-width: 100%;
+    max-height: 88vh;
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+  }
+  /* Tighten the search-result rows on a narrow sheet */
+  .modal-result-row { padding: 10px 14px; }
+  .modal-result-cover { width: 38px; height: 54px; }
+
+  /* Info / meta modal: comfortable label sizing */
+  .meta-modal-action-row { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .meta-modal-action-label { font-size: 13px; }
 }

@@ -179,3 +179,23 @@ img {
   transition: background 0.15s;
 }
 .btn-icon:hover { background: var(--border); }
+
+/* ── Mobile touch improvements ── */
+@media (max-width: 700px) {
+  /* Ensure all standard buttons meet the 44 px tap-target guideline */
+  .btn { min-height: 44px; }
+
+  /* Prevent tap-highlight flash on interactive elements */
+  button, a { -webkit-tap-highlight-color: transparent; }
+
+  /* Provide a visible :active state since :hover doesn't persist on touch */
+  .btn:active        { opacity: 0.75; }
+  .btn-settings:active { background: var(--bg-hover); color: var(--text-primary); }
+  .btn-icon:active   { background: var(--border); }
+
+  /* Hide scrollbars on panels that scroll horizontally
+     (e.g. the settings tab bar) — they're still scrollable, just visually cleaner */
+  [style*="overflow-x: auto"], .overflow-x-auto {
+    scrollbar-width: none;
+  }
+}

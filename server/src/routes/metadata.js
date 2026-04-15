@@ -7,7 +7,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { fetchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
 const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
-const { getSetting } = require('./settings');
+const { getSetting, getDeviceSession } = require('./settings');
 const config = require('../config');
 
 const router = express.Router();
@@ -148,8 +148,10 @@ router.post('/manga/:id/apply-metadata', asyncWrapper(async (req, res) => {
 router.patch('/manga/:id/anilist-progress', asyncWrapper(async (req, res) => {
   const db = getDb();
 
-  const token  = getSetting(db, 'anilist_token');
-  const userId = getSetting(db, 'anilist_user_id');
+  const deviceId = req.headers['x-device-id'] || null;
+  const session  = getDeviceSession(db, deviceId);
+  const token    = session?.anilist_token   || null;
+  const userId   = session?.anilist_user_id || null;
   if (!token || !userId) return res.status(401).json({ error: 'Not logged in to AniList' });
 
   const manga = db.prepare('SELECT anilist_id FROM manga WHERE id = ?').get(req.params.id);
@@ -236,7 +238,8 @@ router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, re
 
 // POST /api/libraries/:id/bulk-metadata — auto-fetch metadata for every manga in a library
 // Body: { source: 'anilist' | 'doujinshi' }  (defaults to 'anilist')
-// Priority: skip manga with local JSON metadata; for doujinshi source also skip anilist-linked manga.
+// Only processes manga with metadata_source = 'none' — any existing metadata (local JSON,
+// AniList, or Doujinshi.info) is always preserved.
 router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
@@ -244,58 +247,97 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
   const source = (req.body?.source === 'doujinshi') ? 'doujinshi' : 'anilist';
 
-  const mangaList = db.prepare('SELECT id, title, metadata_source FROM manga WHERE library_id = ?').all(library.id);
+  // Only fetch manga that have no metadata yet — skip anything already sourced
+  const totalCount = db.prepare('SELECT COUNT(*) AS n FROM manga WHERE library_id = ?').get(library.id).n;
+  const mangaList  = db.prepare(
+    "SELECT id, title FROM manga WHERE library_id = ? AND metadata_source = 'none'"
+  ).all(library.id);
+  const skippedExisting = totalCount - mangaList.length;
 
   // Respond immediately — the pull runs in the background
-  res.json({ message: 'Bulk metadata pull started', total: mangaList.length, source });
+  res.json({
+    message:          'Bulk metadata pull started',
+    total:            totalCount,
+    to_fetch:         mangaList.length,
+    skipped_existing: skippedExisting,
+    source,
+  });
 
-  const anilistToken    = getToken(db);
-  const doujinshiToken  = getDoujinshiToken(db);
+  if (mangaList.length === 0) {
+    console.log(
+      `[BulkMetadata][${source}] Nothing to do for "${library.name}" — ` +
+      `all ${totalCount} titles already have metadata.`
+    );
+    return;
+  }
+
+  console.log(
+    `[BulkMetadata][${source}] Starting for "${library.name}": ` +
+    `${mangaList.length} to fetch, ${skippedExisting} skipped (already have metadata).`
+  );
+
+  const anilistToken   = getToken(db);
+  const doujinshiToken = getDoujinshiToken(db);
+
+  let applied = 0;
+  let noMatch = 0;
+  let errors  = 0;
 
   for (const manga of mangaList) {
-    // Respect priority: local JSON is never overwritten; AniList takes precedence over Doujinshi
-    if (manga.metadata_source === 'local') {
-      console.log(`[BulkMetadata] Skipping "${manga.title}" (local JSON metadata)`);
-      continue;
-    }
-    if (source === 'doujinshi' && manga.metadata_source === 'anilist') {
-      console.log(`[BulkMetadata] Skipping "${manga.title}" (already has AniList metadata)`);
-      continue;
-    }
-
     try {
       let result = null;
       if (source === 'doujinshi') {
         result = await fetchFromDoujinshi(manga.title, doujinshiToken);
-        await new Promise(resolve => setTimeout(resolve, 300));
+        // fetchFromDoujinshi makes two HTTP requests (search + fetch by slug);
+        // use a longer delay to keep total request rate reasonable.
+        await new Promise(resolve => setTimeout(resolve, 500));
       } else {
         result = await fetchFromAniList(manga.title, anilistToken);
-        // Space requests to stay well within AniList's rate limit (~90 req/min)
+        // Stay well within AniList's ~90 req/min rate limit
         await new Promise(resolve => setTimeout(resolve, 700));
       }
 
       if (result) {
         applyMetadataToDb(db, manga.id, result);
         await fetchAndStoreCover(db, manga.id, result.cover_url);
-        console.log(`[BulkMetadata][${source}] Applied: "${manga.title}" → "${result.title}"`);
+        applied++;
+        console.log(
+          `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
+          `Applied: "${manga.title}" → "${result.title}"`
+        );
       } else {
-        console.log(`[BulkMetadata][${source}] No match for: "${manga.title}"`);
+        noMatch++;
+        console.log(
+          `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
+          `No match: "${manga.title}"`
+        );
       }
     } catch (err) {
-      console.warn(`[BulkMetadata][${source}] Error for "${manga.title}": ${err.message}`);
-      // Still delay after errors to avoid hammering the API
-      await new Promise(resolve => setTimeout(resolve, source === 'doujinshi' ? 300 : 700));
+      errors++;
+      console.warn(
+        `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
+        `Error for "${manga.title}": ${err.message}`
+      );
+      // Still delay after errors to avoid hammering the API on repeated failures
+      await new Promise(resolve => setTimeout(resolve, source === 'doujinshi' ? 500 : 700));
     }
   }
-  console.log(`[BulkMetadata][${source}] Finished for library "${library.name}" (${mangaList.length} titles)`);
+
+  console.log(
+    `[BulkMetadata][${source}] Finished for "${library.name}": ` +
+    `${applied} applied, ${noMatch} no match, ${errors} errors ` +
+    `(${skippedExisting} titles skipped — already had metadata).`
+  );
 }));
 
 // GET /api/manga/:id/anilist-status — fetch the logged-in user's list entry for this manga
 router.get('/manga/:id/anilist-status', asyncWrapper(async (req, res) => {
   const db = getDb();
 
-  const token  = getSetting(db, 'anilist_token');
-  const userId = getSetting(db, 'anilist_user_id');
+  const deviceId = req.headers['x-device-id'] || null;
+  const session  = getDeviceSession(db, deviceId);
+  const token    = session?.anilist_token   || null;
+  const userId   = session?.anilist_user_id || null;
 
   if (!token || !userId) {
     return res.json({ data: { logged_in: false } });

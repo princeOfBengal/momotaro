@@ -141,14 +141,28 @@ Spaces in the `q` parameter are automatically replaced with underscores before t
 { "source": "anilist" }
 ```
 
-`source` can be `"anilist"` (default) or `"doujinshi"`. The endpoint responds immediately and runs in the background.
+`source` can be `"anilist"` (default) or `"doujinshi"`. The endpoint responds immediately; the actual fetch loop runs in the background.
 
-**Metadata priority** — the bulk pull respects source priority to avoid overwriting higher-quality metadata:
+**Skip logic** — only manga with `metadata_source = 'none'` are processed. Any title that already has metadata from any source (local JSON, AniList, or Doujinshi.info) is always skipped. Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
 
-- Source `anilist`: skips manga with `metadata_source = 'local'`
-- Source `doujinshi`: skips manga with `metadata_source = 'local'` or `'anilist'`
+**Response shape:**
+```json
+{
+  "message": "Bulk metadata pull started",
+  "total": 50,
+  "to_fetch": 12,
+  "skipped_existing": 38,
+  "source": "anilist"
+}
+```
 
-Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
+- `total` — total manga in the library
+- `to_fetch` — manga that will be processed (had `metadata_source = 'none'`)
+- `skipped_existing` — manga skipped because they already have metadata
+
+**Rate limiting** — AniList requests are spaced 700 ms apart to stay within the ~90 req/min limit. Doujinshi.info requests are spaced 500 ms apart; each title requires two upstream calls (search + fetch-by-slug).
+
+**Server logs** — progress is logged per-title as `(X/Y) Applied / No match / Error`, with a final summary line reporting applied, no-match, error, and skipped counts.
 
 ---
 

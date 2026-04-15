@@ -16,10 +16,11 @@
 /* Grayscale mode */
 .reader-grayscale img { filter: grayscale(1); }
 
-/* When bars are visible, inset the content so it sits between the bars */
+/* When bars are visible, inset the content so it sits between the bars.
+   Account for the device safe-area (notch / home indicator). */
 .reader-page.bars-visible {
-  padding-top: 52px;
-  padding-bottom: 52px;
+  padding-top: calc(52px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(52px + env(safe-area-inset-bottom, 0px));
 }
 
 .reader-loading {

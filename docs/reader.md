@@ -72,6 +72,46 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 - **Settings panel open**: center tap closes settings instead of hiding controls
 - Controls stay visible while scrubber is being dragged (`scrubActiveRef`)
 
+## Mobile Layout
+
+### Safe-area / notch support
+
+Both control bars use `env(safe-area-inset-*)` so they clear the iOS notch (top) and home indicator (bottom). The app uses `viewport-fit=cover` (set in `index.html`) to fill the full screen including notched areas.
+
+```css
+/* Top bar */
+height: calc(52px + env(safe-area-inset-top, 0px));
+padding-top: env(safe-area-inset-top, 0px);
+
+/* Bottom bar */
+height: calc(52px + env(safe-area-inset-bottom, 0px));
+padding-bottom: env(safe-area-inset-bottom, 0px);
+
+/* Left/right (landscape notch) */
+padding-left:  max(12px, env(safe-area-inset-left, 12px));
+padding-right: max(12px, env(safe-area-inset-right, 12px));
+```
+
+The reader content area (`reader-page.bars-visible`) applies matching top/bottom padding so pages are never hidden under the bars:
+
+```css
+padding-top:    calc(52px + env(safe-area-inset-top, 0px));
+padding-bottom: calc(52px + env(safe-area-inset-bottom, 0px));
+```
+
+The settings panel offset accounts for the variable-height top bar:
+
+```css
+top: calc(52px + env(safe-area-inset-top, 0px));
+```
+
+### Small-screen controls (≤ 600px)
+
+- The **zoom slider** (`~170px`) is hidden; `+`/`−` step buttons remain.
+- The **page scrubber** gets the full available width.
+- The settings panel expands to `width: 100vw` (no left border) for full-width overlay.
+- The manga title in the top bar shrinks to `max-width: 38vw` to leave room for nav buttons.
+
 ## Keyboard Navigation
 
 | Key | Action |

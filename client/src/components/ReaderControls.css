@@ -24,12 +24,22 @@
   top: 0;
   transform: translateY(-100%);
   border-bottom: 1px solid rgba(255,255,255,0.08);
+  /* Extend into the status-bar / notch area */
+  padding-top: env(safe-area-inset-top, 0px);
+  height: calc(52px + env(safe-area-inset-top, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 12px));
+  padding-right: max(12px, env(safe-area-inset-right, 12px));
 }
 
 .reader-bar-bottom {
   bottom: 0;
   transform: translateY(100%);
   border-top: 1px solid rgba(255,255,255,0.08);
+  /* Extend below the home indicator */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  height: calc(52px + env(safe-area-inset-bottom, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 12px));
+  padding-right: max(12px, env(safe-area-inset-right, 12px));
 }
 
 .reader-bar.visible.reader-bar-top  { transform: translateY(0); }
@@ -136,10 +146,10 @@
 /* Settings panel */
 .reader-settings {
   position: fixed;
-  top: 52px;
+  top: calc(52px + env(safe-area-inset-top, 0px));
   right: 0;
   width: 300px;
-  max-height: calc(100vh - 104px);
+  max-height: calc(100vh - 52px - env(safe-area-inset-top, 0px) - 52px - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
   background: rgba(18, 18, 18, 0.98);
   border-left: 1px solid var(--border);
@@ -292,7 +302,21 @@
 .setting-select:focus { outline: none; border-color: var(--accent); }
 
 @media (max-width: 600px) {
-  .reader-zoom-slider { width: 60px; }
-  .reader-manga-title { max-width: 160px; }
-  .reader-settings { width: 100vw; }
+  /* Bottom bar: hide the zoom slider and label — too cramped on small screens.
+     +/− buttons remain so the user can still nudge zoom level.
+     Pinch-to-zoom is the primary mobile zoom gesture. */
+  .reader-zoom-slider { display: none; }
+  .reader-zoom-label  { display: none; }
+
+  /* Tighten the gap inside the zoom button pair */
+  .reader-zoom-bar { gap: 2px; }
+
+  /* Clip long manga titles on narrow screens */
+  .reader-manga-title { max-width: 38vw; }
+
+  /* Settings panel spans the full width */
+  .reader-settings {
+    width: 100vw;
+    border-left: none;
+  }
 }

@@ -262,8 +262,12 @@
   padding: 6px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
+  /* Ensure a comfortable touch target */
+  width: 40px;
+  height: 40px;
 }
 .lib-hamburger:hover { background: var(--bg-hover); }
+.lib-hamburger:active { background: var(--bg-hover); }
 
 /* ── Mobile-only sort+scan bar ── */
 .lib-mobile-bar {
@@ -284,6 +288,9 @@
   z-index: 199;
   opacity: 0;
   transition: opacity 0.25s;
+  /* CRITICAL: never intercept touches when the drawer is closed.
+     Without this, the invisible fixed overlay blocks every tap on the page. */
+  pointer-events: none;
 }
 
 /* ── Drawer header (close button row) — hidden on desktop ── */
@@ -350,11 +357,26 @@
   }
   .lib-drawer-close:hover { color: var(--text-primary); background: var(--bg-hover); }
 
-  /* Always show delete buttons inside drawer */
-  .library-sidebar-delete-btn { opacity: 1; }
+  /* Always show delete buttons inside drawer with a comfortable tap area */
+  .library-sidebar-delete-btn {
+    opacity: 1;
+    padding: 8px 10px;
+  }
 
   /* Grid and main adjustments */
   .manga-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
   .library-main { padding: 16px; }
   .library-search-wrap { max-width: none; flex: 1; min-width: 0; }
+}
+
+/* ── Very small phones (≤ 420 px) ── */
+@media (max-width: 420px) {
+  .manga-grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 10px;
+  }
+  .library-main { padding: 12px; }
+  /* Compact the navbar on tiny screens */
+  .navbar { gap: 6px; padding: 0 12px; }
+  .navbar-logo { height: 32px; }
 }

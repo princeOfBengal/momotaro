@@ -40,7 +40,21 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }
 // Serve built React client (production)
 const clientDist = path.join(__dirname, '../../client/dist');
 if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  app.use(express.static(clientDist, {
+    setHeaders(res, filePath) {
+      // Service worker and its registration script must never be served from
+      // the HTTP cache — the browser must re-fetch them on every load so it
+      // can detect updates.  All other static assets use the default ETag
+      // behaviour (conditional re-validation).
+      if (
+        filePath.endsWith('sw.js') ||
+        filePath.endsWith('registerSW.js') ||
+        filePath.endsWith('manifest.webmanifest')
+      ) {
+        res.setHeader('Cache-Control', 'no-store, no-cache');
+      }
+    },
+  }));
   app.get('*', (req, res) => {
     res.sendFile(path.join(clientDist, 'index.html'));
   });

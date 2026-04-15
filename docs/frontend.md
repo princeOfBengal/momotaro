@@ -47,6 +47,7 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 - The status badge in the modal reflects the current source: "Local file", "Linked to AniList", "Linked to Doujinshi.info", or "No metadata linked"
 - Progress badge on each chapter (read / current / unread)
 - Resume reading button (jumps to last read chapter+page)
+- **Mobile Settings dropdown** — on screens ≤ 640 px the individual *Metadata*, *Optimize*, and *More Info* buttons are replaced by a single **Settings ▾** dropdown (class `detail-settings-wrap detail-mobile-only`). Tapping an item closes the dropdown then opens the relevant modal. On desktop the three buttons remain visible individually (class `detail-desktop-only`).
 
 ### Reader (`src/pages/Reader.jsx`)
 
@@ -59,7 +60,7 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 - Accepts an optional `location.state.section` value on navigation to open a specific tab directly (e.g. the "Go to Library Management" button in the first-time setup state passes `{ section: 'libraries' }`)
 - **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device
 - **Doujinshi.Info tab**: email + password login form; login state is server-wide (shared across all devices)
-- **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The **Bulk Metadata Pull** button shows a source dropdown (AniList / Doujinshi.info) before starting the pull
+- **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The **Bulk Metadata Pull** button shows a source dropdown (AniList / Doujinshi.info) before starting the pull. After the request returns, a status line is shown under the library card indicating how many titles will be fetched vs. how many were skipped because they already have metadata (e.g. *"Pulling metadata for 12 titles in the background. 38 skipped (already have metadata)."* or *"All 50 titles already have metadata — nothing to pull."*)
 
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
@@ -134,8 +135,132 @@ api.doujinshiLogout()                         // Doujinshi.info logout
 
 ## PWA
 
-`vite-plugin-pwa` generates a service worker and `manifest.json`. The app can be installed as a PWA on mobile/desktop. Icons are in `client/public/`. The logo image (`logo.png`) is also in `client/public/` and pre-cached by the service worker via the `globPatterns` config.
+`vite-plugin-pwa` generates a service worker (`sw.js`) and `manifest.webmanifest` at build time. The app is fully installable as a PWA on Android and iOS.
+
+### Manifest
+
+Key fields in `vite.config.js`:
+
+| Field | Value | Notes |
+| --- | --- | --- |
+| `id` | `/` | Stable app identity independent of server hostname/IP |
+| `display` | `standalone` | Hides browser chrome when installed |
+| `orientation` | `any` | Allows portrait and landscape |
+| `prefer_related_applications` | `false` | Prevents Android from suppressing the install prompt |
+| `theme_color` | `#1a1a1a` | Matches the navbar background |
+| `background_color` | `#0f0f0f` | Shown during splash screen |
+
+Icons in `client/public/`:
+
+| File | Size | Purpose |
+| --- | --- | --- |
+| `icon-192.png` | 192 × 192 | Standard Android home screen icon |
+| `icon-512.png` | 512 × 512 | High-res + maskable (listed twice in manifest) |
+| `apple-touch-icon.png` | 180 × 180 | iOS "Add to Home Screen" icon |
+| `icon.svg` | — | Favicon, also pre-cached |
+
+### Service worker headers
+
+The server (`server/src/index.js`) overrides `Cache-Control` for PWA-critical files so the browser always re-fetches them and picks up updates:
+
+```text
+sw.js              → Cache-Control: no-store, no-cache
+registerSW.js      → Cache-Control: no-store, no-cache
+manifest.webmanifest → Cache-Control: no-store, no-cache
+```
+
+All other static assets (JS bundles, CSS) use Express's default ETag-based conditional revalidation.
+
+### Service worker update behaviour
+
+`skipWaiting: true` and `clientsClaim: true` are set in the Workbox config. When a new build is deployed, the new service worker activates immediately and takes control of all open tabs without waiting for them to be closed.
+
+### Caching strategy
+
+The service worker uses five named caches with different strategies matched in priority order:
+
+| Cache | URL pattern | Strategy | Max entries | TTL |
+| --- | --- | --- | --- | --- |
+| `page-images` | `/api/pages/:id/image` | CacheFirst | 5 000 | 1 year |
+| `thumbnails` | `/thumbnails/*` | CacheFirst | 2 000 | 1 year |
+| `chapter-pages-meta` | `/api/chapters/:id/pages` | CacheFirst | 1 000 | 30 days |
+| `browse-data` | `/api/(library\|libraries\|manga\|chapters\|reading-lists\|stats)` | StaleWhileRevalidate | 500 | 30 days |
+| `api-misc` | `/api/*` (catch-all) | NetworkFirst | 200 | 7 days |
+
+**Why each strategy:**
+
+- **CacheFirst** for page images and thumbnails — content is identified by a numeric ID and never mutated; there is no benefit to a network round-trip once cached.
+- **CacheFirst** for chapter page listings — page paths and dimensions are written once at scan time and never updated for a given chapter ID. Eliminates a network call on every reader open.
+- **StaleWhileRevalidate** for browse data — library listings, manga detail, chapter lists, reading lists, and stats change only on scan or metadata update. The cached version is returned instantly; the fresh version is fetched in the background so the next visit reflects any changes.
+- **NetworkFirst** for everything else — reading progress must be accurate; search results are ephemeral. Falls back to a 7-day cache if the server is unreachable (e.g. away from home network).
+
+### Installation requirement
+
+Android Chrome requires **HTTPS** (or `localhost`) to show the install prompt. iOS Safari's "Add to Home Screen" works over plain HTTP. For home-server deployments a reverse proxy with a self-signed certificate (e.g. Caddy) satisfies the HTTPS requirement.
+
+## Mobile UI
+
+The app is fully responsive and designed to work on phones and small screens. No separate mobile routes — the same pages adapt via CSS media queries.
+
+### Breakpoints
+
+| Breakpoint | Affects |
+| --- | --- |
+| `≤ 700px` | Library page drawer, global button tap targets |
+| `≤ 640px` | MangaDetail layout, Settings tab bar |
+| `≤ 600px` | Reader controls, MangaDetail bottom-sheet modals |
+| `≤ 580px` | Libraries management page |
+| `≤ 420px` | Very small phones — smaller grid columns, compact navbar |
+
+### Library page (≤ 700px)
+
+- The sidebar collapses into a fixed slide-out **drawer** (`transform: translateX(-100%)` → `translateX(0)` when `.drawer-open`).
+- A **hamburger button** (40 × 40 px) in the navbar triggers the drawer.
+- A **semi-transparent backdrop** (`position: fixed; inset: 0; z-index: 199`) covers the page when the drawer is open so tapping outside closes it.
+- **Important**: the backdrop element is always in the DOM at `≤ 700px` but uses `opacity: 0; pointer-events: none` when closed so it never intercepts taps. Only the `.open` class restores `opacity: 1; pointer-events: auto`.
+- Manga grid columns shrink to `minmax(130px, 1fr)` (100px at `≤ 420px`).
+- A mobile-only sort bar replaces the toolbar that is hidden with `.lib-desktop-only`.
+
+### MangaDetail page (≤ 640px / ≤ 600px)
+
+- Action buttons stretch to fill the full row width.
+- *Metadata*, *Optimize*, and *More Info* are consolidated into a **Settings ▾** dropdown to save row space (see MangaDetail page description above).
+- The metadata/search **modals become bottom sheets** at `≤ 600px`: `align-items: flex-end`, rounded top corners only, `max-height: 88vh`.
+
+### Reader (≤ 600px)
+
+- The **zoom slider** is hidden; `+`/`−` step buttons remain so zoom is still adjustable.
+- The settings panel expands to full viewport width (`width: 100vw; border-left: none`).
+- Both control bars (top and bottom) use `env(safe-area-inset-*)` to avoid overlap with the iOS notch and home indicator.
+- The reader content area adds matching padding via `env(safe-area-inset-top/bottom)` when bars are visible.
+
+### Settings page (≤ 640px)
+
+- The left sidebar becomes a **horizontal scrolling tab bar** (no scrollbar visible, accent underline on active tab).
+- Nav items meet the 44 px minimum touch target.
+
+### Global touch improvements (`src/styles/global.css`, `≤ 700px`)
+
+- All `.btn` elements have `min-height: 44px` to meet Apple/Google tap-target guidelines.
+- `-webkit-tap-highlight-color: transparent` removes the grey tap flash on iOS Safari.
+- Explicit `:active` states replace `:hover` feedback (hover states don't persist after touch).
+
+### PWA / safe-area
+
+The app targets `viewport-fit=cover` (set in `index.html`) so the content fills the entire screen on notched devices. Control bars and the navbar use `env(safe-area-inset-*)` to stay inside the safe area.
 
 ## CSS Architecture
 
 No CSS framework — hand-written component-scoped CSS files. Global base styles in `src/styles/global.css`. Dark-first color scheme with CSS custom properties.
+
+### File overview
+
+| File | Scope |
+| --- | --- |
+| `src/styles/global.css` | CSS variables, base resets, navbar, shared button classes, global mobile touch rules |
+| `src/pages/Library.css` | Library grid, sidebar/drawer, hamburger, backdrop |
+| `src/pages/MangaDetail.css` | Detail layout, chapter list, modals / bottom sheets |
+| `src/pages/Reader.css` | Full-screen reader layout, `bars-visible` padding |
+| `src/components/ReaderControls.css` | Top/bottom bars, zoom controls, settings panel |
+| `src/pages/Settings.css` | Settings layout, tab bar, stat tiles/grid |
+| `src/pages/Libraries.css` | Library management list and form |

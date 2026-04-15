@@ -470,7 +470,9 @@ export default function MangaDetail() {
   const [togglingList, setTogglingList] = useState(null);
   const [showListDropdown, setShowListDropdown] = useState(false);
   const [showMetaModal, setShowMetaModal] = useState(false);
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const listDropdownRef = useRef(null);
+  const settingsDropdownRef = useRef(null);
 
   useEffect(() => {
     if (!showListDropdown) return;
@@ -482,6 +484,17 @@ export default function MangaDetail() {
     document.addEventListener('mousedown', onMouseDown);
     return () => document.removeEventListener('mousedown', onMouseDown);
   }, [showListDropdown]);
+
+  useEffect(() => {
+    if (!showSettingsDropdown) return;
+    function onMouseDown(e) {
+      if (settingsDropdownRef.current && !settingsDropdownRef.current.contains(e.target)) {
+        setShowSettingsDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [showSettingsDropdown]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -836,15 +849,41 @@ export default function MangaDetail() {
                   Reset Progress
                 </button>
               )}
-              <button className="btn btn-ghost" onClick={() => setShowMetaModal(true)}>
+              {/* Desktop: individual buttons */}
+              <button className="btn btn-ghost detail-desktop-only" onClick={() => setShowMetaModal(true)}>
                 Metadata
               </button>
-              <button className="btn btn-ghost" onClick={openOptimizeModal}>
+              <button className="btn btn-ghost detail-desktop-only" onClick={openOptimizeModal}>
                 Optimize
               </button>
-              <button className="btn btn-ghost" onClick={handleOpenInfo}>
+              <button className="btn btn-ghost detail-desktop-only" onClick={handleOpenInfo}>
                 More Info
               </button>
+              {/* Mobile: consolidated Settings dropdown */}
+              <div className="detail-settings-wrap detail-mobile-only" ref={settingsDropdownRef}>
+                <button
+                  className={`btn btn-ghost detail-settings-trigger${showSettingsDropdown ? ' open' : ''}`}
+                  onClick={() => setShowSettingsDropdown(v => !v)}
+                >
+                  Settings
+                  <svg className="detail-settings-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1 1l4 4 4-4"/>
+                  </svg>
+                </button>
+                {showSettingsDropdown && (
+                  <div className="detail-settings-dropdown">
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); setShowMetaModal(true); }}>
+                      Metadata
+                    </button>
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openOptimizeModal(); }}>
+                      Optimize
+                    </button>
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); handleOpenInfo(); }}>
+                      More Info
+                    </button>
+                  </div>
+                )}
+              </div>
               {readingLists.length > 0 && (
                 <div className="rl-dropdown-wrap" ref={listDropdownRef}>
                   <button

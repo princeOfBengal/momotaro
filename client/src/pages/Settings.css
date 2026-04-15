@@ -414,18 +414,45 @@
 /* ── Responsive ── */
 @media (max-width: 640px) {
   .sp-layout { flex-direction: column; }
+
+  /* Horizontal scrolling tab bar */
   .sp-sidebar {
     width: 100%;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    padding: 12px 0;
+    padding: 0;
     display: flex;
     flex-direction: row;
     overflow-x: auto;
+    /* Hide scrollbar while still scrollable */
+    scrollbar-width: none;
     gap: 0;
   }
+  .sp-sidebar::-webkit-scrollbar { display: none; }
   .sp-sidebar-heading { display: none; }
-  .sp-nav-item { white-space: nowrap; padding: 8px 14px; font-size: 13px; }
+
+  /* Nav items: pill-style tabs with visible active state */
+  .sp-nav-item {
+    white-space: nowrap;
+    padding: 12px 16px;
+    font-size: 13px;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    gap: 6px;
+    min-height: 44px;
+  }
+  .sp-nav-item.active {
+    border-bottom-color: var(--accent);
+    background: none;
+    color: var(--accent);
+  }
+  .sp-nav-item:hover { background: var(--bg-hover); }
+
   .sp-content { padding: 20px 16px; }
   .sp-section-head { flex-direction: column; }
+  .sp-section-desc { max-width: none; }
+
+  /* Statistics grid: stack on mobile */
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-tile { min-width: 80px; padding: 12px 8px 10px; }
 }

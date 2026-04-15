@@ -71,6 +71,7 @@ function LibrariesSection() {
   const [editError, setEditError] = useState(null);
   const [scanning, setScanning] = useState(null);
   const [bulkPulling, setBulkPulling] = useState(null);
+  const [bulkStatus, setBulkStatus] = useState(null); // { libId, message }
   const [bulkOptimizing, setBulkOptimizing] = useState(null);
   const [bulkSourceDropdown, setBulkSourceDropdown] = useState(null); // lib.id of open dropdown
 
@@ -144,8 +145,19 @@ function LibrariesSection() {
   async function handleBulkMetadata(lib, source) {
     setBulkSourceDropdown(null);
     setBulkPulling(lib.id);
+    setBulkStatus(null);
     try {
-      await api.bulkMetadata(lib.id, source);
+      const result = await api.bulkMetadata(lib.id, source);
+      const { to_fetch, skipped_existing, total } = result;
+      let message;
+      if (to_fetch === 0) {
+        message = `All ${total} titles already have metadata — nothing to pull.`;
+      } else if (skipped_existing > 0) {
+        message = `Pulling metadata for ${to_fetch} title${to_fetch !== 1 ? 's' : ''} in the background. ${skipped_existing} skipped (already have metadata).`;
+      } else {
+        message = `Pulling metadata for ${to_fetch} title${to_fetch !== 1 ? 's' : ''} in the background.`;
+      }
+      setBulkStatus({ libId: lib.id, message });
     } catch (err) {
       alert('Bulk metadata pull failed: ' + err.message);
     } finally {
@@ -302,6 +314,9 @@ function LibrariesSection() {
                       Delete
                     </button>
                   </div>
+                  {bulkStatus?.libId === lib.id && (
+                    <p className="lp-bulk-status">{bulkStatus.message}</p>
+                  )}
                 </>
               )}
             </div>

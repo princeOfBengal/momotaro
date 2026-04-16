@@ -10,6 +10,7 @@ const router = express.Router();
 const SECRET_KEYS = [
   'anilist_token', 'anilist_client_secret',
   'doujinshi_token', 'doujinshi_refresh_token',
+  'mal_client_id',
 ];
 const USER_KEYS = ['anilist_user_id', 'anilist_username', 'anilist_avatar'];
 
@@ -66,14 +67,15 @@ router.get('/settings', asyncWrapper(async (req, res) => {
       anilist_username:          session?.anilist_username || null,
       anilist_avatar:            session?.anilist_avatar   || null,
       doujinshi_logged_in:       !!(raw['doujinshi_token']),
+      mal_client_id_set:         !!(raw['mal_client_id']),
     },
   });
 }));
 
-// PUT /api/settings — save client_id and/or client_secret
+// PUT /api/settings — save client credentials
 router.put('/settings', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const allowed = ['anilist_client_id', 'anilist_client_secret'];
+  const allowed = ['anilist_client_id', 'anilist_client_secret', 'mal_client_id'];
   for (const key of allowed) {
     if (key in req.body) setSetting(db, key, req.body[key]);
   }

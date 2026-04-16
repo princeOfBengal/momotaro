@@ -68,6 +68,8 @@ export const api = {
   getSettings: () => apiFetch('/api/settings'),
   saveSettings: (body) =>
     apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  saveMalClientId: (clientId) =>
+    apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ mal_client_id: clientId }) }),
   clearAnilistToken: () =>
     apiFetch('/api/settings/anilist_token', { method: 'DELETE' }),
 
@@ -106,6 +108,8 @@ export const api = {
     }),
   bulkOptimize: (libraryId) =>
     apiFetch(`/api/libraries/${libraryId}/bulk-optimize`, { method: 'POST' }),
+  exportMetadata: (libraryId) =>
+    apiFetch(`/api/libraries/${libraryId}/export-metadata`, { method: 'POST' }),
   searchAnilist: (q, page = 1) =>
     apiFetch(`/api/anilist/search?${new URLSearchParams({ q, page })}`),
   applyMetadata: (mangaId, anilistId) =>
@@ -119,6 +123,19 @@ export const api = {
     apiFetch(`/api/manga/${mangaId}/apply-doujinshi-metadata`, {
       method: 'POST',
       body: JSON.stringify({ slug }),
+    }),
+  resetMetadata: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/reset-metadata`, { method: 'POST' }),
+  exportMangaMetadata: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/export-metadata`, { method: 'POST' }),
+  refreshMalMetadata: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/refresh-mal-metadata`, { method: 'POST' }),
+  searchMal: (q, page = 1) =>
+    apiFetch(`/api/mal/search?${new URLSearchParams({ q, page })}`),
+  applyMalMetadata: (mangaId, malId) =>
+    apiFetch(`/api/manga/${mangaId}/apply-mal-metadata`, {
+      method: 'POST',
+      body: JSON.stringify({ mal_id: malId }),
     }),
 
   getAnilistStatus: (mangaId) => apiFetch(`/api/manga/${mangaId}/anilist-status`),

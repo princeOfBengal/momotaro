@@ -7,6 +7,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { fetchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
 const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
+const { fetchFromMAL, searchMAL, fetchByMALId } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
 const config = require('../config');
 
@@ -18,6 +19,10 @@ function getToken(db) {
 
 function getDoujinshiToken(db) {
   return getSetting(db, 'doujinshi_token');
+}
+
+function getMalClientId(db) {
+  return getSetting(db, 'mal_client_id');
 }
 
 function applyMetadataToDb(db, mangaId, result) {
@@ -53,11 +58,14 @@ function applyMetadataToDb(db, mangaId, result) {
 }
 
 /**
- * Download the AniList cover image, resize to thumbnail dimensions, and save
- * it to the thumbnails directory. Updates cover_image in the DB.
+ * Download a source cover image, resize to thumbnail dimensions, and save
+ * it to the thumbnails directory. Updates cover_image and the source-specific
+ * cover column in the DB.
+ *
+ * source: 'anilist' | 'myanimelist'
  * Runs best-effort — never throws so metadata apply never fails due to a bad image.
  */
-async function fetchAndStoreCover(db, mangaId, coverUrl) {
+async function fetchAndStoreCover(db, mangaId, coverUrl, source = 'anilist') {
   if (!coverUrl) return;
   try {
     const resp = await fetch(coverUrl);
@@ -66,23 +74,33 @@ async function fetchAndStoreCover(db, mangaId, coverUrl) {
 
     fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
 
-    // Save to a dedicated AniList file that is never overwritten by user actions
-    const anilistName = `${mangaId}_anilist.webp`;
-    const anilistPath = path.join(config.THUMBNAIL_DIR, anilistName);
+    // Source-specific filename and DB column
+    const SOURCE_META = {
+      anilist:     { suffix: 'anilist', dbField: 'anilist_cover' },
+      myanimelist: { suffix: 'mal',     dbField: 'mal_cover'     },
+    };
+    const meta      = SOURCE_META[source] || null;
+    const savedName = meta ? `${mangaId}_${meta.suffix}.webp` : `${mangaId}_cover.webp`;
+    const savedPath = path.join(config.THUMBNAIL_DIR, savedName);
 
     await sharp(buffer)
       .resize(300, 430, { fit: 'cover', position: 'top' })
       .webp({ quality: 85 })
-      .toFile(anilistPath);
+      .toFile(savedPath);
 
     // Copy to the active cover
     const activePath = path.join(config.THUMBNAIL_DIR, `${mangaId}.webp`);
-    fs.copyFileSync(anilistPath, activePath);
+    fs.copyFileSync(savedPath, activePath);
 
-    db.prepare('UPDATE manga SET cover_image = ?, anilist_cover = ? WHERE id = ?')
-      .run(`${mangaId}.webp`, anilistName, mangaId);
+    if (meta) {
+      db.prepare(`UPDATE manga SET cover_image = ?, ${meta.dbField} = ? WHERE id = ?`)
+        .run(`${mangaId}.webp`, savedName, mangaId);
+    } else {
+      db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
+        .run(`${mangaId}.webp`, mangaId);
+    }
 
-    console.log(`[Metadata] Cover saved for manga ${mangaId}`);
+    console.log(`[Metadata] Cover saved for manga ${mangaId} (${source})`);
   } catch (err) {
     console.warn(`[Metadata] Could not fetch cover for manga ${mangaId}: ${err.message}`);
   }
@@ -107,7 +125,7 @@ router.post('/manga/:id/refresh-metadata', asyncWrapper(async (req, res) => {
   }
 
   applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'anilist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -143,7 +161,7 @@ router.post('/manga/:id/apply-metadata', asyncWrapper(async (req, res) => {
   if (!result) return res.status(404).json({ error: 'Entry not found on AniList' });
 
   applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'anilist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -211,7 +229,7 @@ router.post('/manga/:id/apply-doujinshi-metadata', asyncWrapper(async (req, res)
   if (!result) return res.status(404).json({ error: 'Entry not found on Doujinshi.info' });
 
   applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'doujinshi');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -234,7 +252,68 @@ router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, re
   }
 
   applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'doujinshi');
+
+  const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
+  res.json({
+    found: true,
+    data: { ...updated, genres: safeJsonParse(updated.genres, []) },
+  });
+}));
+
+// GET /api/mal/search?q=...&page=1 — manual MAL search returning up to 10 results
+router.get('/mal/search', asyncWrapper(async (req, res) => {
+  const { q, page = '1' } = req.query;
+  if (!q || !q.trim()) return res.status(400).json({ error: 'q parameter is required' });
+
+  const db = getDb();
+  const clientId = getMalClientId(db);
+  if (!clientId) return res.status(400).json({ error: 'MyAnimeList Client ID is not configured in Settings.' });
+
+  const results = await searchMAL(q.trim(), clientId, parseInt(page, 10));
+  res.json({ data: results });
+}));
+
+// POST /api/manga/:id/apply-mal-metadata — apply a specific MAL entry by ID
+router.post('/manga/:id/apply-mal-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const { mal_id } = req.body;
+  if (!mal_id) return res.status(400).json({ error: 'mal_id is required' });
+
+  const clientId = getMalClientId(db);
+  if (!clientId) return res.status(400).json({ error: 'MyAnimeList Client ID is not configured in Settings.' });
+
+  const result = await fetchByMALId(Number(mal_id), clientId);
+  if (!result) return res.status(404).json({ error: 'Entry not found on MyAnimeList' });
+
+  applyMetadataToDb(db, manga.id, result);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'myanimelist');
+
+  const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
+  res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
+}));
+
+// POST /api/manga/:id/refresh-mal-metadata — auto-fetch from MAL by title
+router.post('/manga/:id/refresh-mal-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const clientId = getMalClientId(db);
+  if (!clientId) return res.status(400).json({ error: 'MyAnimeList Client ID is not configured in Settings.' });
+
+  const cleanTitle = manga.title.replace(/\s*\(.*?\)\s*/g, ' ').trim();
+  const result = await fetchFromMAL(cleanTitle, clientId);
+
+  if (!result) {
+    return res.json({ found: false, message: 'No match found on MyAnimeList for this title.' });
+  }
+
+  applyMetadataToDb(db, manga.id, result);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, 'myanimelist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -244,15 +323,16 @@ router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, re
 }));
 
 // POST /api/libraries/:id/bulk-metadata — auto-fetch metadata for every manga in a library
-// Body: { source: 'anilist' | 'doujinshi' }  (defaults to 'anilist')
-// Only processes manga with metadata_source = 'none' — any existing metadata (local JSON,
-// AniList, or Doujinshi.info) is always preserved.
+// Body: { source: 'anilist' | 'myanimelist' | 'doujinshi' }  (defaults to 'anilist')
+// Priority when skipping: local > anilist > myanimelist > doujinshi.
+// Only processes manga with metadata_source = 'none' — any existing metadata is always preserved.
 router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
 
-  const source = (req.body?.source === 'doujinshi') ? 'doujinshi' : 'anilist';
+  const VALID_SOURCES = new Set(['anilist', 'myanimelist', 'doujinshi']);
+  const source = VALID_SOURCES.has(req.body?.source) ? req.body.source : 'anilist';
 
   // Only fetch manga that have no metadata yet — skip anything already sourced
   const totalCount = db.prepare('SELECT COUNT(*) AS n FROM manga WHERE library_id = ?').get(library.id).n;
@@ -285,6 +365,7 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
   const anilistToken   = getToken(db);
   const doujinshiToken = getDoujinshiToken(db);
+  const malClientId    = getMalClientId(db);
 
   let applied = 0;
   let noMatch = 0;
@@ -298,6 +379,10 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
         // fetchFromDoujinshi makes two HTTP requests (search + fetch by slug);
         // use a longer delay to keep total request rate reasonable.
         await new Promise(resolve => setTimeout(resolve, 500));
+      } else if (source === 'myanimelist') {
+        result = await fetchFromMAL(manga.title, malClientId);
+        // Space requests to stay within MAL rate limits
+        await new Promise(resolve => setTimeout(resolve, 700));
       } else {
         result = await fetchFromAniList(manga.title, anilistToken);
         // Stay well within AniList's ~90 req/min rate limit
@@ -306,7 +391,7 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
       if (result) {
         applyMetadataToDb(db, manga.id, result);
-        await fetchAndStoreCover(db, manga.id, result.cover_url);
+        await fetchAndStoreCover(db, manga.id, result.cover_url, source);
         applied++;
         console.log(
           `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
@@ -327,6 +412,7 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
       );
       // Still delay after errors to avoid hammering the API on repeated failures
       await new Promise(resolve => setTimeout(resolve, source === 'doujinshi' ? 500 : 700));
+
     }
   }
 
@@ -335,6 +421,116 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
     `${applied} applied, ${noMatch} no match, ${errors} errors ` +
     `(${skippedExisting} titles skipped — already had metadata).`
   );
+}));
+
+// POST /api/libraries/:id/export-metadata — write metadata.json to each manga folder that has
+// third-party metadata (metadata_source != 'none').  Responds synchronously with counts.
+router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
+  if (!library) return res.status(404).json({ error: 'Library not found' });
+
+  const totalCount = db.prepare('SELECT COUNT(*) AS n FROM manga WHERE library_id = ?').get(library.id).n;
+  const mangaList  = db.prepare(
+    "SELECT * FROM manga WHERE library_id = ? AND metadata_source != 'none'"
+  ).all(library.id);
+
+  let exported = 0;
+  let writeErrors = 0;
+
+  for (const manga of mangaList) {
+    try {
+      const genres = safeJsonParse(manga.genres, []);
+      const payload = {
+        title:           manga.title,
+        ...(manga.author      ? { author:      manga.author }      : {}),
+        ...(manga.description ? { description: manga.description } : {}),
+        ...(genres.length     ? { genres }                         : {}),
+        ...(manga.year        ? { year:        manga.year }        : {}),
+        ...(manga.score       ? { score:       manga.score }       : {}),
+        ...(manga.status      ? { status:      manga.status }      : {}),
+        ...(manga.anilist_id  ? { anilist_id:  manga.anilist_id }  : {}),
+        ...(manga.mal_id      ? { mal_id:      manga.mal_id }      : {}),
+        ...(manga.doujinshi_id ? { doujinshi_id: manga.doujinshi_id } : {}),
+        metadata_source: manga.metadata_source,
+        exported_at:     new Date().toISOString(),
+      };
+      const outPath = path.join(manga.path, 'metadata.json');
+      fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+      exported++;
+    } catch (err) {
+      writeErrors++;
+      console.warn(`[ExportMetadata] Failed for "${manga.title}": ${err.message}`);
+    }
+  }
+
+  const skipped = totalCount - mangaList.length;
+  console.log(
+    `[ExportMetadata] "${library.name}": exported ${exported}, ` +
+    `skipped ${skipped} (no metadata), ${writeErrors} write errors.`
+  );
+
+  res.json({
+    data: { total: totalCount, exported, skipped, errors: writeErrors },
+  });
+}));
+
+// POST /api/manga/:id/export-metadata — write metadata.json to this manga's folder on disk
+router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+  if (!manga.metadata_source || manga.metadata_source === 'none') {
+    return res.status(400).json({ error: 'This manga has no linked metadata to export.' });
+  }
+
+  const genres = safeJsonParse(manga.genres, []);
+  const payload = {
+    title:           manga.title,
+    ...(manga.author       ? { author:       manga.author }       : {}),
+    ...(manga.description  ? { description:  manga.description }  : {}),
+    ...(genres.length      ? { genres }                           : {}),
+    ...(manga.year         ? { year:         manga.year }         : {}),
+    ...(manga.score        ? { score:        manga.score }        : {}),
+    ...(manga.status       ? { status:       manga.status }       : {}),
+    ...(manga.anilist_id   ? { anilist_id:   manga.anilist_id }   : {}),
+    ...(manga.mal_id       ? { mal_id:       manga.mal_id }       : {}),
+    ...(manga.doujinshi_id ? { doujinshi_id: manga.doujinshi_id } : {}),
+    metadata_source: manga.metadata_source,
+    exported_at:     new Date().toISOString(),
+  };
+
+  const outPath = path.join(manga.path, 'metadata.json');
+  fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+
+  console.log(`[ExportMetadata] Wrote metadata.json for "${manga.title}" (${manga.metadata_source})`);
+  res.json({ data: { path: outPath } });
+}));
+
+// POST /api/manga/:id/reset-metadata — break external linkage and clear all sourced metadata fields
+router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  db.prepare(`
+    UPDATE manga SET
+      anilist_id      = NULL,
+      mal_id          = NULL,
+      doujinshi_id    = NULL,
+      metadata_source = 'none',
+      description     = NULL,
+      status          = NULL,
+      year            = NULL,
+      genres          = NULL,
+      score           = NULL,
+      author          = NULL,
+      updated_at      = unixepoch()
+    WHERE id = ?
+  `).run(manga.id);
+
+  const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
+  res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
 }));
 
 // GET /api/manga/:id/thumbnail-options — list all available thumbnail choices

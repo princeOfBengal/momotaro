@@ -74,6 +74,8 @@ function LibrariesSection() {
   const [bulkStatus, setBulkStatus] = useState(null); // { libId, message }
   const [bulkOptimizing, setBulkOptimizing] = useState(null);
   const [bulkSourceDropdown, setBulkSourceDropdown] = useState(null); // lib.id of open dropdown
+  const [exporting, setExporting] = useState(null); // lib.id being exported
+  const [exportStatus, setExportStatus] = useState(null); // { libId, message }
 
   useEffect(() => {
     api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
@@ -173,6 +175,28 @@ function LibrariesSection() {
       alert('Bulk optimize failed: ' + err.message);
     } finally {
       setBulkOptimizing(null);
+    }
+  }
+
+  async function handleExportMetadata(lib) {
+    setExporting(lib.id);
+    setExportStatus(null);
+    try {
+      const result = await api.exportMetadata(lib.id);
+      const { exported, skipped, errors } = result;
+      let message;
+      if (exported === 0 && skipped > 0) {
+        message = `No metadata to export — none of the ${skipped} title${skipped !== 1 ? 's' : ''} have third-party metadata yet.`;
+      } else {
+        message = `Exported metadata for ${exported} title${exported !== 1 ? 's' : ''}.`;
+        if (skipped > 0) message += ` ${skipped} skipped (no metadata).`;
+        if (errors  > 0) message += ` ${errors} write error${errors !== 1 ? 's' : ''}.`;
+      }
+      setExportStatus({ libId: lib.id, message });
+    } catch (err) {
+      alert('Metadata export failed: ' + err.message);
+    } finally {
+      setExporting(null);
     }
   }
 
@@ -286,6 +310,12 @@ function LibrariesSection() {
                           </button>
                           <button
                             className="lp-bulk-meta-option"
+                            onClick={() => handleBulkMetadata(lib, 'myanimelist')}
+                          >
+                            MyAnimeList
+                          </button>
+                          <button
+                            className="lp-bulk-meta-option"
                             onClick={() => handleBulkMetadata(lib, 'doujinshi')}
                           >
                             Doujinshi.info
@@ -303,6 +333,14 @@ function LibrariesSection() {
                     </button>
                     <button
                       className="btn btn-ghost btn-sm"
+                      onClick={() => handleExportMetadata(lib)}
+                      disabled={exporting === lib.id}
+                      title="Write metadata.json to each manga folder that has third-party metadata"
+                    >
+                      {exporting === lib.id ? 'Exporting…' : 'Export Metadata'}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
                       onClick={() => { setEditId(lib.id); setEditError(null); setShowAdd(false); }}
                     >
                       Edit
@@ -316,6 +354,9 @@ function LibrariesSection() {
                   </div>
                   {bulkStatus?.libId === lib.id && (
                     <p className="lp-bulk-status">{bulkStatus.message}</p>
+                  )}
+                  {exportStatus?.libId === lib.id && (
+                    <p className="lp-bulk-status">{exportStatus.message}</p>
                   )}
                 </>
               )}
@@ -636,6 +677,134 @@ function DoujinshiSection() {
           </form>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Section: MyAnimeList ──────────────────────────────────────────────────────
+
+function MyAnimeListSection() {
+  const [settings, setSettings] = useState(null);
+  const [clientId, setClientId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+
+  useEffect(() => {
+    api.getSettings().then(data => {
+      setSettings(data);
+    }).catch(() => {});
+  }, []);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    if (!clientId.trim()) return;
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      await api.saveMalClientId(clientId.trim());
+      setSettings(prev => ({ ...prev, mal_client_id_set: true }));
+      setClientId('');
+      setStatusMsg({ type: 'success', text: 'Client ID saved.' });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Failed to save: ' + err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleClear() {
+    if (!confirm('Remove the MyAnimeList Client ID?')) return;
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      await api.saveMalClientId('');
+      setSettings(prev => ({ ...prev, mal_client_id_set: false }));
+      setStatusMsg({ type: 'success', text: 'Client ID removed.' });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Failed: ' + err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!settings) {
+    return <div className="loading-center"><div className="spinner" /></div>;
+  }
+
+  return (
+    <div>
+      <div className="sp-section-head">
+        <div>
+          <h2 className="sp-section-title">MyAnimeList Integration</h2>
+          <p className="sp-section-desc">
+            Provide a MyAnimeList API Client ID to enable metadata search and bulk pulls
+            from{' '}
+            <a href="https://myanimelist.net" target="_blank" rel="noreferrer">MyAnimeList</a>.
+            No login is required — only the Client ID is needed to query manga metadata.
+          </p>
+        </div>
+      </div>
+
+      {statusMsg && (
+        <div className={`sp-status sp-status-${statusMsg.type}`}>{statusMsg.text}</div>
+      )}
+
+      <div className="settings-card">
+        {settings.mal_client_id_set ? (
+          <>
+            <p className="settings-username">Client ID configured</p>
+            <p className="settings-hint">
+              MyAnimeList metadata is available from the Metadata panel on any manga page
+              and via Bulk Metadata Pull in Library Management.
+            </p>
+            <div className="settings-token-actions">
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={handleClear}
+                disabled={saving}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                {saving ? 'Removing…' : 'Remove Client ID'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="settings-oauth-intro">To get a Client ID, create a free API client on MyAnimeList:</p>
+            <ol className="settings-steps">
+              <li>
+                Go to{' '}
+                <a href="https://myanimelist.net/apiconfig" target="_blank" rel="noreferrer">
+                  MyAnimeList → API Config
+                </a>{' '}
+                and click <strong>Create ID</strong>
+              </li>
+              <li>Fill in App Name and App Type, then copy the <strong>Client ID</strong></li>
+              <li>Paste the Client ID below and click Save</li>
+            </ol>
+            <form className="settings-token-form" onSubmit={handleSave}>
+              <label className="settings-label">Client ID</label>
+              <input
+                type="text"
+                className="settings-input"
+                placeholder="Paste your MAL Client ID…"
+                value={clientId}
+                onChange={e => setClientId(e.target.value)}
+                autoComplete="off"
+              />
+              <div className="settings-token-actions">
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={saving || !clientId.trim()}
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1175,6 +1344,16 @@ const SECTIONS = [
     ),
   },
   {
+    id: 'myanimelist',
+    label: 'MyAnimeList',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M8 12h8M12 8v8" />
+      </svg>
+    ),
+  },
+  {
     id: 'doujinshi',
     label: 'Doujinshi.Info',
     icon: (
@@ -1245,11 +1424,12 @@ export default function Settings() {
 
         <main className="sp-content">
           {section === 'statistics'  && <StatisticsSection />}
-          {section === 'anilist'    && <AnilistSection />}
-          {section === 'doujinshi'  && <DoujinshiSection />}
-          {section === 'reading'    && <ReadingSection />}
-          {section === 'libraries'  && <LibrariesSection />}
-          {section === 'database'   && <DatabaseSection />}
+          {section === 'anilist'     && <AnilistSection />}
+          {section === 'myanimelist' && <MyAnimeListSection />}
+          {section === 'doujinshi'   && <DoujinshiSection />}
+          {section === 'reading'     && <ReadingSection />}
+          {section === 'libraries'   && <LibrariesSection />}
+          {section === 'database'    && <DatabaseSection />}
         </main>
       </div>
     </div>

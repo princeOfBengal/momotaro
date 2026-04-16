@@ -40,12 +40,15 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
   - fallback → `folder_name`
 - **Nav drawer** — hamburger button (☰) in the navbar opens a slide-in drawer listing all libraries and reading lists. Clicking an entry navigates to `/` and passes `{ library: id }` or `{ list: id }` in React Router location state, which `Library` reads on mount to pre-select the filter.
 - **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, total file count, and folder size in MB. The request is made lazily on first open and the result is cached for the lifetime of the page.
-- **Metadata button** opens a modal with a **Source dropdown** (AniList / Doujinshi.info, defaults to AniList). Each source exposes the same two actions:
-  - *Fetch* — auto-fetch by title (`refresh-metadata` or `refresh-doujinshi-metadata`)
-  - *Search Manually* — opens a search modal (`AnilistSearchModal` or `DoujinshiSearchModal`)
+- **Metadata button** opens a modal with a **Source dropdown** (AniList / MyAnimeList / Doujinshi.info, defaults to AniList). Each source exposes the same two actions:
+  - *Fetch* — auto-fetch by title (`refresh-metadata`, `refresh-mal-metadata`, or `refresh-doujinshi-metadata`)
+  - *Search Manually* — opens a search modal (`AnilistSearchModal`, `MALSearchModal`, or `DoujinshiSearchModal`)
 - AniList search modal → `GET /api/anilist/search?q=` → `POST /api/manga/:id/apply-metadata`
+- MyAnimeList search modal → `GET /api/mal/search?q=` → `POST /api/manga/:id/apply-mal-metadata`
 - Doujinshi.info search modal → `GET /api/doujinshi/search?q=` → `POST /api/manga/:id/apply-doujinshi-metadata`
-- The status badge in the modal reflects the current source: "Local file", "Linked to AniList", "Linked to Doujinshi.info", or "No metadata linked"
+- The status badge in the modal reflects the current source: "Local file", "Linked to AniList", "Linked to MyAnimeList", "Linked to Doujinshi.info", or "No metadata linked". MyAnimeList badges link out to `myanimelist.net/manga/{mal_id}`.
+- **Export as JSON** — when the source dropdown matches the manga's currently linked source (e.g. the dropdown is set to AniList and `metadata_source === 'anilist'`), an *Export as JSON* action row appears below the *Search Manually* row. Clicking *Export* calls `POST /api/manga/:id/export-metadata`, which writes a `metadata.json` sidecar file directly to the manga's folder on disk. The result is shown as a success or error message inside the modal. The button is available independently on each of the three source tabs so the user can switch tabs to find and export the linked source's metadata.
+- **Break Linkage** — when a manga is linked to AniList, MyAnimeList, or Doujinshi.info, a danger-styled *Reset* button appears at the bottom of the modal. Clicking it calls `POST /api/manga/:id/reset-metadata`, which clears the external ID (`anilist_id`, `mal_id`, or `doujinshi_id`), nulls out all sourced metadata fields, and sets `metadata_source` back to `'none'`. Use this when the wrong title was auto-matched; the manga can then be re-linked to the correct entry. `title` and `cover_image` are preserved.
 - Progress badge on each chapter (read / current / unread)
 - Resume reading button (jumps to last read chapter+page)
 - **Clickable thumbnail** — the cover image has the `detail-cover-clickable` class and shows a "Change" hint overlay on hover. Clicking it opens the **Thumbnail Picker Modal**, which fetches `GET /api/manga/:id/thumbnail-options` and presents four ordered sections:
@@ -66,8 +69,14 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 
 - Accepts an optional `location.state.section` value on navigation to open a specific tab directly (e.g. the "Go to Library Management" button in the first-time setup state passes `{ section: 'libraries' }`)
 - **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device
+- **MyAnimeList tab**: enter Client ID (no login required); stored server-wide. Shows "Client ID configured" when set, with a *Remove Client ID* button to clear it
 - **Doujinshi.Info tab**: email + password login form; login state is server-wide (shared across all devices)
-- **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The **Bulk Metadata Pull** button shows a source dropdown (AniList / Doujinshi.info) before starting the pull. After the request returns, a status line is shown under the library card indicating how many titles will be fetched vs. how many were skipped because they already have metadata (e.g. *"Pulling metadata for 12 titles in the background. 38 skipped (already have metadata)."* or *"All 50 titles already have metadata — nothing to pull."*)
+- **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The page uses a wider content area (max-width 1100 px) to accommodate all action buttons on each library card. Each library card shows the following actions:
+  - **Scan Now** — triggers `POST /api/libraries/:id/scan`
+  - **Bulk Metadata Pull ▾** — shows a source dropdown (AniList / MyAnimeList / Doujinshi.info) before starting the pull. After the request returns, a status line is shown under the card indicating how many titles will be fetched vs. how many were skipped (e.g. *"Pulling metadata for 12 titles in the background. 38 skipped (already have metadata)."* or *"All 50 titles already have metadata — nothing to pull."*)
+  - **Bulk Optimize** — converts chapters to CBZ and standardises filenames
+  - **Export Metadata** — calls `POST /api/libraries/:id/export-metadata`, which writes a `metadata.json` sidecar file into every manga folder that has third-party metadata (`metadata_source != 'none'`). After it completes, a status line shows how many titles were exported and how many were skipped. The exported files use field names that the local metadata scanner already understands, so a database reset followed by a rescan will re-import the metadata automatically.
+  - **Edit** / **Delete** — rename or remove the library
 - **Database tab**: maintenance operations for the server's database and on-disk cache:
   - *CBZ Cache* — displays the current cache size; **Clear Cache** deletes all extracted pages from `CBZ_CACHE_DIR` (pages are re-extracted on next access)
   - *Regenerate Thumbnails* — **Regenerate All** fires `POST /api/admin/regenerate-thumbnails`; the job runs in the background and the UI shows a confirmation with the total manga count. For each manga, the AniList cover is restored if available, otherwise a new thumbnail is generated from the first page of the first chapter
@@ -130,12 +139,19 @@ Metadata methods:
 
 ```js
 api.refreshMetadata(mangaId)                  // AniList auto-fetch by title
+api.refreshMalMetadata(mangaId)               // MyAnimeList auto-fetch by title
 api.refreshDoujinshiMetadata(mangaId)         // Doujinshi.info auto-fetch by title
 api.searchAnilist(q, page)                    // AniList manual search
+api.searchMal(q, page)                        // MyAnimeList manual search
 api.searchDoujinshi(q, page)                  // Doujinshi.info manual search
 api.applyMetadata(mangaId, anilistId)         // Apply AniList result by ID
+api.applyMalMetadata(mangaId, malId)          // Apply MyAnimeList result by ID
 api.applyDoujinshiMetadata(mangaId, slug)     // Apply Doujinshi.info result by slug
-api.bulkMetadata(libraryId, source)           // Bulk pull — source: 'anilist' | 'doujinshi'
+api.resetMetadata(mangaId)                    // Break external linkage and clear sourced fields
+api.bulkMetadata(libraryId, source)           // Bulk pull — source: 'anilist' | 'myanimelist' | 'doujinshi'
+api.exportMetadata(libraryId)                 // Write metadata.json to each manga folder with third-party metadata
+api.exportMangaMetadata(mangaId)              // Write metadata.json for a single manga
+api.saveMalClientId(clientId)                 // Save (or clear with '') MAL Client ID
 api.doujinshiLogin(email, password)           // Doujinshi.info login
 api.doujinshiLogout()                         // Doujinshi.info logout
 ```

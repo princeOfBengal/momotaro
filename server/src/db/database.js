@@ -147,6 +147,7 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'doujinshi_id',   'TEXT');
   addColumnIfMissing(db, 'manga',     'anilist_cover',  'TEXT');
   addColumnIfMissing(db, 'manga',     'original_cover', 'TEXT');
+  addColumnIfMissing(db, 'manga',     'mal_cover',      'TEXT');
 }
 
 /**

@@ -26,6 +26,7 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 | DELETE | `/api/libraries/:id` | Delete library and all its manga |
 | POST | `/api/libraries/:id/scan` | Trigger manual scan of one library |
 | POST | `/api/scan` | Trigger full scan of all libraries |
+| POST | `/api/libraries/:id/export-metadata` | Write `metadata.json` to each manga folder that has third-party metadata |
 
 ---
 
@@ -173,6 +174,57 @@ Both `refresh-metadata` and `apply-metadata` write the `author` field in additio
 
 Spaces in the `q` parameter are automatically replaced with underscores before the upstream request is made (see [doujinshi.md](./doujinshi.md#search-mechanics)).
 
+### MyAnimeList
+
+| Method | Path                                    | Description                                          |
+| ------ | --------------------------------------- | ---------------------------------------------------- |
+| POST   | `/api/manga/:id/refresh-mal-metadata`   | Auto-fetch from MyAnimeList by title                 |
+| POST   | `/api/manga/:id/apply-mal-metadata`     | Apply a specific MAL result `{ mal_id }`             |
+| GET    | `/api/mal/search?q=&page=`              | Search MyAnimeList by title (manual search)          |
+
+All three endpoints require a MAL Client ID to be configured in Settings (`mal_client_id`). Requests use the `X-MAL-CLIENT-ID` header — no OAuth login is required.
+
+`refresh-mal-metadata` applies the same title-cleaning as the AniList equivalent (strips parenthetical suffixes, brackets, and curly-brace content, normalises hyphens/underscores to spaces).
+
+Author is extracted from the `authors` field of the MAL response, preferring entries with role `"Story & Art"`, `"Story"`, or `"Art"`. If none of those roles match, the first listed author is used as a fallback.
+
+### Export Metadata (per-manga)
+
+| Method | Path                             | Description                                          |
+| ------ | -------------------------------- | ---------------------------------------------------- |
+| POST   | `/api/manga/:id/export-metadata` | Write `metadata.json` to this manga's folder on disk |
+
+Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. The manga must have `metadata_source != 'none'`; returns 400 otherwise. The file includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
+
+**Response shape:**
+
+```json
+{ "data": { "path": "/library/My Manga/metadata.json" } }
+```
+
+### Reset Metadata
+
+| Method | Path                            | Description                                                  |
+| ------ | ------------------------------- | ------------------------------------------------------------ |
+| POST   | `/api/manga/:id/reset-metadata` | Break external linkage and clear all sourced metadata fields |
+
+Clears the AniList or Doujinshi.info linkage for a manga and resets all fields that were populated by the external source:
+
+| Field reset       | Value after reset |
+| ----------------- | ----------------- |
+| `anilist_id`      | `NULL`            |
+| `mal_id`          | `NULL`            |
+| `doujinshi_id`    | `NULL`            |
+| `metadata_source` | `'none'`          |
+| `description`     | `NULL`            |
+| `status`          | `NULL`            |
+| `year`            | `NULL`            |
+| `genres`          | `NULL`            |
+| `score`           | `NULL`            |
+| `author`          | `NULL`            |
+
+`title` and `cover_image` are left untouched. Returns the updated manga row. Use this when the wrong title was auto-matched and you want a clean slate before re-linking to the correct entry.
+
 ### Bulk Metadata Pull
 
 `POST /api/libraries/:id/bulk-metadata` accepts an optional body:
@@ -181,9 +233,11 @@ Spaces in the `q` parameter are automatically replaced with underscores before t
 { "source": "anilist" }
 ```
 
-`source` can be `"anilist"` (default) or `"doujinshi"`. The endpoint responds immediately; the actual fetch loop runs in the background.
+`source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. The endpoint responds immediately; the actual fetch loop runs in the background.
 
-**Skip logic** — only manga with `metadata_source = 'none'` are processed. Any title that already has metadata from any source (local JSON, AniList, or Doujinshi.info) is always skipped. Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
+**Skip logic** — only manga with `metadata_source = 'none'` are processed. Any title that already has metadata from any source (local JSON, AniList, MyAnimeList, or Doujinshi.info) is always skipped. Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
+
+**Source priority** — when bulk-pulling with different sources, the enforced preference order is: local JSON > AniList > MyAnimeList > Doujinshi.info. Because bulk pulls skip any title with existing metadata, a title already linked to AniList will never be overwritten by a MyAnimeList or Doujinshi bulk pull. Per-manga apply endpoints always overwrite since the user explicitly chose a new entry.
 
 **Response shape:**
 ```json
@@ -204,6 +258,48 @@ Spaces in the `q` parameter are automatically replaced with underscores before t
 
 **Server logs** — progress is logged per-title as `(X/Y) Applied / No match / Error`, with a final summary line reporting applied, no-match, error, and skipped counts.
 
+### Export Metadata
+
+`POST /api/libraries/:id/export-metadata` writes a `metadata.json` sidecar file into each manga's folder for titles that have third-party metadata (`metadata_source != 'none'`). No request body is required.
+
+The endpoint runs synchronously — it only writes files, no network calls — and responds with counts once all files are written.
+
+**Response shape:**
+```json
+{
+  "data": {
+    "total": 50,
+    "exported": 38,
+    "skipped": 12,
+    "errors": 0
+  }
+}
+```
+
+- `total` — total manga in the library
+- `exported` — manga that had third-party metadata and received a `metadata.json` file
+- `skipped` — manga with `metadata_source = 'none'` (nothing to export)
+- `errors` — manga whose folder could not be written to (permissions, path missing, etc.); these are logged server-side
+
+**Written file** — each `metadata.json` is pretty-printed JSON written to `{manga.path}/metadata.json`. It includes only non-null fields. Example:
+
+```json
+{
+  "title": "My Manga",
+  "author": "Last First",
+  "description": "Synopsis text...",
+  "genres": ["Action", "Drama"],
+  "year": 2020,
+  "score": 8.3,
+  "status": "FINISHED",
+  "anilist_id": 12345,
+  "metadata_source": "anilist",
+  "exported_at": "2026-04-16T12:00:00.000Z"
+}
+```
+
+The file uses the same field names recognised by the local metadata scanner (`title`, `author`, `description`, `genres`, `year`, `score`), so a library rescan after a database reset will automatically pick them up as `metadata_source = 'local'`. Extra fields (`status`, `anilist_id`, `mal_id`, `doujinshi_id`, `metadata_source`, `exported_at`) are preserved in the file for reference but are not consumed by the scanner.
+
 ---
 
 ## Settings
@@ -223,11 +319,14 @@ Spaces in the `q` parameter are automatically replaced with underscores before t
   "anilist_user_id": "67890",
   "anilist_username": "myuser",
   "anilist_avatar": "https://...",
-  "doujinshi_logged_in": true
+  "doujinshi_logged_in": true,
+  "mal_client_id_set": true
 }
 ```
 
-`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only. `doujinshi_logged_in` is server-wide (true whenever a doujinshi token is stored in `settings`).
+`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only. `doujinshi_logged_in` is server-wide (true whenever a doujinshi token is stored in `settings`). `mal_client_id_set` is server-wide (true whenever a MAL Client ID is stored).
+
+**PUT** also accepts `mal_client_id` to save or clear the MyAnimeList Client ID. Passing an empty string clears it.
 
 ---
 

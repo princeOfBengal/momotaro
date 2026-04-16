@@ -93,13 +93,13 @@ async function syncToAniList(db, mangaId, completedChapters, deviceId) {
   // completedChapters is an array of chapter IDs, not numbers.
   const placeholders = completedChapters.map(() => '?').join(',');
   const col = trackVolumes ? 'volume' : 'number';
-  const rows = db.prepare(
-    `SELECT ${col} AS val FROM chapters WHERE id IN (${placeholders}) AND ${col} IS NOT NULL`
-  ).all(...completedChapters);
+  const { maxVal } = db.prepare(
+    `SELECT MAX(CAST(${col} AS REAL)) AS maxVal FROM chapters WHERE id IN (${placeholders}) AND ${col} IS NOT NULL`
+  ).get(...completedChapters);
 
   let highestNumber;
-  if (rows.length > 0) {
-    highestNumber = Math.floor(Math.max(...rows.map(r => r.val)));
+  if (maxVal != null) {
+    highestNumber = Math.floor(maxVal);
   } else {
     // No numbered entries — fall back to count
     highestNumber = completedChapters.length;

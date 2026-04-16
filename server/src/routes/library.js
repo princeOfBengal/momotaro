@@ -460,15 +460,19 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   const { total_pages }    = db.prepare('SELECT COALESCE(SUM(page_count), 0) as total_pages FROM chapters').get();
 
   // Genre counts — aggregated in SQLite via json_each
-  const genreRows = db.prepare(`
+  const { total_genres } = db.prepare(`
+    SELECT COUNT(DISTINCT value) as total_genres
+    FROM manga, json_each(manga.genres)
+    WHERE manga.genres IS NOT NULL AND manga.genres != '[]'
+  `).get();
+  const top_genres = db.prepare(`
     SELECT value as genre, COUNT(*) as count
     FROM manga, json_each(manga.genres)
     WHERE manga.genres IS NOT NULL AND manga.genres != '[]'
     GROUP BY value
     ORDER BY count DESC
-  `).all();
-  const total_genres = genreRows.length;
-  const top_genres   = genreRows.slice(0, 10).map(r => ({ genre: r.genre, count: r.count }));
+    LIMIT 10
+  `).all().map(r => ({ genre: r.genre, count: r.count }));
 
   // Estimated read time via a single JOIN — no JS iteration over all chapters
   const { estimated_read_time_minutes } = db.prepare(`

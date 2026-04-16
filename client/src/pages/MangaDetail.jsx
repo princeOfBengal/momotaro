@@ -1021,9 +1021,9 @@ export default function MangaDetail() {
     setShowNavDrawer(true);
     if (navLoaded) return;
     try {
-      const [libs, lists] = await Promise.all([api.getLibraries(), api.getReadingLists()]);
+      const libs = await api.getLibraries();
       setNavLibraries(libs);
-      setNavLists(lists);
+      setNavLists(readingLists);
       setNavLoaded(true);
     } catch { /* silently ignore — drawer still opens */ }
   }

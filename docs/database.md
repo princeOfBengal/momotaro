@@ -165,14 +165,16 @@ Junction table linking manga to lists.
 ## Indexes
 
 ```sql
-idx_manga_library_id  ON manga(library_id)
-idx_manga_title       ON manga(title)           -- speeds up ORDER BY title (default sort)
-idx_manga_updated_at  ON manga(updated_at DESC) -- speeds up ORDER BY updated_at
-idx_chapters_manga_id ON chapters(manga_id)
-idx_pages_chapter_id  ON pages(chapter_id)
-idx_progress_manga_id ON progress(manga_id)
-idx_rlm_list_id       ON reading_list_manga(list_id)
-idx_rlm_manga_id      ON reading_list_manga(manga_id)
+idx_manga_library_id      ON manga(library_id)
+idx_manga_title           ON manga(title)                    -- speeds up ORDER BY title (default sort)
+idx_manga_updated_at      ON manga(updated_at DESC)          -- speeds up ORDER BY updated_at
+idx_manga_lib_status      ON manga(library_id, status)       -- speeds up library filter by status
+idx_manga_lib_metadata_src ON manga(library_id, metadata_source) -- speeds up bulk metadata and export queries
+idx_chapters_manga_id     ON chapters(manga_id)
+idx_pages_chapter_id      ON pages(chapter_id)
+idx_progress_manga_id     ON progress(manga_id)
+idx_rlm_list_id           ON reading_list_manga(list_id)
+idx_rlm_manga_id          ON reading_list_manga(manga_id)
 ```
 
 ## Migrations

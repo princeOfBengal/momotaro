@@ -113,14 +113,16 @@ function migrate(db) {
       PRIMARY KEY (list_id, manga_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_manga_library_id  ON manga(library_id);
-    CREATE INDEX IF NOT EXISTS idx_manga_title        ON manga(title);
-    CREATE INDEX IF NOT EXISTS idx_manga_updated_at   ON manga(updated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_chapters_manga_id  ON chapters(manga_id);
-    CREATE INDEX IF NOT EXISTS idx_pages_chapter_id   ON pages(chapter_id);
-    CREATE INDEX IF NOT EXISTS idx_progress_manga_id  ON progress(manga_id);
-    CREATE INDEX IF NOT EXISTS idx_rlm_list_id        ON reading_list_manga(list_id);
-    CREATE INDEX IF NOT EXISTS idx_rlm_manga_id       ON reading_list_manga(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_manga_library_id       ON manga(library_id);
+    CREATE INDEX IF NOT EXISTS idx_manga_title             ON manga(title);
+    CREATE INDEX IF NOT EXISTS idx_manga_updated_at        ON manga(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_manga_lib_status        ON manga(library_id, status);
+    CREATE INDEX IF NOT EXISTS idx_manga_lib_metadata_src  ON manga(library_id, metadata_source);
+    CREATE INDEX IF NOT EXISTS idx_chapters_manga_id       ON chapters(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_pages_chapter_id        ON pages(chapter_id);
+    CREATE INDEX IF NOT EXISTS idx_progress_manga_id       ON progress(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_rlm_list_id             ON reading_list_manga(list_id);
+    CREATE INDEX IF NOT EXISTS idx_rlm_manga_id            ON reading_list_manga(manga_id);
 
     CREATE TABLE IF NOT EXISTS thumbnail_history (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,

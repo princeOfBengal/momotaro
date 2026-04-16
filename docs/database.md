@@ -49,6 +49,8 @@ One row per manga folder.
 | `score` | REAL | Average score from metadata source |
 | `metadata_source` | TEXT | `none`, `anilist`, `jikan`, `doujinshi`, `local` |
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
+| `anilist_cover` | TEXT | Filename of the AniList-sourced thumbnail, e.g. `5_anilist.webp` |
+| `original_cover` | TEXT | Filename of the first-ever generated thumbnail, e.g. `5_original.webp` — set once and never overwritten |
 | `created_at` | INTEGER | |
 | `updated_at` | INTEGER | |
 
@@ -122,6 +124,23 @@ Per-device AniList login state. Keyed by a UUID generated in the browser (`local
 | `anilist_avatar` | TEXT | Avatar URL |
 | `updated_at` | INTEGER | Unix timestamp |
 
+### `thumbnail_history`
+
+Records every page that has ever been manually set as a manga's thumbnail. Used to populate the "Previously Used" section of the thumbnail picker.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `manga_id` | INTEGER FK | References `manga(id)`, CASCADE delete |
+| `filename` | TEXT | Saved thumbnail filename, e.g. `5_1713200000000.webp` |
+| `created_at` | INTEGER | Unix timestamp (`unixepoch()` default) |
+
+**Unique constraint:** `(manga_id, filename)` — `INSERT OR IGNORE` prevents duplicate entries.
+
+**Index:** `idx_thumb_history_manga_id ON thumbnail_history(manga_id)`
+
+---
+
 ### `reading_lists`
 User-created (and two built-in) reading lists.
 
@@ -171,6 +190,8 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `chapters` | `file_mtime` | Incremental scan optimisation |
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |
+| `manga` | `anilist_cover` | AniList thumbnail filename |
+| `manga` | `original_cover` | First-ever generated thumbnail filename |
 
 One structural migration is still handled separately:
 

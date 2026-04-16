@@ -298,8 +298,14 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
   if (coverPage && (!existing || !existing.cover_image)) {
     const thumbPath = await generateThumbnail(coverPage, mangaId);
     if (thumbPath) {
-      db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-        .run(path.basename(thumbPath), mangaId);
+      // Also preserve a permanent original copy (never overwritten)
+      const originalName = `${mangaId}_original.webp`;
+      const originalPath = path.join(config.THUMBNAIL_DIR, originalName);
+      if (!fs.existsSync(originalPath)) {
+        try { fs.copyFileSync(thumbPath, originalPath); } catch (_) {}
+      }
+      db.prepare('UPDATE manga SET cover_image = ?, original_cover = COALESCE(original_cover, ?) WHERE id = ?')
+        .run(path.basename(thumbPath), originalName, mangaId);
     }
   }
 }

@@ -827,6 +827,167 @@ function ReadingSection() {
   );
 }
 
+// ── Section: Database Management ─────────────────────────────────────────────
+
+function DatabaseSection() {
+  const [cacheSize, setCacheSize] = useState(null);   // bytes | null = loading
+  const [clearing, setClearing] = useState(false);
+
+  const [thumbStatus, setThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
+  const [thumbTotal, setThumbTotal] = useState(null);
+
+  const [vacuumStatus, setVacuumStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
+  const [vacuumResult, setVacuumResult] = useState(null); // { before, after }
+
+  useEffect(() => {
+    api.getCbzCacheSize()
+      .then(d => setCacheSize(d.size_bytes))
+      .catch(() => setCacheSize(0));
+  }, []);
+
+  async function handleClearCache() {
+    setClearing(true);
+    try {
+      const d = await api.clearCbzCache();
+      setCacheSize(d.size_bytes);
+    } catch (err) {
+      alert('Failed to clear cache: ' + err.message);
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  async function handleRegenerate() {
+    setThumbStatus('loading');
+    setThumbTotal(null);
+    try {
+      const d = await api.regenerateThumbnails();
+      setThumbTotal(d.total);
+      setThumbStatus('done');
+    } catch (err) {
+      setThumbStatus('error');
+    }
+  }
+
+  async function handleVacuum() {
+    setVacuumStatus('loading');
+    setVacuumResult(null);
+    try {
+      const d = await api.vacuumDb();
+      setVacuumResult({ before: d.size_before_bytes, after: d.size_after_bytes });
+      setVacuumStatus('done');
+    } catch (err) {
+      setVacuumStatus('error');
+    }
+  }
+
+  function fmtMB(bytes) {
+    if (bytes === null) return '…';
+    if (bytes === 0) return '0 MB';
+    const mb = bytes / (1024 * 1024);
+    return mb < 0.1 ? '<0.1 MB' : `${mb.toFixed(1)} MB`;
+  }
+
+  return (
+    <div>
+      <div className="sp-section-head">
+        <div>
+          <h2 className="sp-section-title">Database Management</h2>
+          <p className="sp-section-desc">
+            Tools for maintaining Momotaro's database and on-disk cache.
+          </p>
+        </div>
+      </div>
+
+      {/* CBZ Cache */}
+      <div className="settings-card" style={{ marginBottom: 16 }}>
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">CBZ Cache</p>
+            <p className="db-op-desc">
+              Pages from CBZ archives are extracted to disk the first time they are read and
+              cached for faster subsequent access. The cache is safe to clear at any time —
+              pages will be re-extracted from the original files on next access.
+            </p>
+            <p className="db-op-status">
+              Current size: <strong>{fmtMB(cacheSize)}</strong>
+            </p>
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+            onClick={handleClearCache}
+            disabled={clearing || cacheSize === null}
+          >
+            {clearing ? 'Clearing…' : 'Clear Cache'}
+          </button>
+        </div>
+      </div>
+
+      {/* Regenerate Thumbnails */}
+      <div className="settings-card" style={{ marginBottom: 16 }}>
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">Regenerate Thumbnails</p>
+            <p className="db-op-desc">
+              Rebuilds cover thumbnails for every manga in the library. Useful when thumbnails
+              become mismatched after manga are added or removed. If AniList metadata has been
+              pulled for a title, its AniList cover is restored as the active thumbnail.
+              Otherwise, a new thumbnail is generated from the first page of the first chapter.
+            </p>
+            {thumbStatus === 'done' && (
+              <p className="db-op-status db-op-status-ok">
+                Regeneration started for {thumbTotal} manga. Thumbnails will update in the background.
+              </p>
+            )}
+            {thumbStatus === 'error' && (
+              <p className="db-op-status db-op-status-err">Failed — try again.</p>
+            )}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+            onClick={handleRegenerate}
+            disabled={thumbStatus === 'loading'}
+          >
+            {thumbStatus === 'loading' ? 'Starting…' : 'Regenerate All'}
+          </button>
+        </div>
+      </div>
+
+      {/* Compact Database */}
+      <div className="settings-card">
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">Compact Database</p>
+            <p className="db-op-desc">
+              Defragments the SQLite database file and reclaims disk space left over from
+              deleted records. Safe to run at any time — most useful after removing a large
+              number of manga or chapters.
+            </p>
+            {vacuumStatus === 'done' && vacuumResult && (
+              <p className="db-op-status db-op-status-ok">
+                Compacted: {fmtMB(vacuumResult.before)} → {fmtMB(vacuumResult.after)}
+              </p>
+            )}
+            {vacuumStatus === 'error' && (
+              <p className="db-op-status db-op-status-err">Failed — try again.</p>
+            )}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+            onClick={handleVacuum}
+            disabled={vacuumStatus === 'loading'}
+          >
+            {vacuumStatus === 'loading' ? 'Compacting…' : 'Compact Database'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Section: Statistics ───────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
@@ -1041,6 +1202,17 @@ const SECTIONS = [
       </svg>
     ),
   },
+  {
+    id: 'database',
+    label: 'Database',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.657-4.03 3-9 3S3 13.657 3 12" />
+        <path d="M3 5v14c0 1.657 4.03 3 9 3s9-1.343 9-3V5" />
+      </svg>
+    ),
+  },
 ];
 
 // ── Settings page ─────────────────────────────────────────────────────────────
@@ -1077,6 +1249,7 @@ export default function Settings() {
           {section === 'doujinshi'  && <DoujinshiSection />}
           {section === 'reading'    && <ReadingSection />}
           {section === 'libraries'  && <LibrariesSection />}
+          {section === 'database'   && <DatabaseSection />}
         </main>
       </div>
     </div>

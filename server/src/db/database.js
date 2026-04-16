@@ -121,6 +121,15 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_progress_manga_id  ON progress(manga_id);
     CREATE INDEX IF NOT EXISTS idx_rlm_list_id        ON reading_list_manga(list_id);
     CREATE INDEX IF NOT EXISTS idx_rlm_manga_id       ON reading_list_manga(manga_id);
+
+    CREATE TABLE IF NOT EXISTS thumbnail_history (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      manga_id   INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+      filename   TEXT    NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(manga_id, filename)
+    );
+    CREATE INDEX IF NOT EXISTS idx_thumb_history_manga_id ON thumbnail_history(manga_id);
   `);
 
   // Seed the two built-in reading lists
@@ -134,8 +143,10 @@ function migrate(db) {
   addColumnIfMissing(db, 'libraries', 'show_in_all', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing(db, 'chapters',  'volume',      'REAL');
   addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
-  addColumnIfMissing(db, 'manga',     'author',       'TEXT');
-  addColumnIfMissing(db, 'manga',     'doujinshi_id', 'TEXT');
+  addColumnIfMissing(db, 'manga',     'author',         'TEXT');
+  addColumnIfMissing(db, 'manga',     'doujinshi_id',   'TEXT');
+  addColumnIfMissing(db, 'manga',     'anilist_cover',  'TEXT');
+  addColumnIfMissing(db, 'manga',     'original_cover', 'TEXT');
 }
 
 /**

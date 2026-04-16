@@ -37,6 +37,8 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
 | PATCH | `/api/manga/:id` | Update manga settings `{ track_volumes? }` |
+| GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages |
+| POST | `/api/manga/:id/set-thumbnail` | Set thumbnail from a page `{ page_id }` or saved file `{ saved_filename }` |
 | DELETE | `/api/manga/:id` | Remove manga from DB and delete files on disk |
 
 ### Search (`?search=`)
@@ -61,6 +63,44 @@ The same logic applies to the reading-list manga endpoint (`GET /api/reading-lis
 ```
 
 `file_count` and `size_mb` are computed by an async recursive directory walk at request time (not cached).
+
+### `GET /api/manga/:id/thumbnail-options` response
+
+```json
+{
+  "data": {
+    "active_cover": "5.webp",
+    "anilist_cover": "5_anilist.webp",
+    "original_cover": "5_original.webp",
+    "history": [
+      { "id": 3, "filename": "5_1713200000000.webp", "created_at": 1713200000 }
+    ],
+    "chapter_first_pages": [
+      { "chapter_id": 12, "chapter_name": "Chapter 1", "page_id": 100 }
+    ]
+  }
+}
+```
+
+- `anilist_cover` / `original_cover` — `null` if not yet generated.
+- `history` — up to 20 entries, most recent first. Populated by `POST /api/manga/:id/set-thumbnail` with `{ page_id }`.
+- `chapter_first_pages` — one entry per chapter (the page at `page_index = 0`), ordered by chapter number.
+
+### `POST /api/manga/:id/set-thumbnail`
+
+Accepts either a live page or a previously saved thumbnail file:
+
+```json
+{ "page_id": 100 }
+```
+
+Generates a 300 × 430 WebP from the page image, saves it as `{mangaId}_{timestamp}.webp`, copies it to the active `{mangaId}.webp`, and records the filename in `thumbnail_history`.
+
+```json
+{ "saved_filename": "5_anilist.webp" }
+```
+
+Copies an existing saved file to the active `{mangaId}.webp`. The filename must start with `{mangaId}_` and end with `.webp` (path traversal prevention).
 
 ---
 
@@ -272,6 +312,40 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 ```
 
 Genre aggregation and read-time estimation are computed entirely in SQL. Disk size is measured asynchronously using `fs.promises` so the stats endpoint never blocks the event loop.
+
+---
+
+## Admin / Database Management
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/admin/cbz-cache-size` | Return current size of the CBZ cache in bytes |
+| POST | `/api/admin/clear-cbz-cache` | Delete all entries in `CBZ_CACHE_DIR`; returns new size (always 0) |
+| POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
+| POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
+
+**`GET /api/admin/cbz-cache-size` and `POST /api/admin/clear-cbz-cache` response `data` shape:**
+
+```json
+{ "size_bytes": 104857600 }
+```
+
+**`POST /api/admin/regenerate-thumbnails` response `data` shape:**
+
+```json
+{ "message": "Thumbnail regeneration started", "total": 42 }
+```
+
+Regeneration logic per manga:
+
+1. If `anilist_cover` file exists on disk → copy it to the active `{id}.webp`
+2. Otherwise → regenerate from the first page (`page_index = 0`) of the first chapter
+
+**`POST /api/admin/vacuum-db` response `data` shape:**
+
+```json
+{ "size_before_bytes": 20971520, "size_after_bytes": 14680064 }
+```
 
 ---
 

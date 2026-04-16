@@ -32,6 +32,7 @@ export default function Reader() {
   const [scaleType, setScaleType] = useState(() => localStorage.getItem('reader_scaleType') || 'screen');
   const [pageLayout, setPageLayout] = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
   const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
+  const [brightness, setBrightness] = useState(() => Number(localStorage.getItem('reader_brightness')) || 100);
 
   const [showControls, setShowControls] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -107,6 +108,7 @@ export default function Reader() {
   useEffect(() => { localStorage.setItem('reader_scaleType', scaleType); }, [scaleType]);
   useEffect(() => { localStorage.setItem('reader_pageLayout', pageLayout); }, [pageLayout]);
   useEffect(() => { localStorage.setItem('reader_orientation', readingOrientation); }, [readingOrientation]);
+  useEffect(() => { localStorage.setItem('reader_brightness', brightness); }, [brightness]);
 
   // Fullscreen
   useEffect(() => {
@@ -359,6 +361,7 @@ export default function Reader() {
       alwaysFullscreen={alwaysFullscreen}
       bgColor={bgColor}
       grayscale={grayscale}
+      brightness={brightness}
       scaleType={scaleType}
       pageLayout={pageLayout}
       showSettings={showSettings}
@@ -373,10 +376,16 @@ export default function Reader() {
       onAlwaysFullscreenChange={setAlwaysFullscreen}
       onBgColorChange={setBgColor}
       onGrayscaleChange={setGrayscale}
+      onBrightnessChange={setBrightness}
       onScaleTypeChange={setScaleType}
       onPageLayoutChange={setPageLayout}
       readingOrientation={readingOrientation}
       onReadingOrientationChange={setReadingOrientation}
+      onSetPageAsThumbnail={async () => {
+        const page = pages[currentPage];
+        if (!mangaId || !page) throw new Error('No page');
+        await api.setPageAsThumbnail(mangaId, page.id);
+      }}
       onToggleSettings={() => setShowSettings(s => !s)}
       onToggleFullscreen={toggleFullscreen}
       onPrevChapter={() => navigateChapter(-1)}
@@ -399,6 +408,7 @@ export default function Reader() {
       ].filter(Boolean).join(' ')}
       style={{ '--reader-zoom': zoom / 100 }}
     >
+      <div className="reader-brightness-overlay" style={{ opacity: (100 - brightness) / 100 }} />
       {isPaged ? (
         <ReaderPaged
           pages={pages}

@@ -65,15 +65,22 @@ async function fetchAndStoreCover(db, mangaId, coverUrl) {
     const buffer = await resp.buffer();
 
     fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
-    const outputPath = path.join(config.THUMBNAIL_DIR, `${mangaId}.webp`);
+
+    // Save to a dedicated AniList file that is never overwritten by user actions
+    const anilistName = `${mangaId}_anilist.webp`;
+    const anilistPath = path.join(config.THUMBNAIL_DIR, anilistName);
 
     await sharp(buffer)
       .resize(300, 430, { fit: 'cover', position: 'top' })
       .webp({ quality: 85 })
-      .toFile(outputPath);
+      .toFile(anilistPath);
 
-    db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-      .run(`${mangaId}.webp`, mangaId);
+    // Copy to the active cover
+    const activePath = path.join(config.THUMBNAIL_DIR, `${mangaId}.webp`);
+    fs.copyFileSync(anilistPath, activePath);
+
+    db.prepare('UPDATE manga SET cover_image = ?, anilist_cover = ? WHERE id = ?')
+      .run(`${mangaId}.webp`, anilistName, mangaId);
 
     console.log(`[Metadata] Cover saved for manga ${mangaId}`);
   } catch (err) {
@@ -328,6 +335,109 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
     `${applied} applied, ${noMatch} no match, ${errors} errors ` +
     `(${skippedExisting} titles skipped — already had metadata).`
   );
+}));
+
+// GET /api/manga/:id/thumbnail-options — list all available thumbnail choices
+router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT id, anilist_cover, original_cover, cover_image FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  // Previously-used page thumbnails (most recent first, cap at 20)
+  const history = db.prepare(
+    'SELECT id, filename, created_at FROM thumbnail_history WHERE manga_id = ? ORDER BY created_at DESC LIMIT 20'
+  ).all(manga.id);
+
+  // First page of every chapter, ordered chapter-number ascending
+  const chapterPages = db.prepare(`
+    SELECT c.id AS chapter_id, c.number, c.volume, c.folder_name,
+           p.id AS page_id
+    FROM chapters c
+    LEFT JOIN pages p ON p.chapter_id = c.id AND p.page_index = 0
+    WHERE c.manga_id = ?
+    ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
+  `).all(manga.id);
+
+  res.json({
+    data: {
+      active_cover:        manga.cover_image,
+      anilist_cover:       manga.anilist_cover  || null,
+      original_cover:      manga.original_cover || null,
+      history,
+      chapter_first_pages: chapterPages
+        .filter(ch => ch.page_id !== null)
+        .map(ch => ({
+          chapter_id: ch.chapter_id,
+          page_id:    ch.page_id,
+          label: ch.volume !== null && ch.number !== null
+            ? `Vol.${ch.volume} Ch.${ch.number}`
+            : ch.volume !== null
+              ? `Vol.${ch.volume}`
+              : ch.number !== null
+                ? `Ch.${ch.number}`
+                : ch.folder_name,
+        })),
+    },
+  });
+}));
+
+// POST /api/manga/:id/set-thumbnail — set thumbnail from a page or an existing saved file
+//   { page_id: N }            generate from a reader page (saved to history)
+//   { saved_filename: "..." } apply an existing thumbnail file (anilist, original, or history)
+router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const { page_id, saved_filename } = req.body;
+  if (!page_id && !saved_filename) {
+    return res.status(400).json({ error: 'page_id or saved_filename is required' });
+  }
+
+  const manga = db.prepare('SELECT id FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
+  const activePath = path.join(config.THUMBNAIL_DIR, `${manga.id}.webp`);
+
+  if (saved_filename) {
+    // Validate: basename only, must belong to this manga, webp only
+    const safeName = path.basename(saved_filename);
+    if (!safeName.startsWith(`${manga.id}_`) || !safeName.endsWith('.webp')) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+    const srcPath = path.join(config.THUMBNAIL_DIR, safeName);
+    if (!fs.existsSync(srcPath)) {
+      return res.status(404).json({ error: 'Thumbnail file not found' });
+    }
+    fs.copyFileSync(srcPath, activePath);
+    console.log(`[Thumbnail] Set thumbnail for manga ${manga.id} from saved file ${safeName}`);
+  } else {
+    // Generate from a page and save as a uniquely-named history file
+    const page = db.prepare('SELECT path FROM pages WHERE id = ?').get(page_id);
+    if (!page) return res.status(404).json({ error: 'Page not found' });
+    if (!fs.existsSync(page.path)) {
+      return res.status(404).json({ error: 'Image file not found on disk' });
+    }
+
+    const histFilename = `${manga.id}_${Date.now()}.webp`;
+    const histPath     = path.join(config.THUMBNAIL_DIR, histFilename);
+
+    await sharp(page.path)
+      .resize(300, 430, { fit: 'cover', position: 'top' })
+      .webp({ quality: 85 })
+      .toFile(histPath);
+
+    fs.copyFileSync(histPath, activePath);
+
+    // Record in history (INSERT OR IGNORE to avoid duplicates)
+    db.prepare('INSERT OR IGNORE INTO thumbnail_history (manga_id, filename) VALUES (?, ?)')
+      .run(manga.id, histFilename);
+
+    console.log(`[Thumbnail] Set thumbnail for manga ${manga.id} from page ${page_id}`);
+  }
+
+  db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
+    .run(`${manga.id}.webp`, manga.id);
+
+  res.json({ data: { cover_image: `${manga.id}.webp` } });
 }));
 
 // GET /api/manga/:id/anilist-status — fetch the logged-in user's list entry for this manga

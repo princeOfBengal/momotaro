@@ -61,9 +61,29 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_alwaysFS` | `false` |
 | `reader_bgColor` | `black` |
 | `reader_grayscale` | `false` |
+| `reader_brightness` | `100` |
 | `reader_scaleType` | `screen` |
 | `reader_pageLayout` | `single` |
 | `reader_orientation` | `ltr` |
+
+## Brightness
+
+A `reader-brightness-overlay` div (`position: fixed; inset: 0; background: #000; pointer-events: none; z-index: 150`) sits above page content but below the control bars (z-index 200). Its CSS `opacity` is computed as `(100 - brightness) / 100`, so 100% brightness → opacity 0 (invisible), 10% brightness → opacity 0.9 (nearly black).
+
+The `brightness` state is initialised from `localStorage` (`reader_brightness`, default 100) and updated via the slider in the **Display** tab of the settings panel.
+
+## ReaderControls — General Tab
+
+The **General** tab of the settings panel contains a **Make Current Image Thumbnail** button. Clicking it calls `POST /api/manga/:id/set-thumbnail` with the current page's `page_id`. The button cycles through four states:
+
+| State | Label | Condition |
+| --- | --- | --- |
+| `idle` | Make Current Image Thumbnail | Default |
+| `loading` | Saving… | Request in-flight |
+| `done` | Thumbnail saved! | Success — resets to `idle` after 2 s |
+| `error` | Failed — try again | Error — resets to `idle` after 2 s |
+
+The button is disabled while loading or when `mangaId` is not available.
 
 ## Controls Visibility
 

@@ -405,6 +405,42 @@
   font-size: 14px;
 }
 
+/* ── Database Management section ── */
+.db-op-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.db-op-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.db-op-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 5px;
+}
+
+.db-op-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.db-op-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 7px 0 0;
+}
+
+.db-op-status-ok  { color: var(--accent); }
+.db-op-status-err { color: #f44336; }
+
 /* ── Shared small button modifier ── */
 .btn-sm {
   padding: 5px 12px;

@@ -190,19 +190,21 @@ export default function Library() {
             <button className="lib-drawer-close" onClick={() => setDrawerOpen(false)} aria-label="Close menu">✕</button>
           </div>
 
-          {/* Libraries section — only when more than one exists */}
-          {libraries.length > 1 && (
+          {/* Libraries section — always shown when at least one library exists */}
+          {libraries.length > 0 && (
             <>
               <p className="library-sidebar-heading">Libraries</p>
-              <button
-                className={`library-sidebar-item${isViewingAll ? ' active' : ''}`}
-                onClick={selectAll}
-              >
-                All Libraries
-                <span className="library-sidebar-count">
-                  {libraries.reduce((s, l) => s + l.manga_count, 0)}
-                </span>
-              </button>
+              {libraries.length > 1 && (
+                <button
+                  className={`library-sidebar-item${isViewingAll ? ' active' : ''}`}
+                  onClick={selectAll}
+                >
+                  All Libraries
+                  <span className="library-sidebar-count">
+                    {libraries.reduce((s, l) => s + l.manga_count, 0)}
+                  </span>
+                </button>
+              )}
               {libraries.map(lib => (
                 <button
                   key={lib.id}

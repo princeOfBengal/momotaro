@@ -30,6 +30,31 @@
   object-fit: cover;
 }
 
+/* Clickable cover with hover hint */
+.detail-cover-clickable {
+  cursor: pointer;
+  position: relative;
+}
+
+.detail-cover-change-hint {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.5px;
+  opacity: 0;
+  transition: opacity 0.18s;
+  border-radius: var(--radius);
+}
+.detail-cover-clickable:hover .detail-cover-change-hint {
+  opacity: 1;
+}
+
 .detail-cover-placeholder {
   width: 100%;
   height: 100%;
@@ -1328,4 +1353,97 @@
   /* Info / meta modal: comfortable label sizing */
   .meta-modal-action-row { flex-direction: column; align-items: flex-start; gap: 10px; }
   .meta-modal-action-label { font-size: 13px; }
+}
+
+/* ── Thumbnail picker modal ── */
+.thumb-picker-modal-box {
+  max-width: 680px;
+}
+
+.thumb-picker-body {
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.thumb-picker-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.thumb-picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.thumb-option {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  transition: background 0.14s;
+}
+.thumb-option:hover:not(.thumb-option-applying) {
+  background: var(--bg-hover);
+}
+.thumb-option-applying {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.thumb-option-img-wrap {
+  position: relative;
+  width: 90px;
+  aspect-ratio: 2 / 3;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.thumb-option-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-option-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb-option-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thumb-picker-error,
+.thumb-picker-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 8px 0;
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .thumb-option-img-wrap { width: 76px; }
+  .thumb-option-label    { width: 76px; }
 }

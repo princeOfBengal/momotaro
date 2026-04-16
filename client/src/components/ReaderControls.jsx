@@ -59,6 +59,7 @@ export default function ReaderControls({
   alwaysFullscreen,
   bgColor,
   grayscale,
+  brightness,
   scaleType,
   pageLayout,
   showSettings,
@@ -73,10 +74,12 @@ export default function ReaderControls({
   onAlwaysFullscreenChange,
   onBgColorChange,
   onGrayscaleChange,
+  onBrightnessChange,
   onScaleTypeChange,
   onPageLayoutChange,
   readingOrientation,
   onReadingOrientationChange,
+  onSetPageAsThumbnail,
   onToggleSettings,
   onToggleFullscreen,
   onPrevChapter,
@@ -87,6 +90,19 @@ export default function ReaderControls({
   onScrubEnd,
 }) {
   const [activeTab, setActiveTab] = useState('general');
+  const [thumbStatus, setThumbStatus] = useState('idle'); // idle | loading | done | error
+
+  async function handleSetThumbnail() {
+    setThumbStatus('loading');
+    try {
+      await onSetPageAsThumbnail();
+      setThumbStatus('done');
+      setTimeout(() => setThumbStatus('idle'), 2000);
+    } catch {
+      setThumbStatus('error');
+      setTimeout(() => setThumbStatus('idle'), 2000);
+    }
+  }
   const backUrl = mangaId ? `/manga/${mangaId}` : '/';
   const unitLabel = manga?.track_volumes ? 'Volume' : 'Chapter';
   const chapterTitle = chapter
@@ -245,6 +261,17 @@ export default function ReaderControls({
                   value={alwaysFullscreen}
                   onChange={onAlwaysFullscreenChange}
                 />
+
+                <button
+                  className={`setting-btn setting-btn-full ${thumbStatus === 'done' ? 'setting-btn-success' : thumbStatus === 'error' ? 'setting-btn-error' : ''}`}
+                  disabled={thumbStatus === 'loading' || !mangaId}
+                  onClick={handleSetThumbnail}
+                >
+                  {thumbStatus === 'loading' ? 'Saving…'
+                    : thumbStatus === 'done'    ? 'Thumbnail saved!'
+                    : thumbStatus === 'error'   ? 'Failed — try again'
+                    : 'Make Current Image Thumbnail'}
+                </button>
               </>
             )}
 
@@ -273,6 +300,22 @@ export default function ReaderControls({
                   value={grayscale}
                   onChange={onGrayscaleChange}
                 />
+
+                <div className="setting-group">
+                  <label className="setting-group-label">Brightness</label>
+                  <div className="setting-slider-row">
+                    <input
+                      type="range"
+                      min={10}
+                      max={100}
+                      step={5}
+                      value={brightness}
+                      onChange={e => onBrightnessChange(Number(e.target.value))}
+                      className="setting-slider"
+                    />
+                    <span className="setting-slider-label">{brightness}%</span>
+                  </div>
+                </div>
               </>
             )}
 

@@ -16,6 +16,15 @@
 /* Grayscale mode */
 .reader-grayscale img { filter: grayscale(1); }
 
+/* Brightness overlay — sits above page content, below control bars (z-index 200) */
+.reader-brightness-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  pointer-events: none;
+  z-index: 150;
+}
+
 /* When bars are visible, inset the content so it sits between the bars.
    Account for the device safe-area (notch / home indicator). */
 .reader-page.bars-visible {

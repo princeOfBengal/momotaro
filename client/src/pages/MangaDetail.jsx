@@ -3,6 +3,148 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import './MangaDetail.css';
 
+// ── Thumbnail Picker Modal ─────────────────────────────────────────────────────
+function ThumbOption({ src, label, applying, onUse }) {
+  return (
+    <div
+      className={`thumb-option${applying ? ' thumb-option-applying' : ''}`}
+      onClick={!applying ? onUse : undefined}
+      title={label || undefined}
+    >
+      <div className="thumb-option-img-wrap">
+        <img src={src} alt={label || ''} loading="lazy" />
+        {applying && (
+          <div className="thumb-option-overlay">
+            <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
+          </div>
+        )}
+      </div>
+      {label && <span className="thumb-option-label">{label}</span>}
+    </div>
+  );
+}
+
+function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
+  const [options, setOptions] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [applying, setApplying] = useState(null);
+
+  useEffect(() => {
+    api.getThumbnailOptions(mangaId)
+      .then(data => setOptions(data))
+      .catch(err => setLoadError(err.message));
+  }, [mangaId]);
+
+  async function applyFile(filename) {
+    setApplying(filename);
+    try {
+      await api.setThumbnailFromFile(mangaId, filename);
+      onApplied();
+    } catch (err) {
+      alert('Failed: ' + err.message);
+      setApplying(null);
+    }
+  }
+
+  async function applyPage(pageId) {
+    setApplying(pageId);
+    try {
+      await api.setPageAsThumbnail(mangaId, pageId);
+      onApplied();
+    } catch (err) {
+      alert('Failed: ' + err.message);
+      setApplying(null);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box thumb-picker-modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Choose Thumbnail</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="thumb-picker-body">
+          {!options && !loadError && (
+            <div className="loading-center" style={{ minHeight: 120 }}>
+              <div className="spinner" />
+            </div>
+          )}
+          {loadError && <p className="thumb-picker-error">{loadError}</p>}
+          {options && (
+            <>
+              {options.anilist_cover && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">AniList</h3>
+                  <div className="thumb-picker-grid">
+                    <ThumbOption
+                      src={api.thumbnailUrl(options.anilist_cover)}
+                      label="AniList Cover"
+                      applying={applying === options.anilist_cover}
+                      onUse={() => applyFile(options.anilist_cover)}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {options.original_cover && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">Original</h3>
+                  <div className="thumb-picker-grid">
+                    <ThumbOption
+                      src={api.thumbnailUrl(options.original_cover)}
+                      label="Scan Default"
+                      applying={applying === options.original_cover}
+                      onUse={() => applyFile(options.original_cover)}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {options.history.length > 0 && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">Previously Used</h3>
+                  <div className="thumb-picker-grid">
+                    {options.history.map(h => (
+                      <ThumbOption
+                        key={h.id}
+                        src={api.thumbnailUrl(h.filename)}
+                        applying={applying === h.filename}
+                        onUse={() => applyFile(h.filename)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {options.chapter_first_pages.length > 0 && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">Chapter Covers</h3>
+                  <div className="thumb-picker-grid">
+                    {options.chapter_first_pages.map(ch => (
+                      <ThumbOption
+                        key={ch.chapter_id}
+                        src={api.pageImageUrl(ch.page_id)}
+                        label={ch.label}
+                        applying={applying === ch.page_id}
+                        onUse={() => applyPage(ch.page_id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!options.anilist_cover && !options.original_cover && options.history.length === 0 && options.chapter_first_pages.length === 0 && (
+                <p className="thumb-picker-empty">No thumbnail options available yet. Read a chapter first to generate options.</p>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Manual Search Modal ────────────────────────────────────────────────────────
 function AnilistSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
   const [query, setQuery] = useState(defaultQuery || '');
@@ -452,6 +594,7 @@ export default function MangaDetail() {
   const [error, setError] = useState(null);
 
   const [coverBust, setCoverBust] = useState(0);
+  const [showThumbPicker, setShowThumbPicker] = useState(false);
 
   // Metadata fetch state
   const [fetchingMeta, setFetchingMeta] = useState(false);
@@ -793,11 +936,12 @@ export default function MangaDetail() {
 
       <main className="detail-main">
         <div className="detail-hero">
-          <div className="detail-cover">
+          <div className="detail-cover detail-cover-clickable" onClick={() => setShowThumbPicker(true)}>
             {coverUrl
               ? <img src={coverUrl} alt={manga.title} />
               : <div className="detail-cover-placeholder">📖</div>
             }
+            <div className="detail-cover-change-hint">Change</div>
           </div>
 
           <div className="detail-info">
@@ -1298,6 +1442,17 @@ export default function MangaDetail() {
             </div>
           </div>
         </div>
+      )}
+
+      {showThumbPicker && (
+        <ThumbnailPickerModal
+          mangaId={id}
+          onApplied={() => {
+            setCoverBust(Date.now());
+            setShowThumbPicker(false);
+          }}
+          onClose={() => setShowThumbPicker(false)}
+        />
       )}
 
       {showDeleteConfirm && (

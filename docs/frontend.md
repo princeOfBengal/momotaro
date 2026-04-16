@@ -26,6 +26,7 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 - Click manga card → navigate to `/manga/:id`
 - **Filter initialisation from navigation state** — on mount, `activeLibrary` and `activeList` are seeded from `location.state.library` and `location.state.list` (React Router state). This allows the MangaDetail nav drawer to navigate back to a specific library or reading list without URL parameters.
 - **First-time setup state**: when no libraries are configured (`libraries.length === 0`) and no search or list filter is active, shows a "Welcome to Momotaro" prompt with a button that navigates to Settings → Library Management tab
+- **Libraries sidebar section**: shown whenever at least one library exists (`libraries.length > 0`). The **All Libraries** aggregate entry is only shown when there are two or more libraries — with a single library it is omitted as redundant.
 
 ### MangaDetail (`src/pages/MangaDetail.jsx`)
 
@@ -47,6 +48,12 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 - The status badge in the modal reflects the current source: "Local file", "Linked to AniList", "Linked to Doujinshi.info", or "No metadata linked"
 - Progress badge on each chapter (read / current / unread)
 - Resume reading button (jumps to last read chapter+page)
+- **Clickable thumbnail** — the cover image has the `detail-cover-clickable` class and shows a "Change" hint overlay on hover. Clicking it opens the **Thumbnail Picker Modal**, which fetches `GET /api/manga/:id/thumbnail-options` and presents four ordered sections:
+  1. **AniList** — the thumbnail sourced from AniList (`anilist_cover`), if available
+  2. **Original** — the first-ever generated thumbnail (`original_cover`), if available
+  3. **Previously Used** — up to 20 entries from `thumbnail_history`, most recent first
+  4. **Chapter Covers** — the first page (`page_index = 0`) of every chapter
+  Selecting an option calls either `POST /api/manga/:id/set-thumbnail` with `{ saved_filename }` (for saved files) or `{ page_id }` (for chapter first pages). On success, the active cover image is cache-busted by updating a `coverBust` timestamp appended to the thumbnail URL.
 - **Mobile Settings dropdown** — on screens ≤ 640 px the individual *Metadata*, *Optimize*, and *More Info* buttons are replaced by a single **Settings ▾** dropdown (class `detail-settings-wrap detail-mobile-only`). Tapping an item closes the dropdown then opens the relevant modal. On desktop the three buttons remain visible individually (class `detail-desktop-only`).
 
 ### Reader (`src/pages/Reader.jsx`)
@@ -61,6 +68,10 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 - **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device
 - **Doujinshi.Info tab**: email + password login form; login state is server-wide (shared across all devices)
 - **Libraries tab**: add, edit, delete library paths; trigger per-library scans. The **Bulk Metadata Pull** button shows a source dropdown (AniList / Doujinshi.info) before starting the pull. After the request returns, a status line is shown under the library card indicating how many titles will be fetched vs. how many were skipped because they already have metadata (e.g. *"Pulling metadata for 12 titles in the background. 38 skipped (already have metadata)."* or *"All 50 titles already have metadata — nothing to pull."*)
+- **Database tab**: maintenance operations for the server's database and on-disk cache:
+  - *CBZ Cache* — displays the current cache size; **Clear Cache** deletes all extracted pages from `CBZ_CACHE_DIR` (pages are re-extracted on next access)
+  - *Regenerate Thumbnails* — **Regenerate All** fires `POST /api/admin/regenerate-thumbnails`; the job runs in the background and the UI shows a confirmation with the total manga count. For each manga, the AniList cover is restored if available, otherwise a new thumbnail is generated from the first page of the first chapter
+  - *Compact Database* — **Compact Database** runs `POST /api/admin/vacuum-db` synchronously and displays the before/after file size
 
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
@@ -127,6 +138,23 @@ api.applyDoujinshiMetadata(mangaId, slug)     // Apply Doujinshi.info result by 
 api.bulkMetadata(libraryId, source)           // Bulk pull — source: 'anilist' | 'doujinshi'
 api.doujinshiLogin(email, password)           // Doujinshi.info login
 api.doujinshiLogout()                         // Doujinshi.info logout
+```
+
+Thumbnail methods:
+
+```js
+api.getThumbnailOptions(mangaId)              // GET thumbnail-options (anilist, original, history, chapter pages)
+api.setPageAsThumbnail(mangaId, pageId)       // POST set-thumbnail with { page_id }
+api.setThumbnailFromFile(mangaId, filename)   // POST set-thumbnail with { saved_filename }
+```
+
+Admin / database methods:
+
+```js
+api.getCbzCacheSize()        // GET cbz-cache-size → { size_bytes }
+api.clearCbzCache()          // POST clear-cbz-cache → { size_bytes: 0 }
+api.regenerateThumbnails()   // POST regenerate-thumbnails → { message, total }
+api.vacuumDb()               // POST vacuum-db → { size_before_bytes, size_after_bytes }
 ```
 
 ## Context

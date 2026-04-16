@@ -141,11 +141,30 @@ export const api = {
     apiFetch(`/api/reading-lists/${listId}/manga/${mangaId}`, { method: 'DELETE' }),
   getMangaReadingLists: (mangaId) => apiFetch(`/api/manga/${mangaId}/reading-lists`),
 
+  // Thumbnail
+  setPageAsThumbnail: (mangaId, pageId) =>
+    apiFetch(`/api/manga/${mangaId}/set-thumbnail`, {
+      method: 'POST',
+      body: JSON.stringify({ page_id: pageId }),
+    }),
+  setThumbnailFromFile: (mangaId, savedFilename) =>
+    apiFetch(`/api/manga/${mangaId}/set-thumbnail`, {
+      method: 'POST',
+      body: JSON.stringify({ saved_filename: savedFilename }),
+    }),
+  getThumbnailOptions: (mangaId) => apiFetch(`/api/manga/${mangaId}/thumbnail-options`),
+
   // Optimize
   optimizeManga: (id) => apiFetch(`/api/manga/${id}/optimize`, { method: 'POST' }),
 
   // Info
   getMangaInfo: (id) => apiFetch(`/api/manga/${id}/info`),
+
+  // Admin / Database Management
+  getCbzCacheSize: () => apiFetch('/api/admin/cbz-cache-size'),
+  clearCbzCache: () => apiFetch('/api/admin/clear-cbz-cache', { method: 'POST' }),
+  regenerateThumbnails: () => apiFetch('/api/admin/regenerate-thumbnails', { method: 'POST' }),
+  vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
 
   // Statistics
   getStats: () => apiFetch('/api/stats'),

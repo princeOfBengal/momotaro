@@ -15,6 +15,7 @@ const progressRoutes = require('./routes/progress');
 const { router: settingsRoutes } = require('./routes/settings');
 const metadataRoutes = require('./routes/metadata');
 const optimizeRoutes = require('./routes/optimize');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use('/api', progressRoutes);
 app.use('/api', settingsRoutes);
 app.use('/api', metadataRoutes);
 app.use('/api', optimizeRoutes);
+app.use('/api', adminRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));

@@ -80,6 +80,9 @@ export default function ReaderControls({
   readingOrientation,
   onReadingOrientationChange,
   onSetPageAsThumbnail,
+  isCurrentPageInGallery,
+  onToggleGalleryPage,
+  onDownloadPage,
   onToggleSettings,
   onToggleFullscreen,
   onPrevChapter,
@@ -91,6 +94,8 @@ export default function ReaderControls({
 }) {
   const [activeTab, setActiveTab] = useState('general');
   const [thumbStatus, setThumbStatus] = useState('idle'); // idle | loading | done | error
+  const [galleryStatus, setGalleryStatus] = useState('idle'); // idle | loading | done | error
+  const [downloadStatus, setDownloadStatus] = useState('idle'); // idle | loading | done | error
 
   async function handleSetThumbnail() {
     setThumbStatus('loading');
@@ -101,6 +106,30 @@ export default function ReaderControls({
     } catch {
       setThumbStatus('error');
       setTimeout(() => setThumbStatus('idle'), 2000);
+    }
+  }
+
+  async function handleToggleGallery() {
+    setGalleryStatus('loading');
+    try {
+      await onToggleGalleryPage();
+      setGalleryStatus('done');
+      setTimeout(() => setGalleryStatus('idle'), 2000);
+    } catch {
+      setGalleryStatus('error');
+      setTimeout(() => setGalleryStatus('idle'), 2000);
+    }
+  }
+
+  async function handleDownloadPage() {
+    setDownloadStatus('loading');
+    try {
+      await onDownloadPage();
+      setDownloadStatus('done');
+      setTimeout(() => setDownloadStatus('idle'), 2000);
+    } catch {
+      setDownloadStatus('error');
+      setTimeout(() => setDownloadStatus('idle'), 2000);
     }
   }
   const backUrl = mangaId ? `/manga/${mangaId}` : '/';
@@ -271,6 +300,29 @@ export default function ReaderControls({
                     : thumbStatus === 'done'    ? 'Thumbnail saved!'
                     : thumbStatus === 'error'   ? 'Failed — try again'
                     : 'Make Current Image Thumbnail'}
+                </button>
+
+                <button
+                  className={`setting-btn setting-btn-full ${galleryStatus === 'done' ? 'setting-btn-success' : galleryStatus === 'error' ? 'setting-btn-error' : ''}`}
+                  disabled={galleryStatus === 'loading' || !mangaId}
+                  onClick={handleToggleGallery}
+                >
+                  {galleryStatus === 'loading' ? (isCurrentPageInGallery ? 'Removing…' : 'Adding…')
+                    : galleryStatus === 'done'    ? (isCurrentPageInGallery ? 'Added!' : 'Removed!')
+                    : galleryStatus === 'error'   ? 'Failed — try again'
+                    : isCurrentPageInGallery      ? 'Remove from Art Gallery'
+                    : 'Add to Art Gallery'}
+                </button>
+
+                <button
+                  className={`setting-btn setting-btn-full ${downloadStatus === 'done' ? 'setting-btn-success' : downloadStatus === 'error' ? 'setting-btn-error' : ''}`}
+                  disabled={downloadStatus === 'loading'}
+                  onClick={handleDownloadPage}
+                >
+                  {downloadStatus === 'loading' ? 'Downloading…'
+                    : downloadStatus === 'done'    ? 'Downloaded!'
+                    : downloadStatus === 'error'   ? 'Failed — try again'
+                    : 'Download Current Page'}
                 </button>
               </>
             )}

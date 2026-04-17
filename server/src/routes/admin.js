@@ -1,10 +1,12 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const config = require('../config');
+const logger = require('../logger');
+const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
+const { generateThumbnail } = require('../scanner/thumbnailGenerator');
 
 const router = express.Router();
 
@@ -26,20 +28,21 @@ function dirSizeBytes(dir) {
   return total;
 }
 
-// ── CBZ Cache ─────────────────────────────────────────────────────────────────
+// ── CBZ Cache (legacy) ────────────────────────────────────────────────────────
+// Streaming reads mean the extraction cache is no longer populated. These
+// endpoints remain for the admin UI and as a way to wipe any pre-migration
+// cache directory that may still be on disk.
 
 // GET /api/admin/cbz-cache-size
 router.get('/admin/cbz-cache-size', asyncWrapper(async (req, res) => {
   const size_bytes = dirSizeBytes(config.CBZ_CACHE_DIR);
-  res.json({ data: { size_bytes } });
+  res.json({ data: { size_bytes, limit_bytes: 0 } });
 }));
 
 // POST /api/admin/clear-cbz-cache
-// Deletes all entries inside CBZ_CACHE_DIR (not the directory itself).
-// Returns the new size (always 0 on success).
 router.post('/admin/clear-cbz-cache', asyncWrapper(async (req, res) => {
   let entries = [];
-  try { entries = fs.readdirSync(config.CBZ_CACHE_DIR, { withFileTypes: true }); } catch { /* empty dir or missing */ }
+  try { entries = fs.readdirSync(config.CBZ_CACHE_DIR, { withFileTypes: true }); } catch { /* empty or missing */ }
   for (const e of entries) {
     const p = path.join(config.CBZ_CACHE_DIR, e.name);
     try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -68,11 +71,13 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
 
     for (const manga of allManga) {
       try {
-        const activePath = path.join(config.THUMBNAIL_DIR, `${manga.id}.webp`);
+        const activeName = `${manga.id}.webp`;
+        const activePath = thumbnailPath(activeName);
+        ensureShardDir(activeName);
 
         // Prefer AniList cover if it exists on disk
         if (manga.anilist_cover) {
-          const anilistPath = path.join(config.THUMBNAIL_DIR, manga.anilist_cover);
+          const anilistPath = thumbnailPath(manga.anilist_cover);
           if (fs.existsSync(anilistPath)) {
             fs.copyFileSync(anilistPath, activePath);
             db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
@@ -82,23 +87,29 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
           }
         }
 
-        // Fall back: generate from first page of first chapter
+        // Fall back: generate from first page of first chapter. We need the
+        // chapter type + path so `generateThumbnail` can stream from a CBZ
+        // instead of treating the stored path as a filesystem location.
         const firstPage = db.prepare(`
-          SELECT p.path FROM pages p
+          SELECT p.path AS stored_path, c.type AS chapter_type, c.path AS chapter_path
+          FROM pages p
           JOIN chapters c ON c.id = p.chapter_id
           WHERE c.manga_id = ? AND p.page_index = 0
           ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
           LIMIT 1
         `).get(manga.id);
 
-        if (firstPage && fs.existsSync(firstPage.path)) {
-          await sharp(firstPage.path)
-            .resize(300, 430, { fit: 'cover', position: 'top' })
-            .webp({ quality: 85 })
-            .toFile(activePath);
-          db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-            .run(`${manga.id}.webp`, manga.id);
-          regenerated++;
+        if (firstPage) {
+          const source = firstPage.chapter_type === 'folder'
+            ? firstPage.stored_path
+            : { type: firstPage.chapter_type, chapterPath: firstPage.chapter_path, entry: firstPage.stored_path };
+
+          const generated = await generateThumbnail(source, manga.id);
+          if (generated) {
+            db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
+              .run(`${manga.id}.webp`, manga.id);
+            regenerated++;
+          }
         }
       } catch (err) {
         errors++;
@@ -135,6 +146,24 @@ router.post('/admin/vacuum-db', asyncWrapper(async (req, res) => {
     `${(sizeBefore / 1024 / 1024).toFixed(1)} MB → ${(sizeAfter / 1024 / 1024).toFixed(1)} MB`
   );
   res.json({ data: { size_before_bytes: sizeBefore, size_after_bytes: sizeAfter } });
+}));
+
+// ── System Logs ───────────────────────────────────────────────────────────────
+
+// GET /api/admin/logs
+// Returns the in-memory log buffer as JSON.
+router.get('/admin/logs', asyncWrapper(async (req, res) => {
+  res.json({ data: { entries: logger.getEntries(), max: logger.MAX_ENTRIES } });
+}));
+
+// GET /api/admin/logs/export
+// Streams logs as a plain-text file download.
+router.get('/admin/logs/export', asyncWrapper(async (req, res) => {
+  const text = logger.formatAsText(logger.getEntries());
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="momotaro-logs-${stamp}.txt"`);
+  res.send(text);
 }));
 
 module.exports = router;

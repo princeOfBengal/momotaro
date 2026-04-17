@@ -163,6 +163,44 @@ async function fetchFromAniList(title, token) {
   return normalizeMedia(json.data.Media);
 }
 
+/**
+ * Batch auto-fetch: sends one GraphQL request with aliased Media queries for
+ * each title and returns results in the same order as the input. Null entries
+ * mean "no match"; a whole-batch failure throws.
+ *
+ * AniList's rate limit is per request (not per alias), so batching 5–10 titles
+ * per call roughly cuts HTTP request count by that factor.
+ */
+async function fetchBatchFromAniList(titles, token) {
+  if (!titles.length) return [];
+
+  const cleaned = titles.map(cleanSearchTitle);
+  const varDefs     = cleaned.map((_, i) => `$s${i}: String`).join(', ');
+  const aliasBlocks = cleaned
+    .map((_, i) => `q${i}: Media(search: $s${i}, type: MANGA, isAdult: false) { ...MediaFields }`)
+    .join('\n  ');
+
+  const query = `
+    query (${varDefs}) {
+      ${aliasBlocks}
+    }
+    fragment MediaFields on Media {
+      ${MEDIA_FIELDS}
+    }
+  `;
+  const variables = Object.fromEntries(cleaned.map((s, i) => [`s${i}`, s]));
+
+  const json = await anilistRequest(query, variables, token);
+  // AniList populates `errors` when individual aliases return null but still
+  // returns data for the rest, so we don't bail on json.errors here.
+  if (!json.data) return titles.map(() => null);
+
+  return titles.map((_, i) => {
+    const media = json.data[`q${i}`];
+    return media ? normalizeMedia(media) : null;
+  });
+}
+
 /** Manual search: returns up to 10 results for user selection. */
 async function searchAniList(query, token, page = 1) {
   const json = await anilistRequest(MANUAL_SEARCH_QUERY, { search: query, page }, token);
@@ -284,4 +322,4 @@ async function saveMediaListEntry(token, mediaId, status, { chapters = null, vol
   return json.data.SaveMediaListEntry;
 }
 
-module.exports = { fetchFromAniList, searchAniList, fetchByAniListId, getViewer, saveMediaListEntry, getMediaListEntry };
+module.exports = { fetchFromAniList, fetchBatchFromAniList, searchAniList, fetchByAniListId, getViewer, saveMediaListEntry, getMediaListEntry };

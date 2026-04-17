@@ -1157,6 +1157,89 @@ function DatabaseSection() {
   );
 }
 
+// ── Section: System Logs ──────────────────────────────────────────────────────
+
+function SystemLogsSection() {
+  const [entries, setEntries] = useState(null);
+  const [max, setMax] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.getSystemLogs();
+      setEntries(data.entries || []);
+      setMax(data.max);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  function handleExport() {
+    window.location.href = api.systemLogsExportUrl();
+  }
+
+  return (
+    <div>
+      <div className="sp-section-head">
+        <div>
+          <h2 className="sp-section-title">System Logs</h2>
+          <p className="sp-section-desc">
+            Recent server console output. The server keeps the last
+            {max ? ` ${max.toLocaleString()} ` : ' '}
+            log lines in memory — older entries are discarded. Export to save a
+            snapshot to a <code>.txt</code> file.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={load}
+            disabled={loading}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={handleExport}
+            disabled={!entries || entries.length === 0}
+          >
+            Export as .txt
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="sp-status sp-status-error">Failed to load logs: {error}</div>
+      )}
+
+      {entries === null ? (
+        <div className="loading-center"><div className="spinner" /></div>
+      ) : entries.length === 0 ? (
+        <div className="settings-card">
+          <p className="settings-hint" style={{ margin: 0 }}>No log entries captured yet.</p>
+        </div>
+      ) : (
+        <div className="logs-viewer">
+          {entries.map((e, i) => (
+            <div key={i} className={`logs-line logs-line-${e.level}`}>
+              <span className="logs-ts">{e.ts}</span>
+              <span className={`logs-level logs-level-${e.level}`}>{e.level.toUpperCase()}</span>
+              <span className="logs-msg">{e.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Section: Statistics ───────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
@@ -1392,6 +1475,17 @@ const SECTIONS = [
       </svg>
     ),
   },
+  {
+    id: 'logs',
+    label: 'System Logs',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+        <path d="M14 2v6h6" />
+        <path d="M8 13h8M8 17h8M8 9h2" />
+      </svg>
+    ),
+  },
 ];
 
 // ── Settings page ─────────────────────────────────────────────────────────────
@@ -1430,6 +1524,7 @@ export default function Settings() {
           {section === 'reading'     && <ReadingSection />}
           {section === 'libraries'   && <LibrariesSection />}
           {section === 'database'    && <DatabaseSection />}
+          {section === 'logs'        && <SystemLogsSection />}
         </main>
       </div>
     </div>

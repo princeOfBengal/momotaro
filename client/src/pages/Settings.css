@@ -441,6 +441,63 @@
 .db-op-status-ok  { color: var(--accent); }
 .db-op-status-err { color: #f44336; }
 
+/* ── System Logs viewer ── */
+.logs-viewer {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-height: 65vh;
+  overflow: auto;
+  padding: 6px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.logs-line {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 10px;
+  padding: 3px 14px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-bottom: 1px solid transparent;
+}
+.logs-line:hover { background: var(--bg-hover); }
+
+.logs-ts {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.logs-level {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+  min-width: 46px;
+}
+.logs-level-info  { color: var(--accent); }
+.logs-level-warn  { color: #f2a93b; }
+.logs-level-error { color: #f44336; }
+
+.logs-line-warn  { background: rgba(242, 169, 59, 0.05); }
+.logs-line-error { background: rgba(244, 67, 54, 0.07); }
+
+.logs-msg {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .logs-line {
+    grid-template-columns: 1fr;
+    gap: 2px;
+    padding: 6px 12px;
+  }
+  .logs-ts, .logs-level { font-size: 11px; }
+}
+
 /* ── Shared small button modifier ── */
 .btn-sm {
   padding: 5px 12px;

@@ -5,10 +5,11 @@ const fetch = require('node-fetch');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
-const { fetchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
+const { fetchFromAniList, fetchBatchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
 const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
 const { fetchFromMAL, searchMAL, fetchByMALId } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
+const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const config = require('../config');
 
 const router = express.Router();
@@ -57,6 +58,25 @@ function applyMetadataToDb(db, mangaId, result) {
   );
 }
 
+// Only stores the external linkage IDs (anilist_id, mal_id, doujinshi_id) without
+// overwriting any existing metadata fields or changing metadata_source.
+// Used when local metadata is present and should remain the display source.
+function applyLinkageOnlyToDb(db, mangaId, result) {
+  db.prepare(`
+    UPDATE manga SET
+      anilist_id   = COALESCE(?, anilist_id),
+      mal_id       = COALESCE(?, mal_id),
+      doujinshi_id = COALESCE(?, doujinshi_id),
+      updated_at   = unixepoch()
+    WHERE id = ?
+  `).run(
+    result.anilist_id   ?? null,
+    result.mal_id       ?? null,
+    result.doujinshi_id ?? null,
+    mangaId
+  );
+}
+
 /**
  * Download a source cover image, resize to thumbnail dimensions, and save
  * it to the thumbnails directory. Updates cover_image and the source-specific
@@ -65,14 +85,14 @@ function applyMetadataToDb(db, mangaId, result) {
  * source: 'anilist' | 'myanimelist'
  * Runs best-effort — never throws so metadata apply never fails due to a bad image.
  */
-async function fetchAndStoreCover(db, mangaId, coverUrl, source = 'anilist') {
+// setActive: when false, saves the source-specific cover file but does not replace the
+// active thumbnail. Used for local-metadata manga so their existing cover is preserved.
+async function fetchAndStoreCover(db, mangaId, coverUrl, source = 'anilist', { setActive = true } = {}) {
   if (!coverUrl) return;
   try {
     const resp = await fetch(coverUrl);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const buffer = await resp.buffer();
-
-    fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
 
     // Source-specific filename and DB column
     const SOURCE_META = {
@@ -81,21 +101,29 @@ async function fetchAndStoreCover(db, mangaId, coverUrl, source = 'anilist') {
     };
     const meta      = SOURCE_META[source] || null;
     const savedName = meta ? `${mangaId}_${meta.suffix}.webp` : `${mangaId}_cover.webp`;
-    const savedPath = path.join(config.THUMBNAIL_DIR, savedName);
+    ensureShardDir(savedName);
+    const savedPath = thumbnailPath(savedName);
 
     await sharp(buffer)
       .resize(300, 430, { fit: 'cover', position: 'top' })
       .webp({ quality: 85 })
       .toFile(savedPath);
 
-    // Copy to the active cover
-    const activePath = path.join(config.THUMBNAIL_DIR, `${mangaId}.webp`);
-    fs.copyFileSync(savedPath, activePath);
+    if (setActive) {
+      const activeName = `${mangaId}.webp`;
+      ensureShardDir(activeName);
+      fs.copyFileSync(savedPath, thumbnailPath(activeName));
+    }
 
     if (meta) {
-      db.prepare(`UPDATE manga SET cover_image = ?, ${meta.dbField} = ? WHERE id = ?`)
-        .run(`${mangaId}.webp`, savedName, mangaId);
-    } else {
+      if (setActive) {
+        db.prepare(`UPDATE manga SET cover_image = ?, ${meta.dbField} = ? WHERE id = ?`)
+          .run(`${mangaId}.webp`, savedName, mangaId);
+      } else {
+        db.prepare(`UPDATE manga SET ${meta.dbField} = ? WHERE id = ?`)
+          .run(savedName, mangaId);
+      }
+    } else if (setActive) {
       db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
         .run(`${mangaId}.webp`, mangaId);
     }
@@ -322,10 +350,35 @@ router.post('/manga/:id/refresh-mal-metadata', asyncWrapper(async (req, res) => 
   });
 }));
 
+// Skip re-fetching titles that were attempted within this window unless `force: true`.
+const BULK_RETRY_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;  // 7 days
+const ANILIST_BATCH_SIZE = 5;
+
+const markAttemptedStmt = (db) =>
+  db.prepare('UPDATE manga SET last_metadata_fetch_attempt_at = ? WHERE id = ?');
+
+function markAttempted(db, mangaIds, nowSeconds) {
+  const stmt = markAttemptedStmt(db);
+  const tx = db.transaction((ids) => {
+    for (const id of ids) stmt.run(nowSeconds, id);
+  });
+  tx(mangaIds);
+}
+
 // POST /api/libraries/:id/bulk-metadata — auto-fetch metadata for every manga in a library
-// Body: { source: 'anilist' | 'myanimelist' | 'doujinshi' }  (defaults to 'anilist')
-// Priority when skipping: local > anilist > myanimelist > doujinshi.
-// Only processes manga with metadata_source = 'none' — any existing metadata is always preserved.
+// Body: { source: 'anilist' | 'myanimelist' | 'doujinshi', force?: boolean }
+//       source defaults to 'anilist'. force=true ignores the 7-day retry cooldown.
+//
+// Behavior by existing metadata_source:
+//   'none'           — full fetch: all metadata fields + linkage IDs applied
+//   'local'          — link-only: only the external ID (anilist_id / mal_id / doujinshi_id)
+//                      is stored; existing local fields and cover are preserved; skipped if
+//                      the relevant ID is already set
+//   'anilist' / etc. — skipped entirely (third-party metadata already present)
+//
+// Cooldown: a title whose last fetch attempt (for any source) is within
+// BULK_RETRY_COOLDOWN_SECONDS is skipped unless force=true, so no-match titles
+// don't get re-queried on every bulk pull.
 router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
@@ -333,93 +386,156 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
   const VALID_SOURCES = new Set(['anilist', 'myanimelist', 'doujinshi']);
   const source = VALID_SOURCES.has(req.body?.source) ? req.body.source : 'anilist';
+  const force  = req.body?.force === true;
 
-  // Only fetch manga that have no metadata yet — skip anything already sourced
-  const totalCount = db.prepare('SELECT COUNT(*) AS n FROM manga WHERE library_id = ?').get(library.id).n;
-  const mangaList  = db.prepare(
-    "SELECT id, title FROM manga WHERE library_id = ? AND metadata_source = 'none'"
+  const allManga = db.prepare(
+    `SELECT id, title, metadata_source, anilist_id, mal_id, doujinshi_id,
+            last_metadata_fetch_attempt_at
+     FROM manga WHERE library_id = ?`
   ).all(library.id);
-  const skippedExisting = totalCount - mangaList.length;
+  const totalCount = allManga.length;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  // Classify each manga into what we should do with it
+  const toProcess = [];
+  let skippedExisting       = 0; // already has third-party metadata — skip entirely
+  let skippedAlreadyLinked  = 0; // has local metadata + already linked for this source
+  let skippedRecentAttempt  = 0; // recently attempted with no result — honour cooldown
+
+  for (const m of allManga) {
+    if (m.metadata_source !== 'none' && m.metadata_source !== 'local') {
+      skippedExisting++;
+      continue;
+    }
+    if (m.metadata_source === 'local') {
+      const alreadyLinked =
+        (source === 'anilist'     && m.anilist_id)    ||
+        (source === 'myanimelist' && m.mal_id)        ||
+        (source === 'doujinshi'   && m.doujinshi_id);
+      if (alreadyLinked) {
+        skippedAlreadyLinked++;
+        continue;
+      }
+    }
+    if (!force
+        && m.last_metadata_fetch_attempt_at
+        && (nowSeconds - m.last_metadata_fetch_attempt_at) < BULK_RETRY_COOLDOWN_SECONDS) {
+      skippedRecentAttempt++;
+      continue;
+    }
+    toProcess.push(m);
+  }
 
   // Respond immediately — the pull runs in the background
   res.json({
-    message:          'Bulk metadata pull started',
-    total:            totalCount,
-    to_fetch:         mangaList.length,
-    skipped_existing: skippedExisting,
+    message:                  'Bulk metadata pull started',
+    total:                    totalCount,
+    to_fetch:                 toProcess.length,
+    skipped_existing:         skippedExisting,
+    skipped_already_linked:   skippedAlreadyLinked,
+    skipped_recent_attempt:   skippedRecentAttempt,
     source,
   });
 
-  if (mangaList.length === 0) {
+  if (toProcess.length === 0) {
     console.log(
       `[BulkMetadata][${source}] Nothing to do for "${library.name}" — ` +
-      `all ${totalCount} titles already have metadata.`
+      `all ${totalCount} titles covered ` +
+      `(${skippedExisting} have third-party metadata, ${skippedAlreadyLinked} local already linked, ` +
+      `${skippedRecentAttempt} recently attempted).`
     );
     return;
   }
 
   console.log(
     `[BulkMetadata][${source}] Starting for "${library.name}": ` +
-    `${mangaList.length} to fetch, ${skippedExisting} skipped (already have metadata).`
+    `${toProcess.length} to fetch ` +
+    `(${skippedExisting} skipped — third-party metadata, ${skippedAlreadyLinked} skipped — local already linked, ` +
+    `${skippedRecentAttempt} skipped — recently attempted).`
   );
 
   const anilistToken   = getToken(db);
   const doujinshiToken = getDoujinshiToken(db);
   const malClientId    = getMalClientId(db);
 
-  let applied = 0;
-  let noMatch = 0;
-  let errors  = 0;
+  const counters = { applied: 0, linked: 0, noMatch: 0, errors: 0 };
+  const total = toProcess.length;
 
-  for (const manga of mangaList) {
-    try {
-      let result = null;
-      if (source === 'doujinshi') {
-        result = await fetchFromDoujinshi(manga.title, doujinshiToken);
-        // fetchFromDoujinshi makes two HTTP requests (search + fetch by slug);
-        // use a longer delay to keep total request rate reasonable.
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } else if (source === 'myanimelist') {
-        result = await fetchFromMAL(manga.title, malClientId);
-        // Space requests to stay within MAL rate limits
-        await new Promise(resolve => setTimeout(resolve, 700));
-      } else {
-        result = await fetchFromAniList(manga.title, anilistToken);
-        // Stay well within AniList's ~90 req/min rate limit
-        await new Promise(resolve => setTimeout(resolve, 700));
-      }
-
-      if (result) {
-        applyMetadataToDb(db, manga.id, result);
-        await fetchAndStoreCover(db, manga.id, result.cover_url, source);
-        applied++;
-        console.log(
-          `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
-          `Applied: "${manga.title}" → "${result.title}"`
-        );
-      } else {
-        noMatch++;
-        console.log(
-          `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
-          `No match: "${manga.title}"`
-        );
-      }
-    } catch (err) {
-      errors++;
-      console.warn(
-        `[BulkMetadata][${source}] (${applied + noMatch + errors}/${mangaList.length}) ` +
-        `Error for "${manga.title}": ${err.message}`
+  async function applyOne(manga, result) {
+    const n = counters.applied + counters.linked + counters.noMatch + counters.errors + 1;
+    if (!result) {
+      counters.noMatch++;
+      console.log(`[BulkMetadata][${source}] (${n}/${total}) No match: "${manga.title}"`);
+      return;
+    }
+    if (manga.metadata_source === 'local') {
+      applyLinkageOnlyToDb(db, manga.id, result);
+      await fetchAndStoreCover(db, manga.id, result.cover_url, source, { setActive: false });
+      counters.linked++;
+      console.log(
+        `[BulkMetadata][${source}] (${n}/${total}) Linked (local preserved): ` +
+        `"${manga.title}" → "${result.title}"`
       );
-      // Still delay after errors to avoid hammering the API on repeated failures
-      await new Promise(resolve => setTimeout(resolve, source === 'doujinshi' ? 500 : 700));
+    } else {
+      applyMetadataToDb(db, manga.id, result);
+      await fetchAndStoreCover(db, manga.id, result.cover_url, source);
+      counters.applied++;
+      console.log(
+        `[BulkMetadata][${source}] (${n}/${total}) Applied: "${manga.title}" → "${result.title}"`
+      );
+    }
+  }
 
+  if (source === 'anilist') {
+    // Batch: one GraphQL request per ANILIST_BATCH_SIZE titles
+    for (let i = 0; i < toProcess.length; i += ANILIST_BATCH_SIZE) {
+      const batch = toProcess.slice(i, i + ANILIST_BATCH_SIZE);
+      try {
+        const results = await fetchBatchFromAniList(batch.map(m => m.title), anilistToken);
+        for (let j = 0; j < batch.length; j++) {
+          await applyOne(batch[j], results[j]);
+        }
+      } catch (err) {
+        for (const manga of batch) {
+          counters.errors++;
+          const n = counters.applied + counters.linked + counters.noMatch + counters.errors;
+          console.warn(
+            `[BulkMetadata][anilist] (${n}/${total}) Batch error for "${manga.title}": ${err.message}`
+          );
+        }
+      }
+      // Always mark batch members attempted — even on a whole-batch failure
+      // the cooldown still applies, since retrying immediately won't help.
+      markAttempted(db, batch.map(m => m.id), nowSeconds);
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+  } else {
+    // Non-AniList sources have no GraphQL alias trick — process sequentially
+    const perRequestDelay = source === 'doujinshi' ? 500 : 700;
+    for (const manga of toProcess) {
+      try {
+        const result = source === 'doujinshi'
+          ? await fetchFromDoujinshi(manga.title, doujinshiToken)
+          : await fetchFromMAL(manga.title, malClientId);
+        await applyOne(manga, result);
+      } catch (err) {
+        counters.errors++;
+        const n = counters.applied + counters.linked + counters.noMatch + counters.errors;
+        console.warn(
+          `[BulkMetadata][${source}] (${n}/${total}) Error for "${manga.title}": ${err.message}`
+        );
+      }
+      markAttempted(db, [manga.id], nowSeconds);
+      await new Promise(resolve => setTimeout(resolve, perRequestDelay));
     }
   }
 
   console.log(
     `[BulkMetadata][${source}] Finished for "${library.name}": ` +
-    `${applied} applied, ${noMatch} no match, ${errors} errors ` +
-    `(${skippedExisting} titles skipped — already had metadata).`
+    `${counters.applied} applied, ${counters.linked} linked (local preserved), ` +
+    `${counters.noMatch} no match, ${counters.errors} errors ` +
+    `(${skippedExisting} skipped — third-party metadata, ${skippedAlreadyLinked} skipped — local already linked, ` +
+    `${skippedRecentAttempt} skipped — recently attempted).`
   );
 }));
 
@@ -515,17 +631,18 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
 
   db.prepare(`
     UPDATE manga SET
-      anilist_id      = NULL,
-      mal_id          = NULL,
-      doujinshi_id    = NULL,
-      metadata_source = 'none',
-      description     = NULL,
-      status          = NULL,
-      year            = NULL,
-      genres          = NULL,
-      score           = NULL,
-      author          = NULL,
-      updated_at      = unixepoch()
+      anilist_id                     = NULL,
+      mal_id                         = NULL,
+      doujinshi_id                   = NULL,
+      metadata_source                = 'none',
+      description                    = NULL,
+      status                         = NULL,
+      year                           = NULL,
+      genres                         = NULL,
+      score                          = NULL,
+      author                         = NULL,
+      last_metadata_fetch_attempt_at = NULL,
+      updated_at                     = unixepoch()
     WHERE id = ?
   `).run(manga.id);
 
@@ -590,8 +707,9 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
   const manga = db.prepare('SELECT id FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
-  const activePath = path.join(config.THUMBNAIL_DIR, `${manga.id}.webp`);
+  const activeName = `${manga.id}.webp`;
+  ensureShardDir(activeName);
+  const activePath = thumbnailPath(activeName);
 
   if (saved_filename) {
     // Validate: basename only, must belong to this manga, webp only
@@ -599,7 +717,7 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
     if (!safeName.startsWith(`${manga.id}_`) || !safeName.endsWith('.webp')) {
       return res.status(400).json({ error: 'Invalid filename' });
     }
-    const srcPath = path.join(config.THUMBNAIL_DIR, safeName);
+    const srcPath = thumbnailPath(safeName);
     if (!fs.existsSync(srcPath)) {
       return res.status(404).json({ error: 'Thumbnail file not found' });
     }
@@ -614,7 +732,8 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
     }
 
     const histFilename = `${manga.id}_${Date.now()}.webp`;
-    const histPath     = path.join(config.THUMBNAIL_DIR, histFilename);
+    ensureShardDir(histFilename);
+    const histPath     = thumbnailPath(histFilename);
 
     await sharp(page.path)
       .resize(300, 430, { fit: 'cover', position: 'top' })

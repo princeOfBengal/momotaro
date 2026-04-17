@@ -85,6 +85,19 @@ The **General** tab of the settings panel contains a **Make Current Image Thumbn
 
 The button is disabled while loading or when `mangaId` is not available.
 
+Directly below it sits the **Add to Art Gallery / Remove from Art Gallery** toggle, which bookmarks the current page to the manga's Art Gallery (shown at the bottom of MangaDetail — see [frontend.md](./frontend.md)). Label and behaviour depend on the `isCurrentPageInGallery` prop passed down from `Reader.jsx`:
+
+| State | Label (not in gallery) | Label (in gallery) |
+| --- | --- | --- |
+| `idle` | Add to Art Gallery | Remove from Art Gallery |
+| `loading` | Adding… | Removing… |
+| `done` | Added! | Removed! |
+| `error` | Failed — try again | Failed — try again |
+
+`Reader.jsx` fetches `GET /api/manga/:id/gallery` once on mount into a `Set<page_id>` and uses that set to compute `isCurrentPageInGallery` for the current page. The toggle callback dispatches to `POST /api/manga/:id/gallery` (adding `{ pageId }`) or `DELETE /api/manga/:id/gallery/page/:pageId` and updates the set optimistically. The `UNIQUE(manga_id, page_id)` constraint on `art_gallery` with `INSERT OR IGNORE` makes the add path idempotent, so a double-tap never errors.
+
+Directly below the gallery toggle sits a **Download Current Page** button which saves the current page's image to the device. It follows the same four-state cycle as the thumbnail button (`idle` / `loading` / `done` / `error`). The callback in `Reader.jsx` fetches `GET /api/pages/:id/image` as a blob and triggers a download via a temporary `<a download>` element. The filename is built from the manga title, chapter label (`v{volume}c{number}`, `v{volume}`, `c{number}`, or folder name), and the 1-based page index — unsafe filesystem characters (`\/:*?"<>|`) are replaced with underscores. The extension is taken from `page.filename`, defaulting to `.jpg`.
+
 ## Controls Visibility
 
 - **Desktop**: `mousemove` anywhere → show controls, restart 3s auto-hide timer

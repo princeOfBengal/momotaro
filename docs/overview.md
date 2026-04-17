@@ -9,7 +9,8 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 | Backend | Node.js + Express |
 | Database | SQLite via `better-sqlite3` |
 | Image processing | `sharp` (WebP thumbnails) |
-| Archive support | `adm-zip` (CBZ/ZIP extraction) |
+| Archive reads | `yauzl` (streaming CBZ/ZIP — single-entry reads, no extraction) |
+| Archive writes | `adm-zip` (CBZ creation in the optimize endpoint only) |
 | File watching | `chokidar` |
 | Frontend | React 18 + React Router 6 |
 | Bundler | Vite 5 |
@@ -23,6 +24,7 @@ momotaro/
 │   └── src/
 │       ├── index.js           # App entry point + graceful shutdown
 │       ├── config.js          # Env-var configuration
+│       ├── logger.js          # Console interceptor → in-memory log ring buffer (2000 entries)
 │       ├── db/database.js     # SQLite init + migrations
 │       ├── routes/            # API route handlers
 │       ├── scanner/           # Library scanning logic
@@ -35,7 +37,7 @@ momotaro/
 │       ├── components/        # Shared UI components
 │       └── context/           # React context (sidebar)
 ├── assets/              # Source artwork / logo files
-├── data/                # Runtime data: DB, thumbnails, CBZ cache (gitignored)
+├── data/                # Runtime data: DB, thumbnails (gitignored)
 ├── docker-compose.yml
 └── docs/                # This documentation
 ```
@@ -66,10 +68,10 @@ docker compose up --build
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | Server listen port |
-| `DATA_PATH` | `./data` | Where DB, thumbnails, CBZ cache are stored |
+| `DATA_PATH` | `./data` | Where DB and thumbnails are stored |
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
-| `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Extracted CBZ pages |
+| `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Legacy — CBZs are now streamed from disk. Any contents of this directory are wiped on startup. |
 | `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts |
 | `METADATA_FETCH_ENABLED` | `true` | Auto-fetch AniList metadata on scan |
 | `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |

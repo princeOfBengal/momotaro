@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const { getDb } = require('../db/database');
-const { runFullScan, scanLibrary } = require('../scanner/libraryScanner');
+const { runFullScan, scanLibrary, getScanStatus } = require('../scanner/libraryScanner');
+const { thumbnailPath, thumbnailUrl } = require('../scanner/thumbnailPaths');
 const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 
@@ -43,7 +44,7 @@ router.post('/libraries', asyncWrapper(async (req, res) => {
   // Ensure the directory exists, then scan and watch in background
   fs.mkdirSync(library.path, { recursive: true });
   addLibraryWatch(library);
-  scanLibrary(library).catch(err => console.error('[Library] Scan error:', err.message));
+  scanLibrary(library, { force: true }).catch(err => console.error('[Library] Scan error:', err.message));
 
   res.status(201).json({ data: { ...library, manga_count: 0 } });
 }));
@@ -89,7 +90,7 @@ router.patch('/libraries/:id', asyncWrapper(async (req, res) => {
     await removeLibraryWatch(library.id);
     fs.mkdirSync(finalPath, { recursive: true });
     addLibraryWatch(updated);
-    scanLibrary(updated).catch(err => console.error('[Library] Scan error after path change:', err.message));
+    scanLibrary(updated, { force: true }).catch(err => console.error('[Library] Scan error after path change:', err.message));
   }
 
   const withCount = db.prepare(`
@@ -124,8 +125,13 @@ router.post('/libraries/:id/scan', asyncWrapper(async (req, res) => {
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
 
+  const status = getScanStatus();
+  if (status.running) {
+    return res.status(409).json({ error: 'Scan already in progress', status });
+  }
+
   res.json({ message: 'Scan started' });
-  scanLibrary(library).catch(err => console.error('[Scan] Error:', err.message));
+  scanLibrary(library, { force: true }).catch(err => console.error('[Scan] Error:', err.message));
 }));
 
 // ── Reading Lists ────────────────────────────────────────────────────────────
@@ -207,7 +213,7 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
     data: manga.map(m => ({
       ...m,
       genres: safeJsonParse(m.genres, []),
-      cover_url: m.cover_image ? `/thumbnails/${m.cover_image}` : null,
+      cover_url: m.cover_image ? thumbnailUrl(m.cover_image) : null,
     })),
   });
 }));
@@ -245,10 +251,49 @@ router.get('/manga/:id/reading-lists', asyncWrapper(async (req, res) => {
 
 // ── Manga / Library endpoints ────────────────────────────────────────────────
 
+// Opaque cursor helpers — encode the row's sort-key + id so the next page
+// can resume past the last row without using OFFSET.
+function encodeCursor(value, id) {
+  return Buffer.from(JSON.stringify([value, id])).toString('base64url');
+}
+function decodeCursor(token) {
+  try {
+    const arr = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
+    if (!Array.isArray(arr) || arr.length !== 2) return null;
+    return { value: arr[0], id: arr[1] };
+  } catch { return null; }
+}
+
+const MAX_LIMIT     = 500;
+const DEFAULT_LIMIT = 200;
+
+// Sort modes that support keyset pagination. Each entry describes the SQL
+// sort column, ORDER direction, and the corresponding WHERE comparison.
+const KEYSET_SORTS = {
+  title:   { column: 'm.title',      direction: 'ASC',  cmp: '>' },
+  updated: { column: 'm.updated_at', direction: 'DESC', cmp: '<' },
+};
+
 // GET /api/library
+// Optional pagination: pass ?limit=N (default 200 when cursor is present, max 500).
+// When `limit` is supplied the response includes `next_cursor` (null when the
+// listing is exhausted) and `has_more`. Resume with ?cursor=<opaque>.
+// Cursors are supported for sort=title (default) and sort=updated; year sort
+// falls back to LIMIT-only (no cursor).
 router.get('/library', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const { search, status, sort = 'title', library_id } = req.query;
+  const { search, status, sort = 'title', library_id, cursor } = req.query;
+
+  let limit = null;
+  if (req.query.limit !== undefined || cursor) {
+    const parsed = req.query.limit !== undefined
+      ? parseInt(req.query.limit, 10)
+      : DEFAULT_LIMIT;
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return res.status(400).json({ error: 'limit must be a positive integer' });
+    }
+    limit = Math.min(parsed, MAX_LIMIT);
+  }
 
   let query = `SELECT m.* FROM manga m LEFT JOIN libraries l ON l.id = m.library_id WHERE 1=1`;
   const params = [];
@@ -256,13 +301,11 @@ router.get('/library', asyncWrapper(async (req, res) => {
   if (search) {
     const terms = search.split(',').map(t => t.trim()).filter(Boolean);
     if (terms.length === 1) {
-      // Single term: title LIKE, author LIKE, or genre LIKE (partial, case-insensitive)
       query += ` AND (m.title LIKE ? OR m.author LIKE ? OR EXISTS (
         SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) LIKE LOWER(?)
       ))`;
       params.push(`%${terms[0]}%`, `%${terms[0]}%`, `%${terms[0]}%`);
     } else {
-      // Comma-separated: manga must have ALL listed genres (exact, case-insensitive)
       for (const term of terms) {
         query += ` AND EXISTS (
           SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) = LOWER(?)
@@ -279,22 +322,65 @@ router.get('/library', asyncWrapper(async (req, res) => {
     query += ' AND m.library_id = ?';
     params.push(parseInt(library_id, 10));
   } else {
-    // All Libraries view: exclude libraries hidden from "All"
     query += ' AND (m.library_id IS NULL OR l.show_in_all = 1)';
   }
 
-  const orderMap = { title: 'm.title ASC', updated: 'm.updated_at DESC', year: 'm.year DESC' };
-  query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}`;
+  const keysetSort = KEYSET_SORTS[sort] || null;
 
-  const manga = db.prepare(query).all(...params);
+  // Keyset clause — only when a cursor was provided AND the sort supports it
+  if (cursor) {
+    if (!keysetSort) {
+      return res.status(400).json({ error: `Cursor pagination is not supported for sort=${sort}` });
+    }
+    const decoded = decodeCursor(cursor);
+    if (!decoded) return res.status(400).json({ error: 'Invalid cursor' });
+    query += ` AND (${keysetSort.column} ${keysetSort.cmp} ?
+                    OR (${keysetSort.column} = ? AND m.id ${keysetSort.cmp} ?))`;
+    params.push(decoded.value, decoded.value, decoded.id);
+  }
 
-  res.json({
+  if (keysetSort) {
+    // Include m.id as a tiebreaker so the cursor is deterministic across ties
+    query += ` ORDER BY ${keysetSort.column} ${keysetSort.direction}, m.id ${keysetSort.direction}`;
+  } else {
+    const orderMap = { year: 'm.year DESC' };
+    query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}, m.id ASC`;
+  }
+
+  if (limit !== null) {
+    // Over-fetch by one row to detect has_more without a COUNT(*)
+    query += ' LIMIT ?';
+    params.push(limit + 1);
+  }
+
+  const rows = db.prepare(query).all(...params);
+
+  let hasMore = false;
+  let nextCursor = null;
+  let manga = rows;
+  if (limit !== null && rows.length > limit) {
+    hasMore = true;
+    manga = rows.slice(0, limit);
+    if (keysetSort) {
+      const last = manga[manga.length - 1];
+      const valueColumn = keysetSort.column.replace(/^m\./, '');
+      nextCursor = encodeCursor(last[valueColumn], last.id);
+    }
+  }
+
+  const payload = {
     data: manga.map(m => ({
       ...m,
       genres: safeJsonParse(m.genres, []),
-      cover_url: m.cover_image ? `/thumbnails/${m.cover_image}` : null,
+      cover_url: m.cover_image ? thumbnailUrl(m.cover_image) : null,
     })),
-  });
+  };
+  if (limit !== null) {
+    payload.next_cursor = nextCursor;
+    payload.has_more    = hasMore;
+  }
+
+  res.json(payload);
 }));
 
 // GET /api/manga/:id
@@ -313,7 +399,7 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
     data: {
       ...manga,
       genres: safeJsonParse(manga.genres, []),
-      cover_url: manga.cover_image ? `/thumbnails/${manga.cover_image}` : null,
+      cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image) : null,
       chapters,
       progress: progress
         ? { ...progress, completed_chapters: safeJsonParse(progress.completed_chapters, []) }
@@ -352,7 +438,7 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
 
   // Delete thumbnail
   if (manga.cover_image) {
-    try { fs.unlinkSync(path.join(config.THUMBNAIL_DIR, manga.cover_image)); } catch (_) {}
+    try { fs.unlinkSync(thumbnailPath(manga.cover_image)); } catch (_) {}
   }
 
   // Delete CBZ cache for every chapter
@@ -377,47 +463,36 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
 
 // POST /api/scan — scan all libraries
 router.post('/scan', asyncWrapper(async (req, res) => {
+  const status = getScanStatus();
+  if (status.running) {
+    return res.status(409).json({ error: 'Scan already in progress', status });
+  }
   res.json({ message: 'Scan started' });
-  runFullScan().catch(err => console.error('[Scan] Error:', err.message));
+  runFullScan({ force: true, trigger: 'manual-full' })
+    .catch(err => console.error('[Scan] Error:', err.message));
 }));
 
-// GET /api/manga/:id/info — file path, file count, and folder size
+// GET /api/scan/status — current scan progress
+router.get('/scan/status', asyncWrapper(async (req, res) => {
+  res.json({ data: getScanStatus() });
+}));
+
+// GET /api/manga/:id/info — file path, file count, and folder size.
+// Values come from the cached `bytes_on_disk` / `file_count` columns populated
+// during scan. This used to walk the manga folder on each request, which is
+// untenable at 8 TB scale.
 router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const manga = db.prepare('SELECT id, path FROM manga WHERE id = ?').get(req.params.id);
+  const manga = db.prepare(
+    'SELECT id, path, bytes_on_disk, file_count FROM manga WHERE id = ?'
+  ).get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  async function walkDir(dirPath) {
-    let fileCount = 0;
-    let sizeBytes = 0;
-    try {
-      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-      const results = await Promise.all(entries.map(async entry => {
-        const full = path.join(dirPath, entry.name);
-        try {
-          if (entry.isFile()) {
-            const { size } = await fs.promises.stat(full);
-            return { fileCount: 1, sizeBytes: size };
-          } else if (entry.isDirectory()) {
-            return walkDir(full);
-          }
-        } catch { /* skip inaccessible entries */ }
-        return { fileCount: 0, sizeBytes: 0 };
-      }));
-      for (const r of results) {
-        fileCount += r.fileCount;
-        sizeBytes += r.sizeBytes;
-      }
-    } catch { /* skip inaccessible directory */ }
-    return { fileCount, sizeBytes };
-  }
-
-  const { fileCount, sizeBytes } = await walkDir(manga.path);
-
+  const sizeBytes = manga.bytes_on_disk || 0;
   res.json({
     data: {
       path:       manga.path,
-      file_count: fileCount,
+      file_count: manga.file_count || 0,
       size_mb:    Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
     },
   });
@@ -427,24 +502,6 @@ router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
 
 let _statsCache = null;
 let _statsCacheTime = 0;
-
-async function getDirSizeAsync(dirPath) {
-  let total = 0;
-  try {
-    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-    await Promise.all(entries.map(async entry => {
-      const full = path.join(dirPath, entry.name);
-      try {
-        if (entry.isFile()) {
-          total += (await fs.promises.stat(full)).size;
-        } else if (entry.isDirectory()) {
-          total += await getDirSizeAsync(full);
-        }
-      } catch { /* skip inaccessible entries */ }
-    }));
-  } catch { /* skip inaccessible directories */ }
-  return total;
-}
 
 // GET /api/stats
 router.get('/stats', asyncWrapper(async (req, res) => {
@@ -495,14 +552,15 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   `).all().map(r => ({
     id: r.id,
     title: r.title,
-    cover_url: r.cover_image ? `/thumbnails/${r.cover_image}` : null,
+    cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
     chapters_read: r.chapters_read,
   }));
 
-  // Total disk size — async so it doesn't block the event loop
-  const mangaPaths = db.prepare('SELECT path FROM manga WHERE path IS NOT NULL').all();
-  const sizes = await Promise.all(mangaPaths.map(({ path: p }) => getDirSizeAsync(p)));
-  const total_size_bytes = sizes.reduce((sum, s) => sum + s, 0);
+  // Total disk size is now a single SUM over cached per-manga values —
+  // previously this walked every library, which doesn't scale past a few TB.
+  const { total_size_bytes } = db.prepare(
+    'SELECT COALESCE(SUM(bytes_on_disk), 0) as total_size_bytes FROM manga'
+  ).get();
 
   _statsCache = {
     total_manga,

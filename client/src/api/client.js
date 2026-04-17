@@ -56,6 +56,7 @@ export const api = {
   getChapter: (id) => apiFetch(`/api/chapters/${id}`),
   getPages: (chapterId) => apiFetch(`/api/chapters/${chapterId}/pages`),
   triggerScan: () => apiFetch('/api/scan', { method: 'POST' }),
+  getScanStatus: () => apiFetch('/api/scan/status'),
 
   // Progress
   getProgress: (mangaId) => apiFetch(`/api/progress/${mangaId}`),
@@ -63,6 +64,23 @@ export const api = {
     apiFetch(`/api/progress/${mangaId}`, { method: 'PUT', body: JSON.stringify(body) }),
   resetProgress: (mangaId) =>
     apiFetch(`/api/progress/${mangaId}`, { method: 'DELETE' }),
+  markChapterRead: (mangaId, chapterId, completed) =>
+    apiFetch(`/api/progress/${mangaId}/chapter/${chapterId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ completed }),
+    }),
+
+  // Art Gallery
+  getGallery: (mangaId) => apiFetch(`/api/manga/${mangaId}/gallery`),
+  addToGallery: (mangaId, pageId) =>
+    apiFetch(`/api/manga/${mangaId}/gallery`, {
+      method: 'POST',
+      body: JSON.stringify({ pageId }),
+    }),
+  removeFromGalleryByPage: (mangaId, pageId) =>
+    apiFetch(`/api/manga/${mangaId}/gallery/page/${pageId}`, { method: 'DELETE' }),
+  removeFromGallery: (mangaId, itemId) =>
+    apiFetch(`/api/manga/${mangaId}/gallery/${itemId}`, { method: 'DELETE' }),
 
   // Settings
   getSettings: () => apiFetch('/api/settings'),
@@ -183,10 +201,26 @@ export const api = {
   regenerateThumbnails: () => apiFetch('/api/admin/regenerate-thumbnails', { method: 'POST' }),
   vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
 
+  // System Logs
+  getSystemLogs: () => apiFetch('/api/admin/logs'),
+  systemLogsExportUrl: () => `${BASE}/api/admin/logs/export`,
+
   // Statistics
   getStats: () => apiFetch('/api/stats'),
 
   // Helpers
   pageImageUrl: (pageId) => `${BASE}/api/pages/${pageId}/image`,
-  thumbnailUrl: (filename) => filename ? `${BASE}/thumbnails/${filename}` : null,
+  thumbnailUrl,
 };
+
+// Thumbnails are sharded by `mangaId % 256` into 2-digit hex subdirectories,
+// e.g. `5.webp` is served from `/thumbnails/05/5.webp`. The server migrates
+// any legacy flat files at startup; the API also returns a `cover_url` field
+// that's already sharded, so prefer that when available.
+function thumbnailUrl(filename) {
+  if (!filename) return null;
+  const m = String(filename).match(/^(\d+)/);
+  if (!m) return `${BASE}/thumbnails/${filename}`;
+  const shard = (parseInt(m[1], 10) % 256).toString(16).padStart(2, '0');
+  return `${BASE}/thumbnails/${shard}/${filename}`;
+}

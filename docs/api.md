@@ -25,8 +25,40 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 | PATCH | `/api/libraries/:id` | Update library `{ name?, path?, show_in_all? }` |
 | DELETE | `/api/libraries/:id` | Delete library and all its manga |
 | POST | `/api/libraries/:id/scan` | Trigger manual scan of one library |
-| POST | `/api/scan` | Trigger full scan of all libraries |
+| POST | `/api/scan` | Trigger full scan of all libraries (returns 409 if already running) |
+| GET | `/api/scan/status` | Current scan progress — see *Scan Progress* below |
 | POST | `/api/libraries/:id/export-metadata` | Write `metadata.json` to each manga folder that has third-party metadata |
+
+### Scan Progress
+
+Startup scans and manual scans are non-blocking — the HTTP endpoints return immediately and the scan runs in the background. Poll `GET /api/scan/status` to observe progress.
+
+Response shape:
+
+```json
+{
+  "data": {
+    "running": true,
+    "trigger": "startup",
+    "startedAt": 1713200000000,
+    "finishedAt": null,
+    "currentLibrary": { "id": 1, "name": "Main" },
+    "totalLibraries": 2,
+    "completedLibraries": 0,
+    "currentMangaIndex": 142,
+    "currentMangaTotal": 5000,
+    "currentMangaName": "Some Title",
+    "lastError": null,
+    "elapsedSeconds": 180,
+    "etaSeconds": 6100
+  }
+}
+```
+
+- `trigger` is `startup`, `manual-full`, or `manual-library`.
+- `etaSeconds` is estimated for the *current* library only (time so far / manga processed × manga remaining in this library). It is `null` until at least one manga has been processed.
+- Only one scan runs at a time. Calling `POST /api/scan` or `POST /api/libraries/:id/scan` while a scan is running returns HTTP 409 with the current status payload.
+- After completion, `running` stays `false` and `finishedAt` / `elapsedSeconds` reflect the most recent run until the next scan begins.
 
 ---
 
@@ -34,7 +66,7 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`) |
+| GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
 | PATCH | `/api/manga/:id` | Update manga settings `{ track_volumes? }` |
@@ -51,6 +83,27 @@ The `search` parameter is matched against title, **author/artist name** (partial
 
 The same logic applies to the reading-list manga endpoint (`GET /api/reading-lists/:id/manga?search=`).
 
+### Pagination (`?limit=`, `?cursor=`)
+
+`GET /api/library` is opt-in paginated. Omitting both parameters returns the full result set (unchanged legacy behavior). Supplying either parameter switches the response to the paginated shape.
+
+- `?limit=N` — max rows per page. Bounded to `[1, 500]`. Default 200 when only `cursor` is set.
+- `?cursor=<opaque>` — resume token from a previous response's `next_cursor`. Supported for `sort=title` (default) and `sort=updated` only. `sort=year` returns `400` when a cursor is supplied.
+
+Paginated response shape:
+
+```json
+{
+  "data": [ /* manga rows */ ],
+  "next_cursor": "eyJ2IjoiTXkgTWFuZ2EiLCJpZCI6NDJ9",
+  "has_more": true
+}
+```
+
+`next_cursor` is `null` when `has_more` is `false` — i.e. the final page has been returned. Cursors are opaque base64url tokens containing the last row's sort-key plus its `id` as a tiebreaker; do not parse or construct them on the client.
+
+Under the hood, the server fetches `limit + 1` rows and uses `WHERE (title, id) > (?, ?)` (or `<` for DESC sorts) against the `idx_manga_title` / `idx_manga_updated_at` indexes, so the cost of fetching page N is independent of N — unlike `OFFSET`, which scans every skipped row.
+
 ### `GET /api/manga/:id/info` response
 
 ```json
@@ -63,7 +116,7 @@ The same logic applies to the reading-list manga endpoint (`GET /api/reading-lis
 }
 ```
 
-`file_count` and `size_mb` are computed by an async recursive directory walk at request time (not cached).
+`file_count` and `size_mb` are read from the cached `manga.file_count` / `manga.bytes_on_disk` columns populated by the scanner — no disk walk happens at request time. Values are accurate as of the most recent scan of the manga. See [scanner.md](./scanner.md#cached-disk-usage-columns).
 
 ### `GET /api/manga/:id/thumbnail-options` response
 
@@ -105,6 +158,56 @@ Copies an existing saved file to the active `{mangaId}.webp`. The filename must 
 
 ---
 
+## Art Gallery
+
+A per-manga collection of saved pages. Users bookmark pages from the reader via the *Add to Art Gallery* button; the pages appear as a grid at the bottom of MangaDetail. Gallery entries are stored in the `art_gallery` table (see [database.md](./database.md)).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/manga/:id/gallery` | List gallery items for a manga, newest first |
+| POST | `/api/manga/:id/gallery` | Add a page `{ pageId }` |
+| DELETE | `/api/manga/:id/gallery/page/:pageId` | Remove by page ID (used by the reader toggle) |
+| DELETE | `/api/manga/:id/gallery/:itemId` | Remove by gallery item ID (used by the MangaDetail remove button) |
+
+### `GET /api/manga/:id/gallery`
+
+Returns entries joined with `pages` and `chapters` so the UI can label each thumbnail without extra queries:
+
+```json
+{
+  "data": [
+    {
+      "id": 12,
+      "manga_id": 5,
+      "chapter_id": 87,
+      "page_id": 412,
+      "page_index": 6,
+      "created_at": 1713200000,
+      "chapter_number": 3,
+      "chapter_volume": null,
+      "chapter_folder_name": "Chapter 3"
+    }
+  ]
+}
+```
+
+The UI composes the chapter label from `chapter_number`, `chapter_volume`, and `chapter_folder_name` using the same logic as the chapter list (see [frontend.md](./frontend.md)).
+
+### `POST /api/manga/:id/gallery`
+
+Body: `{ "pageId": <page-id> }`. The server validates via JOIN that the page belongs to the manga before inserting. Uses `INSERT OR IGNORE` on the `UNIQUE(manga_id, page_id)` constraint, so re-adding an existing page is a no-op.
+
+### `DELETE` endpoints
+
+Two deletion paths exist because the reader and MangaDetail have different IDs on hand:
+
+- The reader only knows the current `page_id`, so it calls `/gallery/page/:pageId`.
+- The gallery UI on MangaDetail renders each item by its gallery row `id`, and calls `/gallery/:itemId`.
+
+Both return `{ data: { deleted: true } }` on success; neither is an error if the target row does not exist.
+
+---
+
 ## Chapters & Pages
 
 | Method | Path | Description |
@@ -114,7 +217,12 @@ Copies an existing saved file to the active `{mangaId}.webp`. The filename must 
 | GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide) |
 | GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`) |
 
-Page images are streamed with `fs.createReadStream`. The stream is destroyed if the client disconnects before the transfer completes.
+Page images are served in one of two ways depending on the parent chapter's `type`:
+
+- **Folder chapters** — `res.sendFile(path)` against the absolute filesystem path stored on the page row. Express handles `ETag`, `Last-Modified`, and conditional 304 responses.
+- **CBZ chapters** — `yauzl` opens the archive, locates the entry named by `pages.path`, and pipes the decompressed stream through to the response. No files are extracted to disk. `Cache-Control: public, max-age=86400` is set explicitly because `sendFile`'s automatic cache headers don't apply.
+
+`width` and `height` in `/api/chapters/:id/pages` may be `null` for CBZ pages — dimension fetching is skipped at scan time for archived chapters since it would require decompressing every page. `is_wide` is `null` in that case. Folder-chapter pages always have dimensions populated.
 
 ---
 
@@ -125,6 +233,7 @@ Page images are streamed with `fs.createReadStream`. The stream is destroyed if 
 | GET | `/api/progress/:mangaId` | Get reading progress |
 | PUT | `/api/progress/:mangaId` | Update progress (triggers AniList sync for the requesting device) |
 | DELETE | `/api/progress/:mangaId` | Reset progress |
+| PATCH | `/api/progress/:mangaId/chapter/:chapterId` | Mark a specific chapter as read or unread `{ completed: boolean }` |
 
 **PUT body:**
 ```json
@@ -134,6 +243,14 @@ Page images are streamed with `fs.createReadStream`. The stream is destroyed if 
   "markChapterComplete": false
 }
 ```
+
+**PATCH `/api/progress/:mangaId/chapter/:chapterId`**
+
+Used by the chapter-level *Mark as Read* / *Mark as Unread* toggle on MangaDetail. Body: `{ "completed": true | false }`.
+
+- When `completed: true`, the chapter ID is added to `completed_chapters`. The server also advances `current_chapter_id` to the next unread chapter in reading order — but only if the current chapter is at or behind the chapter being marked (so marking chapters 1, 2, 3 in sequence leaves *Continue Reading* pointing at chapter 4). If the current chapter is already further ahead, it is left alone.
+- When `completed: false`, the chapter ID is removed from `completed_chapters`; `current_chapter_id` is untouched.
+- Triggers a fire-and-forget AniList sync after the HTTP response, scoped to the requesting device.
 
 **Progress response `data` shape:**
 ```json
@@ -230,12 +347,16 @@ Clears the AniList or Doujinshi.info linkage for a manga and resets all fields t
 `POST /api/libraries/:id/bulk-metadata` accepts an optional body:
 
 ```json
-{ "source": "anilist" }
+{ "source": "anilist", "force": false }
 ```
 
-`source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. The endpoint responds immediately; the actual fetch loop runs in the background.
+`source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. `force` defaults to `false`; set it to `true` to bypass the 7-day retry cooldown described below. The endpoint responds immediately; the actual fetch loop runs in the background.
 
 **Skip logic** — only manga with `metadata_source = 'none'` are processed. Any title that already has metadata from any source (local JSON, AniList, MyAnimeList, or Doujinshi.info) is always skipped. Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
+
+**Retry cooldown** — every processed title has its `last_metadata_fetch_attempt_at` stamped regardless of outcome. On subsequent bulk pulls, any title whose last attempt is within 7 days is skipped unless `force: true` is passed. Matched titles are skipped automatically by the source check above, so the cooldown only affects titles that previously produced no match. `POST /api/manga/:id/reset-metadata` clears the timestamp so a reset title is eligible again immediately.
+
+**AniList batching** — when `source = 'anilist'`, titles are sent 5 per GraphQL request using query aliases, cutting outbound HTTP count ~5×. Each batch is still spaced 700 ms apart to stay within AniList's request-per-minute limit. MyAnimeList and Doujinshi.info remain sequential (no alias equivalent in their REST APIs).
 
 **Source priority** — when bulk-pulling with different sources, the enforced preference order is: local JSON > AniList > MyAnimeList > Doujinshi.info. Because bulk pulls skip any title with existing metadata, a title already linked to AniList will never be overwritten by a MyAnimeList or Doujinshi bulk pull. Per-manga apply endpoints always overwrite since the user explicitly chose a new entry.
 
@@ -410,7 +531,7 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 }
 ```
 
-Genre aggregation and read-time estimation are computed entirely in SQL. Disk size is measured asynchronously using `fs.promises` so the stats endpoint never blocks the event loop.
+Genre aggregation and read-time estimation are computed entirely in SQL. `total_size_bytes` is a single `SUM(manga.bytes_on_disk)` over the cached per-manga column written by the scanner; it no longer walks the filesystem. See [scanner.md](./scanner.md#cached-disk-usage-columns).
 
 ---
 
@@ -418,15 +539,25 @@ Genre aggregation and read-time estimation are computed entirely in SQL. Disk si
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/admin/cbz-cache-size` | Return current size of the CBZ cache in bytes |
-| POST | `/api/admin/clear-cbz-cache` | Delete all entries in `CBZ_CACHE_DIR`; returns new size (always 0) |
+| GET | `/api/admin/cbz-cache-size` | Legacy — report size of any leftover extract-to-disk cache. `limit_bytes` is always `0` since CBZs are now streamed on demand. |
+| POST | `/api/admin/clear-cbz-cache` | Delete all entries in `CBZ_CACHE_DIR`; returns new size (always 0). Kept for operator convenience — the cache is also wiped automatically on server startup. |
 | POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
 | POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
+| GET | `/api/admin/logs` | Return the in-memory system log buffer as JSON |
+| GET | `/api/admin/logs/export` | Download the log buffer as a plain-text `.txt` file |
 
-**`GET /api/admin/cbz-cache-size` and `POST /api/admin/clear-cbz-cache` response `data` shape:**
+**`GET /api/admin/cbz-cache-size` response `data` shape:**
 
 ```json
-{ "size_bytes": 104857600 }
+{ "size_bytes": 0, "limit_bytes": 0 }
+```
+
+`size_bytes` will usually be `0` — the server wipes any leftover cache directory on startup (see [scanner.md](./scanner.md#legacy-cache-cleanup)). It will only be non-zero if legacy cache entries were written after the most recent startup (which can't happen with the streaming reader) or if something outside Momotaro dropped files into the directory. `limit_bytes` is always `0` to signal that no ceiling is enforced.
+
+**`POST /api/admin/clear-cbz-cache` response `data` shape:**
+
+```json
+{ "size_bytes": 0 }
 ```
 
 **`POST /api/admin/regenerate-thumbnails` response `data` shape:**
@@ -445,6 +576,34 @@ Regeneration logic per manga:
 ```json
 { "size_before_bytes": 20971520, "size_after_bytes": 14680064 }
 ```
+
+### System Logs
+
+`console.log`, `console.info`, `console.warn`, and `console.error` are intercepted at server startup by [server/src/logger.js](../server/src/logger.js) and mirrored into an in-memory ring buffer. Output continues to stream to stdout/stderr as before; the buffer only adds a readable record that the UI can fetch or export. The buffer holds the most recent **2000** entries and is process-local — it resets on every server restart.
+
+**`GET /api/admin/logs` response `data` shape:**
+
+```json
+{
+  "entries": [
+    { "ts": "2026-04-16T12:00:00.000Z", "level": "info",  "message": "[Server] Momotaro running on port 3000" },
+    { "ts": "2026-04-16T12:00:01.100Z", "level": "warn",  "message": "[Scanner] Skipping unreadable file: ..." },
+    { "ts": "2026-04-16T12:00:02.500Z", "level": "error", "message": "[Error] Request timed out" }
+  ],
+  "max": 2000
+}
+```
+
+`level` is one of `info` (covers `console.log` / `console.info`), `warn`, or `error`. Entries are returned oldest-first in insertion order.
+
+**`GET /api/admin/logs/export`** responds with:
+
+```text
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="momotaro-logs-<iso-timestamp>.txt"
+```
+
+The body is the same entries formatted as `[<iso-ts>] [<LEVEL>] <message>`, one per line. The client triggers the download by navigating the browser directly to this URL (`api.systemLogsExportUrl()`).
 
 ---
 

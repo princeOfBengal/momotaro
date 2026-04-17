@@ -65,6 +65,78 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
   );
 }));
 
+// PATCH /api/progress/:mangaId/chapter/:chapterId — toggle a single chapter's read status
+// Body: { completed: boolean }
+// When marking read: advances current_chapter_id to the next unread chapter if the marked
+// chapter is at or ahead of the current position. Never moves current backwards.
+router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, res) => {
+  const db        = getDb();
+  const mangaId   = parseInt(req.params.mangaId,   10);
+  const chapterId = parseInt(req.params.chapterId,  10);
+  const { completed } = req.body;
+
+  const existing         = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  let completedChapters  = safeJsonParse(existing?.completed_chapters, []);
+  let currentChapterId   = existing?.current_chapter_id ?? null;
+  let currentPage        = existing?.current_page       ?? 0;
+
+  if (completed) {
+    if (!completedChapters.includes(chapterId)) completedChapters.push(chapterId);
+
+    // Sorted chapter list — same order as the client's sortedChapters
+    const allChapters = db.prepare(`
+      SELECT id FROM chapters
+      WHERE manga_id = ?
+      ORDER BY COALESCE(number, volume) ASC NULLS LAST, folder_name ASC
+    `).all(mangaId);
+
+    const markedIdx  = allChapters.findIndex(c => c.id === chapterId);
+    const currentIdx = allChapters.findIndex(c => c.id === currentChapterId);
+
+    // Advance current if it is null or at/behind the chapter just marked
+    if (currentChapterId === null || currentIdx === -1 || currentIdx <= markedIdx) {
+      const completedSet = new Set(completedChapters);
+      const nextChapter  = allChapters.slice(markedIdx + 1).find(c => !completedSet.has(c.id));
+      currentChapterId = nextChapter?.id ?? null;
+      currentPage = 0;
+    }
+  } else {
+    completedChapters = completedChapters.filter(id => id !== chapterId);
+    // Leave current_chapter_id unchanged when unmarking
+  }
+
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO progress (manga_id, current_chapter_id, current_page, completed_chapters, last_read_at, updated_at)
+      VALUES (?, ?, ?, ?, unixepoch(), unixepoch())
+    `).run(mangaId, currentChapterId, currentPage, JSON.stringify(completedChapters));
+  } else {
+    db.prepare(`
+      UPDATE progress SET
+        current_chapter_id = ?,
+        current_page       = ?,
+        completed_chapters = ?,
+        last_read_at       = unixepoch(),
+        updated_at         = unixepoch()
+      WHERE manga_id = ?
+    `).run(currentChapterId, currentPage, JSON.stringify(completedChapters), mangaId);
+  }
+
+  const updated = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  res.json({
+    data: {
+      ...updated,
+      completed_chapters: safeJsonParse(updated.completed_chapters, []),
+    },
+  });
+
+  // Fire-and-forget AniList sync
+  const deviceId = req.headers['x-device-id'] || null;
+  syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
+    console.warn('[AniList Sync] Failed:', err.message)
+  );
+}));
+
 // DELETE /api/progress/:mangaId
 router.delete('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const db = getDb();

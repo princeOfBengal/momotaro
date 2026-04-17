@@ -12,10 +12,12 @@
     "adm-zip": "^0.5.10",
     "better-sqlite3": "^11.0.0",
     "chokidar": "^3.6.0",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "express": "^4.18.3",
     "node-fetch": "^2.7.0",
-    "sharp": "^0.33.2"
+    "sharp": "^0.33.2",
+    "yauzl": "^3.3.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

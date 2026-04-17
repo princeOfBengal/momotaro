@@ -2,12 +2,61 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
-const config = require('../config');
 const { parseChapterInfo, getChapterPages, detectChapterType } = require('./chapterParser');
 const { generateThumbnail } = require('./thumbnailGenerator');
+const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
 
-const IMAGE_DIM_CONCURRENCY = 4;
+// Concurrency knobs.
+//   MANGA_CONCURRENCY — how many manga directories we walk in parallel. Sharp
+//     and readdir are I/O heavy; 4 keeps a modern SSD busy without overwhelming
+//     better-sqlite3's single-threaded writer queue.
+//   IMAGE_DIM_CONCURRENCY — per-manga cap on concurrent sharp.metadata() calls
+//     for folder-chapter pages. Combined worst case: MANGA × IMAGE_DIM.
+const MANGA_CONCURRENCY     = 4;
+const IMAGE_DIM_CONCURRENCY = 3;
+
+// ─── Scan progress state ────────────────────────────────────────────────────
+// Single shared state — only one scan can run at a time. Updated by
+// runFullScan / scanLibrary and read by the /api/scan/status endpoint.
+function makeIdleState() {
+  return {
+    running: false,
+    trigger: null,              // 'startup' | 'manual-full' | 'manual-library'
+    startedAt: null,            // unix ms
+    finishedAt: null,           // unix ms of last completion
+    currentLibrary: null,       // { id, name }
+    totalLibraries: 0,
+    completedLibraries: 0,
+    currentMangaIndex: 0,       // count of manga completed in current library
+    currentMangaTotal: 0,
+    currentMangaName: null,     // last manga started (best-effort in parallel mode)
+    lastError: null,
+  };
+}
+
+let scanState = makeIdleState();
+
+function getScanStatus() {
+  const now = Date.now();
+  const base = { ...scanState };
+  if (scanState.startedAt) {
+    const endTs = scanState.running ? now : (scanState.finishedAt || now);
+    base.elapsedSeconds = Math.max(0, Math.floor((endTs - scanState.startedAt) / 1000));
+  } else {
+    base.elapsedSeconds = 0;
+  }
+  if (scanState.running && scanState.currentMangaIndex > 0 && scanState.currentMangaTotal > 0) {
+    const libStart = scanState._currentLibraryStartedAt || scanState.startedAt;
+    const perItemMs = (now - libStart) / scanState.currentMangaIndex;
+    const remaining = Math.max(0, scanState.currentMangaTotal - scanState.currentMangaIndex);
+    base.etaSeconds = Math.round((perItemMs * remaining) / 1000);
+  } else {
+    base.etaSeconds = null;
+  }
+  delete base._currentLibraryStartedAt;
+  return base;
+}
 
 async function getImageDimensions(filePath) {
   try {
@@ -46,71 +95,172 @@ function naturalSort(a, b) {
 function removeManga(db, manga) {
   db.prepare('DELETE FROM manga WHERE id = ?').run(manga.id);
   if (manga.cover_image) {
-    try { fs.unlinkSync(path.join(config.THUMBNAIL_DIR, manga.cover_image)); } catch (_) {}
+    try { fs.unlinkSync(thumbnailPath(manga.cover_image)); } catch (_) {}
   }
 }
 
 /**
  * Scan all libraries stored in the database.
  */
-async function runFullScan() {
+async function runFullScan({ force = false, trigger = 'manual-full' } = {}) {
+  if (scanState.running) {
+    console.warn('[Scanner] runFullScan called while a scan is already running — skipping.');
+    return;
+  }
+
   const db = getDb();
-  const libraries = db.prepare('SELECT * FROM libraries').all();
+  const libraries = db.prepare(
+    'SELECT id, name, path, last_scan_mtime_ms FROM libraries'
+  ).all();
 
   if (libraries.length === 0) {
     console.log('[Scanner] No libraries configured — skipping scan.');
     return;
   }
 
-  for (const library of libraries) {
-    await scanLibrary(library);
+  scanState = {
+    ...makeIdleState(),
+    running: true,
+    trigger,
+    startedAt: Date.now(),
+    totalLibraries: libraries.length,
+  };
+
+  try {
+    for (const library of libraries) {
+      await scanLibrary(library, { force, _fromFullScan: true });
+      scanState.completedLibraries++;
+    }
+  } catch (err) {
+    scanState.lastError = err.message;
+    console.error('[Scanner] Full scan failed:', err.message);
+  } finally {
+    scanState.running = false;
+    scanState.finishedAt = Date.now();
+    scanState.currentLibrary = null;
+    scanState.currentMangaName = null;
   }
 }
 
 /**
  * Scan all manga directories in a single library.
+ *
+ * When `force: false` (the default for startup scans), the library root's
+ * mtime is compared against `libraries.last_scan_mtime_ms`. If unchanged, the
+ * full walk is skipped — chapter-internal edits are still caught live by the
+ * chokidar watcher, so the only thing this can miss is an offline edit that
+ * doesn't bump the root mtime (e.g. replacing a CBZ inside an existing manga
+ * folder with the server stopped). Manual scans via the API pass `force: true`
+ * so that case is always a quick fix.
  */
-async function scanLibrary(library) {
-  console.log(`[Scanner] Scanning library "${library.name}": ${library.path}`);
-
-  if (!fs.existsSync(library.path)) {
-    console.warn(`[Scanner] Library path does not exist: ${library.path}`);
-    fs.mkdirSync(library.path, { recursive: true });
-    return;
+async function scanLibrary(library, { force = false, _fromFullScan = false } = {}) {
+  const claimedState = !_fromFullScan;
+  if (claimedState) {
+    if (scanState.running) {
+      console.warn(`[Scanner] scanLibrary("${library.name}") called while a scan is already running — skipping.`);
+      return;
+    }
+    scanState = {
+      ...makeIdleState(),
+      running: true,
+      trigger: 'manual-library',
+      startedAt: Date.now(),
+      totalLibraries: 1,
+    };
   }
 
-  let entries;
   try {
-    entries = fs.readdirSync(library.path, { withFileTypes: true });
-  } catch (err) {
-    console.error(`[Scanner] Failed to read library directory "${library.name}":`, err.message);
-    return;
-  }
+    scanState.currentLibrary = { id: library.id, name: library.name };
+    scanState.currentMangaIndex = 0;
+    scanState.currentMangaTotal = 0;
+    scanState.currentMangaName = null;
+    scanState._currentLibraryStartedAt = Date.now();
 
-  const mangaDirs = entries.filter(e => e.isDirectory()).map(e => e.name).sort(naturalSort);
+    console.log(`[Scanner] Scanning library "${library.name}": ${library.path}`);
 
-  for (const folderName of mangaDirs) {
-    const mangaPath = path.join(library.path, folderName);
+    if (!fs.existsSync(library.path)) {
+      console.warn(`[Scanner] Library path does not exist: ${library.path}`);
+      fs.mkdirSync(library.path, { recursive: true });
+      return;
+    }
+
+    let rootMtimeMs = null;
     try {
-      await scanMangaDirectory(mangaPath, folderName, library.id);
+      rootMtimeMs = fs.statSync(library.path).mtimeMs;
+    } catch { /* best effort */ }
+
+    if (!force && rootMtimeMs !== null && library.last_scan_mtime_ms === rootMtimeMs) {
+      console.log(`[Scanner] "${library.name}" unchanged since last scan — skipping full walk.`);
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(library.path, { withFileTypes: true });
     } catch (err) {
-      console.error(`[Scanner] Error scanning ${folderName}:`, err.message);
+      console.error(`[Scanner] Failed to read library directory "${library.name}":`, err.message);
+      return;
+    }
+
+    const mangaDirs = entries.filter(e => e.isDirectory()).map(e => e.name).sort(naturalSort);
+    scanState.currentMangaTotal = mangaDirs.length;
+
+    // Parallelize the outer loop — each manga is an independent unit of work.
+    // DB writes serialize inside better-sqlite3 so correctness is preserved.
+    await withLimit(MANGA_CONCURRENCY, mangaDirs, async (folderName) => {
+      scanState.currentMangaName = folderName;
+      const mangaPath = path.join(library.path, folderName);
+      try {
+        await scanMangaDirectory(mangaPath, folderName, library.id);
+      } catch (err) {
+        console.error(`[Scanner] Error scanning ${folderName}:`, err.message);
+      }
+      scanState.currentMangaIndex++;
+    });
+
+    // Remove DB entries for manga whose folder no longer exists on disk
+    const db = getDb();
+    const libraryManga = db.prepare(
+      'SELECT id, path, cover_image FROM manga WHERE library_id = ?'
+    ).all(library.id);
+    for (const m of libraryManga) {
+      if (!fs.existsSync(m.path)) {
+        removeManga(db, m);
+        console.log(`[Scanner] Removed deleted manga: ${path.basename(m.path)}`);
+      }
+    }
+
+    if (rootMtimeMs !== null) {
+      db.prepare('UPDATE libraries SET last_scan_mtime_ms = ? WHERE id = ?')
+        .run(rootMtimeMs, library.id);
+    }
+
+    console.log(`[Scanner] Done scanning library "${library.name}".`);
+  } finally {
+    if (claimedState) {
+      scanState.running = false;
+      scanState.finishedAt = Date.now();
+      scanState.currentLibrary = null;
+      scanState.currentMangaName = null;
     }
   }
+}
 
-  // Remove DB entries for manga whose folder no longer exists on disk
-  const db = getDb();
-  const libraryManga = db.prepare(
-    'SELECT id, path, cover_image FROM manga WHERE library_id = ?'
-  ).all(library.id);
-  for (const m of libraryManga) {
-    if (!fs.existsSync(m.path)) {
-      removeManga(db, m);
-      console.log(`[Scanner] Removed deleted manga: ${path.basename(m.path)}`);
-    }
+/**
+ * Compute chapter-level disk stats.
+ *   - For folder chapters: sum of image-file sizes (caller passes `pages`).
+ *   - For CBZ chapters: the archive's own size on disk.
+ * Returns { bytesOnDisk, fileCount }.
+ */
+function computeChapterStats(type, chapterPath, pages) {
+  if (type === 'cbz') {
+    let bytes = 0;
+    try { bytes = fs.statSync(chapterPath).size; } catch { /* ignore */ }
+    return { bytesOnDisk: bytes, fileCount: pages.length };
   }
-
-  console.log(`[Scanner] Done scanning library "${library.name}".`);
+  let bytes = 0;
+  for (const p of pages) bytes += (p.size || 0);
+  return { bytesOnDisk: bytes, fileCount: pages.length };
 }
 
 /**
@@ -120,7 +270,7 @@ async function scanLibrary(library) {
 async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
   const db = getDb();
 
-  const existing = db.prepare('SELECT * FROM manga WHERE path = ?').get(mangaPath);
+  const existing = db.prepare('SELECT id, library_id FROM manga WHERE path = ?').get(mangaPath);
 
   let mangaId;
   if (!existing) {
@@ -165,12 +315,10 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
     }
   }
 
-  // Scan chapters
   let entries;
   try {
     entries = fs.readdirSync(mangaPath);
   } catch {
-    // Folder unreadable or disappeared — remove the manga record we may have just created
     const mangaRecord = db.prepare('SELECT id, cover_image FROM manga WHERE id = ?').get(mangaId);
     if (mangaRecord) removeManga(db, mangaRecord);
     return;
@@ -179,7 +327,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
   const chapterEntries = entries
     .filter(name => {
       const full = path.join(mangaPath, name);
-      return detectChapterType(full) !== null;
+      try { return detectChapterType(full) !== null; } catch { return false; }
     })
     .sort(naturalSort);
 
@@ -192,7 +340,6 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
     }
   }
 
-  // No recognised chapter files found — remove the manga entirely
   if (chapterEntries.length === 0) {
     const mangaRecord = db.prepare('SELECT id, cover_image FROM manga WHERE id = ?').get(mangaId);
     if (mangaRecord) removeManga(db, mangaRecord);
@@ -200,7 +347,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
     return;
   }
 
-  let coverPage = null;
+  let coverPage = null;                // { type, chapterPath, entryNameOrPath }
   let lowestChapterNumber = Infinity;
 
   for (const name of chapterEntries) {
@@ -208,16 +355,15 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
     const type = detectChapterType(chapterPath);
     if (!type) continue;
 
-    // Get current mtime for change detection
     let currentMtime = null;
     try {
       currentMtime = Math.floor(fs.statSync(chapterPath).mtimeMs / 1000);
-    } catch { /* non-critical — will re-process */ }
+    } catch { /* non-critical */ }
 
     const { chapter: number, volume } = parseChapterInfo(name);
 
     const existingChapter = db.prepare(
-      'SELECT * FROM chapters WHERE manga_id = ? AND folder_name = ?'
+      'SELECT id, file_mtime, page_count FROM chapters WHERE manga_id = ? AND folder_name = ?'
     ).get(mangaId, name);
 
     let chapterId;
@@ -234,7 +380,6 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
       db.prepare('UPDATE chapters SET path = ?, type = ?, number = ?, volume = ? WHERE id = ?')
         .run(chapterPath, type, number, volume, chapterId);
 
-      // Skip expensive page re-indexing if mtime unchanged and pages already indexed
       if (
         currentMtime !== null &&
         existingChapter.file_mtime === currentMtime &&
@@ -246,31 +391,38 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
       }
     }
 
-    // Resolve cover candidate even when skipping full re-index
     if (skipPageIndexing) {
       if (number !== null && number < lowestChapterNumber) {
         lowestChapterNumber = number;
-        // Peek at the first page path from DB to use as cover
         const firstPage = db.prepare(
           'SELECT path FROM pages WHERE chapter_id = ? ORDER BY page_index ASC LIMIT 1'
         ).get(chapterId);
-        if (firstPage) coverPage = firstPage.path;
+        if (firstPage) coverPage = { type, chapterPath, entry: firstPage.path };
       } else if (coverPage === null) {
         const firstPage = db.prepare(
           'SELECT path FROM pages WHERE chapter_id = ? ORDER BY page_index ASC LIMIT 1'
         ).get(chapterId);
-        if (firstPage) coverPage = firstPage.path;
+        if (firstPage) coverPage = { type, chapterPath, entry: firstPage.path };
       }
       continue;
     }
 
-    // Index pages with bounded concurrency for image dimension fetching
+    // Enumerate pages. For CBZ this just reads the ZIP central directory —
+    // nothing is extracted to disk.
     const chapter = { id: chapterId, path: chapterPath, type };
-    const pages = getChapterPages(chapter);
+    const pages = await getChapterPages(chapter);
 
     if (pages.length > 0) {
-      const dims = await withLimit(IMAGE_DIM_CONCURRENCY, pages, p => getImageDimensions(p.path));
-      const pagesWithDims = pages.map((p, i) => ({ ...p, ...dims[i] }));
+      // Read image dimensions only for folder chapters — CBZ pages would
+      // require decompressing every page, which is exactly what streaming is
+      // here to avoid. CBZ dimensions will be filled lazily by the reader.
+      let pageRows;
+      if (type === 'folder') {
+        const dims = await withLimit(IMAGE_DIM_CONCURRENCY, pages, p => getImageDimensions(p.path));
+        pageRows = pages.map((p, i) => ({ ...p, ...dims[i] }));
+      } else {
+        pageRows = pages.map(p => ({ ...p, width: null, height: null }));
+      }
 
       const insertPage = db.prepare(`
         INSERT OR IGNORE INTO pages (chapter_id, page_index, filename, path, width, height)
@@ -280,29 +432,46 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
         rows.forEach((p, i) =>
           insertPage.run(chapterId, i, p.filename, p.path, p.width ?? null, p.height ?? null)
         );
-      })(pagesWithDims);
+      })(pageRows);
 
-      db.prepare('UPDATE chapters SET page_count = ?, file_mtime = ? WHERE id = ?')
-        .run(pagesWithDims.length, currentMtime, chapterId);
+      const { bytesOnDisk, fileCount } = computeChapterStats(type, chapterPath, pageRows);
+
+      db.prepare(
+        'UPDATE chapters SET page_count = ?, file_mtime = ?, bytes_on_disk = ?, file_count = ? WHERE id = ?'
+      ).run(pageRows.length, currentMtime, bytesOnDisk, fileCount, chapterId);
 
       if (number !== null && number < lowestChapterNumber) {
         lowestChapterNumber = number;
-        coverPage = pagesWithDims[0].path;
+        coverPage = { type, chapterPath, entry: pageRows[0].path };
       } else if (coverPage === null) {
-        coverPage = pagesWithDims[0].path;
+        coverPage = { type, chapterPath, entry: pageRows[0].path };
       }
     }
   }
 
-  // Generate thumbnail if we have a cover page and none exists yet
+  // Roll up chapter stats to the manga row in a single query.
+  db.prepare(`
+    UPDATE manga
+    SET bytes_on_disk = COALESCE(
+          (SELECT SUM(bytes_on_disk) FROM chapters WHERE manga_id = ?), 0
+        ),
+        file_count    = COALESCE(
+          (SELECT SUM(file_count)    FROM chapters WHERE manga_id = ?), 0
+        )
+    WHERE id = ?
+  `).run(mangaId, mangaId, mangaId);
+
+  // Generate thumbnail if we have a cover candidate and none exists yet.
   if (coverPage && (!existing || !existing.cover_image)) {
     const thumbPath = await generateThumbnail(coverPage, mangaId);
     if (thumbPath) {
-      // Also preserve a permanent original copy (never overwritten)
       const originalName = `${mangaId}_original.webp`;
-      const originalPath = path.join(config.THUMBNAIL_DIR, originalName);
+      const originalPath = thumbnailPath(originalName);
       if (!fs.existsSync(originalPath)) {
-        try { fs.copyFileSync(thumbPath, originalPath); } catch (_) {}
+        try {
+          ensureShardDir(originalName);
+          fs.copyFileSync(thumbPath, originalPath);
+        } catch (_) {}
       }
       db.prepare('UPDATE manga SET cover_image = ?, original_cover = COALESCE(original_cover, ?) WHERE id = ?')
         .run(path.basename(thumbPath), originalName, mangaId);
@@ -319,4 +488,4 @@ function cleanTitle(folderName) {
     .trim();
 }
 
-module.exports = { runFullScan, scanLibrary, scanMangaDirectory };
+module.exports = { runFullScan, scanLibrary, scanMangaDirectory, getScanStatus };

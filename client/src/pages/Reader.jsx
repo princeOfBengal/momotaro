@@ -40,6 +40,7 @@ export default function Reader() {
   const [animKey, setAnimKey] = useState(0);
   const [animDir, setAnimDir] = useState('next');
   const [currentPage, setCurrentPage] = useState(() => parseInt(searchParams.get('page') || '0', 10));
+  const [galleryPageIds, setGalleryPageIds] = useState(() => new Set());
 
   const progressTimer = useRef(null);
   const controlsTimer = useRef(null);
@@ -169,6 +170,17 @@ export default function Reader() {
         return aKey - bKey;
       }));
     }).catch(() => {});
+  }, [mangaId]);
+
+  // Load art gallery page IDs so the Add-to-Gallery button reflects the current state
+  useEffect(() => {
+    if (!mangaId) return;
+    let cancelled = false;
+    api.getGallery(mangaId).then(items => {
+      if (cancelled) return;
+      setGalleryPageIds(new Set(items.map(it => it.page_id)));
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, [mangaId]);
 
   // Sync current page to URL
@@ -385,6 +397,43 @@ export default function Reader() {
         const page = pages[currentPage];
         if (!mangaId || !page) throw new Error('No page');
         await api.setPageAsThumbnail(mangaId, page.id);
+      }}
+      isCurrentPageInGallery={!!pages[currentPage] && galleryPageIds.has(pages[currentPage].id)}
+      onToggleGalleryPage={async () => {
+        const page = pages[currentPage];
+        if (!mangaId || !page) throw new Error('No page');
+        if (galleryPageIds.has(page.id)) {
+          await api.removeFromGalleryByPage(mangaId, page.id);
+          setGalleryPageIds(prev => { const n = new Set(prev); n.delete(page.id); return n; });
+        } else {
+          await api.addToGallery(mangaId, page.id);
+          setGalleryPageIds(prev => new Set(prev).add(page.id));
+        }
+      }}
+      onDownloadPage={async () => {
+        const page = pages[currentPage];
+        if (!page) throw new Error('No page');
+        const ext = (page.filename?.match(/\.[a-z0-9]+$/i)?.[0] || '.jpg').toLowerCase();
+        const chapterPart = chapter ? (
+          (chapter.volume !== null && chapter.number !== null)
+            ? `v${chapter.volume}c${chapter.number}`
+            : chapter.volume !== null ? `v${chapter.volume}`
+            : chapter.number !== null ? `c${chapter.number}`
+            : chapter.folder_name
+        ) : '';
+        const base = [manga?.title, chapterPart, `p${currentPage + 1}`].filter(Boolean).join(' - ');
+        const filename = `${base.replace(/[\\/:*?"<>|]/g, '_')}${ext}`;
+        const resp = await fetch(api.pageImageUrl(page.id));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
       }}
       onToggleSettings={() => setShowSettings(s => !s)}
       onToggleFullscreen={toggleFullscreen}

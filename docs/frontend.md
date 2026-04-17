@@ -32,12 +32,14 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 
 - Shows cover, metadata (title, author/artist, status, year, genres, score, description)
   - `author` is displayed below the title when present; the element is omitted entirely when `manga.author` is falsy
-- Chapter list sorted by `number ?? volume` (ascending)
+- Chapter list — sorted by `COALESCE(number, volume) ASC NULLS LAST, folder_name ASC` as the canonical **reading order**, then reversed for display so the highest chapter/volume appears on top. By default only the first 5 rows (the newest 5 chapters) are rendered; a **Show all N chapters** button at the bottom of the list toggles the full view and swaps to **Show less**. The word *chapters* becomes *volumes* automatically when `manga.track_volumes` is set. The *Continue Reading* fallback still uses the ascending reading order so starting from scratch jumps to chapter 1, not the newest entry.
+- **Mark chapter as read / unread** — every row exposes a toggle button that calls `PATCH /api/progress/:mangaId/chapter/:chapterId` with `{ completed: true | false }`. When a chapter is marked read, the server advances `current_chapter_id` past it only if the existing current chapter is at or behind the marked one, so bulk-marking several chapters leaves *Continue Reading* pointing at the first genuinely unread chapter. Updates are applied optimistically and then reconciled with the server response.
 - Chapter display label logic:
   - `vol !== null && number !== null` → `Vol. N Ch. N`
   - `vol !== null` → `Volume N`
   - `number !== null` → `Chapter N` (or `Volume N` if `track_volumes`)
   - fallback → `folder_name`
+- **Art Gallery** — a grid of user-bookmarked pages rendered at the bottom of the page, below the chapter list. Populated via the *Add to Art Gallery* button in the reader (see [reader.md](./reader.md)). The grid is `repeat(auto-fill, minmax(140px, 1fr))` with each tile showing the page thumbnail (aspect-ratio 2/3, `object-fit: cover`), a label with the chapter/volume string and the 1-based page number, and a circular ✕ remove button overlayed in the top-right corner. The ✕ is hidden on desktop until hover/focus, and always visible on touch devices via `@media (hover: none)`. Clicking a tile navigates to `/read/:chapterId?page=<page_index>&mangaId=<id>` so the user lands on the exact page. Data comes from `GET /api/manga/:id/gallery`, which is fetched once on mount and kept in component state; removal goes through `DELETE /api/manga/:id/gallery/:itemId`. When the list is empty the section shows a hint pointing the user at the reader button.
 - **Nav drawer** — hamburger button (☰) in the navbar opens a slide-in drawer listing all libraries and reading lists. Clicking an entry navigates to `/` and passes `{ library: id }` or `{ list: id }` in React Router location state, which `Library` reads on mount to pre-select the filter.
 - **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, total file count, and folder size in MB. The request is made lazily on first open and the result is cached for the lifetime of the page.
 - **Metadata button** opens a modal with a **Source dropdown** (AniList / MyAnimeList / Doujinshi.info, defaults to AniList). Each source exposes the same two actions:
@@ -81,6 +83,9 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - *CBZ Cache* — displays the current cache size; **Clear Cache** deletes all extracted pages from `CBZ_CACHE_DIR` (pages are re-extracted on next access)
   - *Regenerate Thumbnails* — **Regenerate All** fires `POST /api/admin/regenerate-thumbnails`; the job runs in the background and the UI shows a confirmation with the total manga count. For each manga, the AniList cover is restored if available, otherwise a new thumbnail is generated from the first page of the first chapter
   - *Compact Database* — **Compact Database** runs `POST /api/admin/vacuum-db` synchronously and displays the before/after file size
+- **System Logs tab**: shows the server's in-memory log buffer (most recent 2000 entries of `console.log` / `info` / `warn` / `error`). Each row renders the ISO timestamp, level tag (colour-coded: accent for info, amber for warn, red for error), and message in a monospace viewer. Two actions:
+  - **Refresh** — re-calls `GET /api/admin/logs` and repopulates the list
+  - **Export as .txt** — navigates the browser to `GET /api/admin/logs/export`, which triggers a native file download (`momotaro-logs-<iso-timestamp>.txt`). Buffer is process-local and resets on server restart.
 
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
@@ -171,6 +176,8 @@ api.getCbzCacheSize()        // GET cbz-cache-size → { size_bytes }
 api.clearCbzCache()          // POST clear-cbz-cache → { size_bytes: 0 }
 api.regenerateThumbnails()   // POST regenerate-thumbnails → { message, total }
 api.vacuumDb()               // POST vacuum-db → { size_before_bytes, size_after_bytes }
+api.getSystemLogs()          // GET admin/logs → { entries: [{ ts, level, message }], max }
+api.systemLogsExportUrl()    // returns the GET admin/logs/export URL (used as an <a>/download target)
 ```
 
 ## Context

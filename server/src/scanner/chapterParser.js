@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const AdmZip = require('adm-zip');
-const config = require('../config');
+const yauzl = require('yauzl');
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif']);
 
@@ -27,34 +26,24 @@ function parseChapterInfo(name) {
   // Strip only known archive/image extensions — NOT path.extname() which incorrectly
   // treats e.g. ".13 - Title" as an extension for folder names like "Ch.13 - Title".
   let base = path.basename(name).replace(/\.(cbz|zip|7z|rar|pdf|jpg|jpeg|png|webp|gif|avif)$/i, '');
-  // Strip bracketed groups (e.g. [Fansub Group], [HQ])
   base = base.replace(/\[.*?\]/g, ' ');
-
-  // Normalize non-semantic separators (_  &  +) to spaces so \b word boundaries
-  // fire correctly — e.g. "Scans_Vol.2" becomes "Scans Vol.2"
   base = base.replace(/[_&+]/g, ' ').replace(/\s+/g, ' ').trim();
 
   let volume = null;
   let chapter = null;
 
-  // Extract volume: Vol.3, Vol 03, Volume 2, v01, V2, etc.
-  // Covers: volume, vol, v (standalone, not mid-word)
   const volMatch = base.match(/\b(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)\b/i);
   if (volMatch) {
     volume = parseFloat(volMatch[1]);
-    // Remove matched text so the number doesn't leak into chapter extraction
     base = (base.slice(0, volMatch.index) + base.slice(volMatch.index + volMatch[0].length))
       .replace(/\s+/g, ' ').trim();
   }
 
-  // Extract chapter: Ch.23.5, Ch 12, Chapter 5, c01, C01, etc.
-  // Covers: chapter, ch, c (standalone, not mid-word)
   const chMatch = base.match(/\b(?:ch(?:apter)?|c)\.?\s*(\d+(?:\.\d+)?)\b/i);
   if (chMatch) {
     chapter = parseFloat(chMatch[1]);
   }
 
-  // Fallback: first standalone number that isn't a 4-digit year (1900–2099)
   if (chapter === null) {
     const numRe = /\b(\d+(?:\.\d+)?)\b/g;
     let numMatch;
@@ -68,102 +57,124 @@ function parseChapterInfo(name) {
   return { chapter, volume };
 }
 
-/**
- * Convenience wrapper — returns just the chapter number (backward compat).
- */
 function parseChapterNumber(name) {
   return parseChapterInfo(name).chapter;
 }
 
 /**
  * Get sorted image list from a folder chapter.
+ * Returns [{ filename, path (absolute), size }].
  */
 function getFolderPages(dirPath) {
-  let files;
+  let entries;
   try {
-    files = fs.readdirSync(dirPath);
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
   } catch {
     return [];
   }
-  return files
-    .filter(isImage)
-    .sort(naturalSort)
-    .map(f => ({ filename: f, path: path.join(dirPath, f) }));
+  const files = entries
+    .filter(e => e.isFile() && isImage(e.name))
+    .map(e => e.name)
+    .sort(naturalSort);
+
+  return files.map(name => {
+    const full = path.join(dirPath, name);
+    let size = 0;
+    try { size = fs.statSync(full).size; } catch { /* skip */ }
+    return { filename: name, path: full, size };
+  });
 }
 
 /**
- * Get sorted image list from a CBZ file.
- * Extracts to CBZ cache directory on first access; re-extracts if the CBZ
- * file has been modified since the last extraction (mtime-based validation).
+ * Open a CBZ and resolve with [{ filename, entryName, size }] sorted
+ * naturally. Does NOT extract — just reads the central directory.
+ *
+ * `entryName` is the full path inside the archive (what yauzl calls `fileName`),
+ * suitable for stored-path lookup when streaming a single entry later.
+ * `filename` is the basename for display purposes.
  */
-function getCbzPages(cbzPath, chapterId) {
-  const cacheDir = path.join(config.CBZ_CACHE_DIR, String(chapterId));
-  const mtimeMarker = path.join(cacheDir, '.mtime');
-
-  if (fs.existsSync(cacheDir)) {
-    try {
-      const currentMtime = String(Math.floor(fs.statSync(cbzPath).mtimeMs / 1000));
-      const cachedMtime  = fs.readFileSync(mtimeMarker, 'utf8').trim();
-
-      if (currentMtime === cachedMtime) {
-        const files = fs.readdirSync(cacheDir).filter(isImage).sort(naturalSort);
-        if (files.length > 0) {
-          return files.map(f => ({ filename: f, path: path.join(cacheDir, f) }));
-        }
+function listCbzEntries(cbzPath) {
+  return new Promise((resolve) => {
+    yauzl.open(cbzPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
+      if (err || !zip) {
+        console.error(`[CBZ] Failed to open ${cbzPath}: ${err && err.message}`);
+        return resolve([]);
       }
-      // mtime mismatch — fall through to re-extract
-    } catch {
-      // Missing marker or stat failed — fall through to re-extract
-    }
-  }
-
-  return extractCbz(cbzPath, cacheDir);
-}
-
-function extractCbz(cbzPath, outputDir) {
-  try {
-    const zip = new AdmZip(cbzPath);
-    const entries = zip.getEntries()
-      .filter(e => !e.isDirectory && isImage(e.entryName))
-      .sort((a, b) => naturalSort(a.entryName, b.entryName));
-
-    if (entries.length === 0) return [];
-
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    const pages = [];
-    entries.forEach((entry, idx) => {
-      const ext = path.extname(entry.entryName).toLowerCase();
-      const destName = String(idx).padStart(5, '0') + ext;
-      const destPath = path.join(outputDir, destName);
-      fs.writeFileSync(destPath, entry.getData());
-      pages.push({ filename: entry.name || destName, path: destPath });
+      const out = [];
+      zip.on('entry', (entry) => {
+        if (/\/$/.test(entry.fileName) || !isImage(entry.fileName)) {
+          return zip.readEntry();
+        }
+        out.push({
+          filename:  path.basename(entry.fileName),
+          entryName: entry.fileName,
+          size:      entry.uncompressedSize || 0,
+        });
+        zip.readEntry();
+      });
+      zip.on('end', () => {
+        out.sort((a, b) => naturalSort(a.entryName, b.entryName));
+        resolve(out);
+      });
+      zip.on('error', (e) => {
+        console.error(`[CBZ] Read error on ${cbzPath}: ${e.message}`);
+        resolve(out);
+      });
+      zip.readEntry();
     });
-
-    // Write mtime marker so future calls can validate the cache
-    try {
-      const mtime = String(Math.floor(fs.statSync(cbzPath).mtimeMs / 1000));
-      fs.writeFileSync(path.join(outputDir, '.mtime'), mtime);
-    } catch { /* non-critical */ }
-
-    return pages;
-  } catch (err) {
-    console.error(`Failed to extract CBZ ${cbzPath}:`, err.message);
-    return [];
-  }
+  });
 }
 
 /**
- * Get pages for a chapter. For CBZ, chapterId is needed for cache directory naming.
+ * Unified chapter-page listing.
+ * Returns [{ filename, path, size }]:
+ *   - For 'folder' chapters, `path` is the absolute filesystem path.
+ *   - For 'cbz' chapters, `path` is the entry name inside the archive
+ *     (to be streamed on demand from chapter.path).
  */
-function getChapterPages(chapter) {
+async function getChapterPages(chapter) {
   if (chapter.type === 'folder') {
     return getFolderPages(chapter.path);
   }
   if (chapter.type === 'cbz') {
-    return getCbzPages(chapter.path, chapter.id);
+    const entries = await listCbzEntries(chapter.path);
+    return entries.map(e => ({ filename: e.filename, path: e.entryName, size: e.size }));
   }
   return [];
+}
+
+/**
+ * Open a single entry inside a CBZ as a readable stream.
+ * Opens the archive fresh each time — the OS page cache handles hot reads;
+ * yauzl is fast at central-directory parsing (one seek + a few KB read).
+ *
+ * Resolves to a Node Readable stream; rejects if the entry can't be found
+ * or the archive can't be opened.
+ */
+function openCbzEntryStream(cbzPath, entryName) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(cbzPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
+      if (err || !zip) return reject(err || new Error('zip open failed'));
+      let found = false;
+      zip.on('entry', (entry) => {
+        if (entry.fileName === entryName) {
+          found = true;
+          zip.openReadStream(entry, (sErr, stream) => {
+            if (sErr) return reject(sErr);
+            // Closing the stream will autoClose the ZipFile since lazyEntries.
+            resolve(stream);
+          });
+          return;
+        }
+        zip.readEntry();
+      });
+      zip.on('end', () => {
+        if (!found) reject(new Error(`Entry not found: ${entryName}`));
+      });
+      zip.on('error', reject);
+      zip.readEntry();
+    });
+  });
 }
 
 /**
@@ -185,8 +196,8 @@ module.exports = {
   parseChapterInfo,
   parseChapterNumber,
   getChapterPages,
-  detectChapterType,
   getFolderPages,
-  getCbzPages,
-  extractCbz,
+  listCbzEntries,
+  openCbzEntryStream,
+  detectChapterType,
 };

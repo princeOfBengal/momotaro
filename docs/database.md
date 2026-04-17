@@ -11,7 +11,9 @@ Applied on every startup via `db.pragma()`:
 | `journal_mode` | `WAL` | Write-ahead logging — allows concurrent reads during a write |
 | `foreign_keys` | `ON` | Enforces FK constraints and `ON DELETE CASCADE` |
 | `synchronous` | `NORMAL` | Safe with WAL; avoids the fsync overhead of `FULL` |
-| `cache_size` | `-32000` | 32 MB in-process page cache to reduce repeated disk reads |
+| `cache_size` | `-262144` | 256 MB in-process page cache — fits the hot working set at 8TB scale |
+| `mmap_size` | `1073741824` | 1 GB memory-mapped I/O region; read-heavy library queries skip `read()` syscalls |
+| `wal_autocheckpoint` | `10000` | Checkpoint every ~10 000 pages (≈40 MB) instead of the 1 000-page default — fewer stalls during bulk scans |
 | `temp_store` | `MEMORY` | Temporary sort/join tables live in RAM |
 
 ## Tables
@@ -51,6 +53,9 @@ One row per manga folder.
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
 | `anilist_cover` | TEXT | Filename of the AniList-sourced thumbnail, e.g. `5_anilist.webp` |
 | `original_cover` | TEXT | Filename of the first-ever generated thumbnail, e.g. `5_original.webp` — set once and never overwritten |
+| `last_metadata_fetch_attempt_at` | INTEGER | Unix timestamp of the last bulk-pull attempt (any source) — used to skip recently-tried no-match titles |
+| `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Updated at the end of every `scanMangaDirectory` so `/api/stats` and `/api/manga/:id/info` can answer without walking the library. |
+| `file_count` | INTEGER | Cached rollup of `SUM(chapters.file_count)` — total image pages across all chapters. |
 | `created_at` | INTEGER | |
 | `updated_at` | INTEGER | |
 
@@ -69,6 +74,8 @@ One row per chapter folder or CBZ file.
 | `title` | TEXT | Optional chapter title |
 | `page_count` | INTEGER | |
 | `file_mtime` | INTEGER | Unix timestamp (seconds) of the chapter file/folder at last scan — used to skip re-processing unchanged chapters |
+| `bytes_on_disk` | INTEGER | Size of the chapter on disk. For `folder`: sum of its image files. For `cbz`: the archive's own size (NOT the uncompressed sum). |
+| `file_count` | INTEGER | Number of image pages in the chapter (equal to `page_count`). |
 | `created_at` | INTEGER | |
 
 **Unique constraint:** `(manga_id, folder_name)`
@@ -81,11 +88,11 @@ One row per image page.
 | `id` | INTEGER PK | |
 | `chapter_id` | INTEGER FK | References `chapters(id)`, CASCADE delete |
 | `page_index` | INTEGER | 0-based position |
-| `filename` | TEXT | File name |
-| `path` | TEXT | Absolute path |
-| `width` | INTEGER | Pixel dimensions (may be null) |
+| `filename` | TEXT | Basename for display (e.g. `001.jpg`) |
+| `path` | TEXT | **Dual-purpose by chapter type.** For `chapters.type = 'folder'` rows: absolute filesystem path. For `chapters.type = 'cbz'` rows: the ZIP entry name inside `chapters.path` (used by `yauzl` to stream the entry on demand). |
+| `width` | INTEGER | Pixel dimensions (may be null — always null for CBZ pages, which skip dimension fetching at scan time; see [scanner.md](./scanner.md#image-dimension-fetching)) |
 | `height` | INTEGER | |
-| `is_wide` | INTEGER | 1 if width > height (auto-detected for double-page spreads) |
+| `is_wide` | INTEGER | 1 if width > height (auto-detected for double-page spreads; null when dimensions are unknown) |
 
 **Unique constraint:** `(chapter_id, page_index)`
 
@@ -141,6 +148,26 @@ Records every page that has ever been manually set as a manga's thumbnail. Used 
 
 ---
 
+### `art_gallery`
+
+User-bookmarked pages shown in the *Art Gallery* section at the bottom of MangaDetail. Rows are inserted by the *Add to Art Gallery* button in the reader and can be removed from either the reader (toggle) or the gallery grid.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment; used by the MangaDetail remove button |
+| `manga_id` | INTEGER FK | References `manga(id)`, CASCADE delete |
+| `chapter_id` | INTEGER FK | References `chapters(id)`, CASCADE delete — kept so labels survive scan churn as long as the chapter still exists |
+| `page_id` | INTEGER FK | References `pages(id)`, CASCADE delete |
+| `created_at` | INTEGER | Unix timestamp (`unixepoch()` default); drives the newest-first ordering |
+
+**Unique constraint:** `(manga_id, page_id)` — `INSERT OR IGNORE` makes re-adding an existing page a no-op. The reader uses this as an idempotent toggle.
+
+**Index:** `idx_art_gallery_manga_id ON art_gallery(manga_id)`
+
+**Cascade behaviour:** Deleting a manga, chapter, or page automatically removes the matching gallery rows — no manual cleanup is required after rescans that drop pages.
+
+---
+
 ### `reading_lists`
 User-created (and two built-in) reading lists.
 
@@ -175,6 +202,7 @@ idx_pages_chapter_id      ON pages(chapter_id)
 idx_progress_manga_id     ON progress(manga_id)
 idx_rlm_list_id           ON reading_list_manga(list_id)
 idx_rlm_manga_id          ON reading_list_manga(manga_id)
+idx_art_gallery_manga_id  ON art_gallery(manga_id)
 ```
 
 ## Migrations
@@ -188,12 +216,18 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | Table | Column | Added for |
 | --- | --- | --- |
 | `libraries` | `show_in_all` | Multi-library "All Libraries" filter |
+| `libraries` | `last_scan_mtime_ms` | Startup-scan root-mtime shortcut |
 | `chapters` | `volume` | Volume-level chapter tracking |
 | `chapters` | `file_mtime` | Incremental scan optimisation |
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |
 | `manga` | `anilist_cover` | AniList thumbnail filename |
 | `manga` | `original_cover` | First-ever generated thumbnail filename |
+| `manga` | `last_metadata_fetch_attempt_at` | Bulk-pull retry cooldown |
+| `chapters` | `bytes_on_disk` | Cached disk-usage column (see [scanner.md](./scanner.md#cached-disk-usage-columns)) |
+| `chapters` | `file_count` | Cached file-count column |
+| `manga` | `bytes_on_disk` | Rollup of chapter sizes for O(1) `/api/stats` |
+| `manga` | `file_count` | Rollup of chapter file counts |
 
 One structural migration is still handled separately:
 

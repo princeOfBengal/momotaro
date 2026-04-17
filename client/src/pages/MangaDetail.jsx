@@ -3,6 +3,8 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import './MangaDetail.css';
 
+const CHAPTERS_COLLAPSED_COUNT = 5;
+
 // ── Thumbnail Picker Modal ─────────────────────────────────────────────────────
 function ThumbOption({ src, label, applying, onUse }) {
   return (
@@ -725,6 +727,11 @@ export default function MangaDetail() {
   const [showListDropdown, setShowListDropdown] = useState(false);
   const [showMetaModal, setShowMetaModal] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const [markingChapters, setMarkingChapters] = useState(new Set());
+  const [showAllChapters, setShowAllChapters] = useState(false);
+  const [gallery, setGallery] = useState([]);
+  const [galleryLoading, setGalleryLoading] = useState(true);
+  const [removingGalleryIds, setRemovingGalleryIds] = useState(new Set());
   const listDropdownRef = useRef(null);
   const settingsDropdownRef = useRef(null);
 
@@ -785,6 +792,39 @@ export default function MangaDetail() {
       setLoading(false);
     }).catch(err => { setError(err.message); setLoading(false); });
   }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setGalleryLoading(true);
+    api.getGallery(id).then(items => {
+      if (cancelled) return;
+      setGallery(items);
+      setGalleryLoading(false);
+    }).catch(() => { if (!cancelled) setGalleryLoading(false); });
+    return () => { cancelled = true; };
+  }, [id]);
+
+  async function handleRemoveFromGallery(itemId) {
+    if (removingGalleryIds.has(itemId)) return;
+    setRemovingGalleryIds(s => new Set([...s, itemId]));
+    try {
+      await api.removeFromGallery(id, itemId);
+      setGallery(prev => prev.filter(item => item.id !== itemId));
+    } catch {
+      // Leave the item in place; user can retry
+    } finally {
+      setRemovingGalleryIds(s => { const n = new Set(s); n.delete(itemId); return n; });
+    }
+  }
+
+  function formatChapterLabel(item) {
+    const vol = item.chapter_volume;
+    const num = item.chapter_number;
+    if (vol !== null && num !== null) return `Vol. ${vol} Ch. ${num}`;
+    if (vol !== null)                  return `Volume ${vol}`;
+    if (num !== null)                  return (manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`);
+    return item.chapter_folder_name || '';
+  }
 
   async function handleToggleList(listId) {
     if (togglingList === listId) return;
@@ -974,7 +1014,8 @@ export default function MangaDetail() {
 
   const { chapters = [], progress } = manga;
   const completedIds = new Set(progress?.completed_chapters || []);
-  const sortedChapters = [...chapters].sort((a, b) => {
+  // Reading order (ascending) — used for the "start at first chapter" fallback
+  const readingOrderChapters = [...chapters].sort((a, b) => {
     // Use volume as primary sort key for volume-only entries, chapter number otherwise
     const aKey = a.number ?? a.volume;
     const bKey = b.number ?? b.volume;
@@ -983,16 +1024,43 @@ export default function MangaDetail() {
     if (bKey === null) return -1;
     return aKey - bKey;
   });
+  // Display order (descending) — highest chapter/volume on top
+  const displayChapters = [...readingOrderChapters].reverse();
+  const visibleChapters = showAllChapters ? displayChapters : displayChapters.slice(0, CHAPTERS_COLLAPSED_COUNT);
+  const hasMoreChapters = displayChapters.length > CHAPTERS_COLLAPSED_COUNT;
 
   function continueReading() {
     if (progress?.current_chapter_id) {
       navigate(`/read/${progress.current_chapter_id}?page=${progress.current_page}&mangaId=${id}`);
-    } else if (sortedChapters.length > 0) {
-      navigate(`/read/${sortedChapters[0].id}?page=0&mangaId=${id}`);
+    } else if (readingOrderChapters.length > 0) {
+      navigate(`/read/${readingOrderChapters[0].id}?page=0&mangaId=${id}`);
     }
   }
 
-  const coverUrl = manga.cover_image ? `/thumbnails/${manga.cover_image}${coverBust ? `?t=${coverBust}` : ''}` : null;
+  async function handleMarkChapter(chapterId, completed) {
+    if (markingChapters.has(chapterId)) return;
+    const prevProgress = manga.progress;
+    setMarkingChapters(s => new Set([...s, chapterId]));
+    // Optimistic update so the UI responds instantly
+    setManga(prev => {
+      const prevCompleted = prev.progress?.completed_chapters || [];
+      const newCompleted = completed
+        ? Array.from(new Set([...prevCompleted, chapterId]))
+        : prevCompleted.filter(cid => cid !== chapterId);
+      return { ...prev, progress: { ...(prev.progress || {}), completed_chapters: newCompleted } };
+    });
+    try {
+      const result = await api.markChapterRead(id, chapterId, completed);
+      setManga(prev => ({ ...prev, progress: result }));
+    } catch {
+      setManga(prev => ({ ...prev, progress: prevProgress }));
+    } finally {
+      setMarkingChapters(s => { const n = new Set(s); n.delete(chapterId); return n; });
+    }
+  }
+
+  const coverBase = manga.cover_image ? api.thumbnailUrl(manga.cover_image) : null;
+  const coverUrl = coverBase ? `${coverBase}${coverBust ? `?t=${coverBust}` : ''}` : null;
   const genres = Array.isArray(manga.genres) ? manga.genres : [];
   const hasMetadata = manga.metadata_source && manga.metadata_source !== 'none';
 
@@ -1266,13 +1334,14 @@ export default function MangaDetail() {
         {/* Chapters */}
         <div className="chapter-section">
           <h2 className="chapter-section-title">{manga.track_volumes ? 'Volumes' : 'Chapters'}</h2>
-          {sortedChapters.length === 0 ? (
+          {displayChapters.length === 0 ? (
             <p className="chapter-empty">No {manga.track_volumes ? 'volumes' : 'chapters'} found. Make sure your manga folders contain images or CBZ files.</p>
           ) : (
             <div className="chapter-list">
-              {sortedChapters.map(ch => {
+              {visibleChapters.map(ch => {
                 const isRead = completedIds.has(ch.id);
                 const isCurrent = progress?.current_chapter_id === ch.id;
+                const isMarking = markingChapters.has(ch.id);
                 return (
                   <Link
                     key={ch.id}
@@ -1295,8 +1364,88 @@ export default function MangaDetail() {
                       {isCurrent && <span className="chapter-badge badge-current">Reading</span>}
                       {isRead && !isCurrent && <span className="chapter-badge badge-read">Read</span>}
                       <span className="chapter-pages">{ch.page_count}p</span>
+                      <button
+                        className={`chapter-mark-btn${isRead ? ' is-read' : ''}`}
+                        onClick={e => { e.preventDefault(); e.stopPropagation(); handleMarkChapter(ch.id, !isRead); }}
+                        disabled={isMarking}
+                        title={isRead ? 'Mark as unread' : 'Mark as read'}
+                        aria-label={isRead ? 'Mark as unread' : 'Mark as read'}
+                      >
+                        {isMarking ? (
+                          <div className="spinner" style={{ width: 14, height: 14, borderWidth: 1.5 }} />
+                        ) : isRead ? (
+                          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                            <circle cx="10" cy="10" r="8" fill="currentColor" />
+                            <path d="M6.5 10l2.5 2.5 4-4" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 20 20" fill="none" width="16" height="16" aria-hidden="true">
+                            <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="1.5" />
+                          </svg>
+                        )}
+                      </button>
                     </div>
                   </Link>
+                );
+              })}
+            </div>
+          )}
+          {hasMoreChapters && (
+            <button
+              className="chapter-expand-btn"
+              onClick={() => setShowAllChapters(v => !v)}
+            >
+              {showAllChapters
+                ? 'Show less'
+                : `Show all ${displayChapters.length} ${manga.track_volumes ? 'volumes' : 'chapters'}`}
+            </button>
+          )}
+        </div>
+
+        {/* Art Gallery */}
+        <div className="gallery-section">
+          <h2 className="chapter-section-title">Art Gallery</h2>
+          {galleryLoading ? (
+            <p className="chapter-empty">Loading gallery…</p>
+          ) : gallery.length === 0 ? (
+            <p className="chapter-empty">
+              No pages saved yet. Open a chapter, find a page you like, and use the
+              “Add to Art Gallery” button in the reader’s settings panel.
+            </p>
+          ) : (
+            <div className="gallery-grid">
+              {gallery.map(item => {
+                const isRemoving = removingGalleryIds.has(item.id);
+                return (
+                  <div key={item.id} className={`gallery-item${isRemoving ? ' gallery-item-removing' : ''}`}>
+                    <Link
+                      to={`/read/${item.chapter_id}?page=${item.page_index}&mangaId=${id}`}
+                      className="gallery-item-link"
+                      title={`${formatChapterLabel(item)} · Page ${item.page_index + 1}`}
+                    >
+                      <img
+                        src={api.pageImageUrl(item.page_id)}
+                        alt={`${formatChapterLabel(item)} page ${item.page_index + 1}`}
+                        loading="lazy"
+                        className="gallery-item-img"
+                      />
+                      <div className="gallery-item-label">
+                        <span className="gallery-item-chapter">{formatChapterLabel(item)}</span>
+                        <span className="gallery-item-page">Page {item.page_index + 1}</span>
+                      </div>
+                    </Link>
+                    <button
+                      className="gallery-item-remove"
+                      onClick={() => handleRemoveFromGallery(item.id)}
+                      disabled={isRemoving}
+                      title="Remove from gallery"
+                      aria-label="Remove from gallery"
+                    >
+                      {isRemoving
+                        ? <div className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
+                        : <span aria-hidden="true">✕</span>}
+                    </button>
+                  </div>
                 );
               })}
             </div>

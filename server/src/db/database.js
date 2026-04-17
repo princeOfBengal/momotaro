@@ -11,9 +11,11 @@ function getDb() {
     db = new Database(config.DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
-    db.pragma('synchronous = NORMAL');   // WAL + NORMAL is safe and faster than FULL
-    db.pragma('cache_size = -32000');    // 32 MB page cache
-    db.pragma('temp_store = MEMORY');    // temp tables in RAM
+    db.pragma('synchronous = NORMAL');       // WAL + NORMAL is safe and faster than FULL
+    db.pragma('cache_size = -262144');       // 256 MB page cache — fits the hot working set at 8TB scale
+    db.pragma('mmap_size = 1073741824');     // 1 GB memory-mapped I/O for read-heavy queries
+    db.pragma('wal_autocheckpoint = 10000'); // Checkpoint every ~10k pages (~40 MB) instead of the 1k default
+    db.pragma('temp_store = MEMORY');        // temp tables in RAM
     migrate(db);
   }
   return db;
@@ -132,6 +134,16 @@ function migrate(db) {
       UNIQUE(manga_id, filename)
     );
     CREATE INDEX IF NOT EXISTS idx_thumb_history_manga_id ON thumbnail_history(manga_id);
+
+    CREATE TABLE IF NOT EXISTS art_gallery (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      manga_id   INTEGER NOT NULL REFERENCES manga(id)    ON DELETE CASCADE,
+      chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+      page_id    INTEGER NOT NULL REFERENCES pages(id)    ON DELETE CASCADE,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(manga_id, page_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_art_gallery_manga_id ON art_gallery(manga_id);
   `);
 
   // Seed the two built-in reading lists
@@ -143,6 +155,7 @@ function migrate(db) {
 
   // Column-level migrations — safe to run on every startup
   addColumnIfMissing(db, 'libraries', 'show_in_all', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'libraries', 'last_scan_mtime_ms', 'REAL');
   addColumnIfMissing(db, 'chapters',  'volume',      'REAL');
   addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
   addColumnIfMissing(db, 'manga',     'author',         'TEXT');
@@ -150,6 +163,14 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'anilist_cover',  'TEXT');
   addColumnIfMissing(db, 'manga',     'original_cover', 'TEXT');
   addColumnIfMissing(db, 'manga',     'mal_cover',      'TEXT');
+  addColumnIfMissing(db, 'manga',     'last_metadata_fetch_attempt_at', 'INTEGER');
+
+  // Cached disk-usage columns — populated during scan so that /api/stats and
+  // /api/manga/:id/info don't need to re-walk the library each request.
+  addColumnIfMissing(db, 'chapters',  'bytes_on_disk', 'INTEGER');
+  addColumnIfMissing(db, 'chapters',  'file_count',    'INTEGER');
+  addColumnIfMissing(db, 'manga',     'bytes_on_disk', 'INTEGER');
+  addColumnIfMissing(db, 'manga',     'file_count',    'INTEGER');
 }
 
 /**

@@ -1,10 +1,9 @@
 import React from 'react';
+import { api } from '../api/client';
 import './MangaCard.css';
 
 export default function MangaCard({ manga }) {
-  const coverUrl = manga.cover_image
-    ? `/thumbnails/${manga.cover_image}`
-    : null;
+  const coverUrl = manga.cover_url || api.thumbnailUrl(manga.cover_image);
 
   const statusColors = {
     RELEASING: '#4caf50',

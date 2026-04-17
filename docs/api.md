@@ -150,6 +150,11 @@ Accepts either a live page or a previously saved thumbnail file:
 
 Generates a 300 × 430 WebP from the page image, saves it as `{mangaId}_{timestamp}.webp`, copies it to the active `{mangaId}.webp`, and records the filename in `thumbnail_history`.
 
+**Folder vs. CBZ chapters** — the page source is resolved from the parent chapter's `type`:
+
+- `folder` — the page's absolute file path is passed directly to `sharp`.
+- `cbz` — the single ZIP entry named by `pages.path` is streamed out of the archive via `yauzl.openReadStream`, buffered, and handed to `sharp`. The archive is never fully extracted; only the central directory and the one needed entry are read. Memory footprint is one page (≈1–2 MB) for the duration of the resize.
+
 ```json
 { "saved_filename": "5_anilist.webp" }
 ```
@@ -352,28 +357,52 @@ Clears the AniList or Doujinshi.info linkage for a manga and resets all fields t
 
 `source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. `force` defaults to `false`; set it to `true` to bypass the 7-day retry cooldown described below. The endpoint responds immediately; the actual fetch loop runs in the background.
 
-**Skip logic** — only manga with `metadata_source = 'none'` are processed. Any title that already has metadata from any source (local JSON, AniList, MyAnimeList, or Doujinshi.info) is always skipped. Single-manga endpoints (`refresh-metadata`, `apply-metadata`, etc.) always apply regardless of existing source, since the user explicitly requested it.
+**Skip logic** — processed vs. skipped depends on the title's current `metadata_source`:
 
-**Retry cooldown** — every processed title has its `last_metadata_fetch_attempt_at` stamped regardless of outcome. On subsequent bulk pulls, any title whose last attempt is within 7 days is skipped unless `force: true` is passed. Matched titles are skipped automatically by the source check above, so the cooldown only affects titles that previously produced no match. `POST /api/manga/:id/reset-metadata` clears the timestamp so a reset title is eligible again immediately.
+| `metadata_source` | Behavior |
+| --- | --- |
+| `'none'` | Full fetch — all metadata fields and the linkage ID are applied; the source's cover is downloaded and promoted to active (subject to the priority rule below). |
+| `'local'` | **Link-only** — only the external ID (`anilist_id` / `mal_id` / `doujinshi_id`) is written; the user's local-JSON metadata fields (title, description, genres, etc.) are preserved. The source's cover is still downloaded and, if priority allows, promoted to active. Already-linked titles for the current source are skipped. |
+| `'anilist'`, `'myanimelist'`, `'doujinshi'` | Skipped — title already has third-party metadata. |
+
+**Retry cooldown** — every processed title has its `last_metadata_fetch_attempt_at` stamped regardless of outcome. On subsequent bulk pulls, any title whose last attempt is within 7 days is skipped unless `force: true` is passed. Titles that already succeeded are skipped automatically by the source check above, so the cooldown only affects titles that previously produced no match. `POST /api/manga/:id/reset-metadata` clears the timestamp so a reset title is eligible again immediately.
 
 **AniList batching** — when `source = 'anilist'`, titles are sent 5 per GraphQL request using query aliases, cutting outbound HTTP count ~5×. Each batch is still spaced 700 ms apart to stay within AniList's request-per-minute limit. MyAnimeList and Doujinshi.info remain sequential (no alias equivalent in their REST APIs).
 
-**Source priority** — when bulk-pulling with different sources, the enforced preference order is: local JSON > AniList > MyAnimeList > Doujinshi.info. Because bulk pulls skip any title with existing metadata, a title already linked to AniList will never be overwritten by a MyAnimeList or Doujinshi bulk pull. Per-manga apply endpoints always overwrite since the user explicitly chose a new entry.
+**Cover promotion priority** — during a bulk pull, an already-saved cover from a higher-priority source is never replaced. The promotion rule for the source being pulled:
+
+| Source being pulled | Promoted to active cover when… |
+| --- | --- |
+| `anilist` | Always (top priority). |
+| `myanimelist` | No `anilist_cover` file exists yet. |
+| `doujinshi` | Neither `anilist_cover` nor `mal_cover` exists yet. |
+
+A lower-priority source's cover file is still downloaded and saved to its column (`mal_cover` / `doujinshi_cover`) — it just doesn't overwrite `cover_image`. The user can switch covers manually via the Thumbnail Picker. The same priority applies to both third-party-metadata (`metadata_source = 'none'`) and local-metadata (`metadata_source = 'local'`) titles.
+
+**Single-manga endpoints** (`refresh-metadata`, `apply-metadata`, `refresh-mal-metadata`, `apply-mal-metadata`, `refresh-doujinshi-metadata`, `apply-doujinshi-metadata`) behave slightly differently:
+
+- For `metadata_source = 'local'`, they also use link-only writes (local JSON metadata preserved).
+- For other sources, they fully overwrite since the user explicitly picked a new entry.
+- The cover is **always** promoted to active — user intent overrides the bulk priority rule, so e.g. clicking *Fetch* on the MAL tab will replace an existing AniList cover with the MAL one.
 
 **Response shape:**
 ```json
 {
   "message": "Bulk metadata pull started",
   "total": 50,
-  "to_fetch": 12,
-  "skipped_existing": 38,
+  "to_fetch": 10,
+  "skipped_existing": 30,
+  "skipped_already_linked": 8,
+  "skipped_recent_attempt": 2,
   "source": "anilist"
 }
 ```
 
 - `total` — total manga in the library
-- `to_fetch` — manga that will be processed (had `metadata_source = 'none'`)
-- `skipped_existing` — manga skipped because they already have metadata
+- `to_fetch` — manga that will be processed (`'none'` or `'local'`, not on cooldown, not already linked for this source)
+- `skipped_existing` — third-party metadata already present (anilist / myanimelist / doujinshi)
+- `skipped_already_linked` — `'local'` metadata and the relevant ID for this source is already stored
+- `skipped_recent_attempt` — last fetch attempt within the 7-day cooldown and `force` was not set
 
 **Rate limiting** — AniList requests are spaced 700 ms apart to stay within the ~90 req/min limit. Doujinshi.info requests are spaced 500 ms apart; each title requires two upstream calls (search + fetch-by-slug).
 

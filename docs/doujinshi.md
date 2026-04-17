@@ -68,18 +68,17 @@ All in [server/src/metadata/doujinshi.js](../server/src/metadata/doujinshi.js):
 
 ## Metadata Priority
 
-When multiple sources provide metadata for the same manga, the following priority order applies:
+Metadata fields and covers follow two separate priority systems — the metadata fields are protected from overwrite by source, while the active thumbnail has its own promotion priority.
 
-1. **Local JSON** (`metadata_source = 'local'`) — highest priority, never overwritten
-2. **AniList** (`metadata_source = 'anilist'`)
-3. **Doujinshi.info** (`metadata_source = 'doujinshi'`) — lowest priority
+**Metadata fields** — local JSON is always preserved as the display source for fields (title, description, genres, etc.):
 
-This priority is enforced during **Bulk Metadata Pull**:
+1. **Local JSON** (`metadata_source = 'local'`) — never overwritten by bulk or single-manga pulls. Bulk pulls against a `'local'` title perform a **link-only** write: only the external ID (`anilist_id` / `mal_id` / `doujinshi_id`) is stored.
+2. **Third-party** (`metadata_source = 'anilist' | 'myanimelist' | 'doujinshi'`) — already-linked third-party titles are skipped by bulk pulls entirely. Per-manga apply endpoints still overwrite because the user explicitly chose a new entry.
+3. `'none'` titles receive a full metadata apply on first bulk pull.
 
-- When source is `anilist`: manga with `metadata_source = 'local'` are skipped
-- When source is `doujinshi`: manga with `metadata_source = 'local'` or `'anilist'` are skipped
+**Cover promotion** — covers have their own priority independent of the metadata-field rule above. During bulk pulls the enforced order is AniList > MyAnimeList > Doujinshi.info; a lower-priority source's cover is saved to its own column but does not overwrite `cover_image` when a higher-priority cover already exists. This applies uniformly to `'none'` and `'local'` titles, so a local-metadata title receiving AniList linkage via bulk pull will still swap its thumbnail to the AniList cover.
 
-For single-manga operations (Fetch button, manual search), the user is explicitly choosing a source and the priority check is bypassed — the selected source always applies.
+For single-manga operations (Fetch button, manual search), the user is explicitly choosing a source — cover promotion always fires regardless of what other covers are already saved (user intent overrides the priority rule). The metadata-field rule still applies: local JSON titles get link-only writes; other sources fully overwrite.
 
 ## Bulk Metadata Pull
 

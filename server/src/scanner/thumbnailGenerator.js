@@ -53,4 +53,4 @@ async function generateThumbnail(source, mangaId) {
   }
 }
 
-module.exports = { generateThumbnail };
+module.exports = { generateThumbnail, loadCoverSource };

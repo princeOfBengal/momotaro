@@ -10,6 +10,7 @@ const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('.
 const { fetchFromMAL, searchMAL, fetchByMALId } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
+const { loadCoverSource } = require('../scanner/thumbnailGenerator');
 const config = require('../config');
 
 const router = express.Router();
@@ -138,6 +139,30 @@ function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
 
+// Cover promotion priority: AniList > MyAnimeList > Doujinshi.
+// "Promote" = replace the active cover_image. A lower-priority source only
+// wins when no higher-priority source already has a cover saved.
+function shouldPromoteCover(manga, source) {
+  if (source === 'anilist')     return true;
+  if (source === 'myanimelist') return !manga.anilist_cover;
+  if (source === 'doujinshi')   return !manga.anilist_cover && !manga.mal_cover;
+  return false;
+}
+
+// Apply metadata and cover for a single manga.
+// For metadata_source === 'local', only the external ID is written so the user's
+// local json metadata (title/description/genres/etc.) is preserved; otherwise the
+// fetched metadata fully replaces the stored fields. The cover is downloaded and
+// resized either way, and promoted to the active thumbnail iff setActive is true.
+async function applyMetadataToManga(db, manga, result, source, { setActive }) {
+  if (manga.metadata_source === 'local') {
+    applyLinkageOnlyToDb(db, manga.id, result);
+  } else {
+    applyMetadataToDb(db, manga.id, result);
+  }
+  await fetchAndStoreCover(db, manga.id, result.cover_url, source, { setActive });
+}
+
 // POST /api/manga/:id/refresh-metadata — auto-fetch by title
 router.post('/manga/:id/refresh-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
@@ -152,8 +177,7 @@ router.post('/manga/:id/refresh-metadata', asyncWrapper(async (req, res) => {
     return res.json({ found: false, message: 'No match found on AniList for this title.' });
   }
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'anilist');
+  await applyMetadataToManga(db, manga, result, 'anilist', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -188,8 +212,7 @@ router.post('/manga/:id/apply-metadata', asyncWrapper(async (req, res) => {
 
   if (!result) return res.status(404).json({ error: 'Entry not found on AniList' });
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'anilist');
+  await applyMetadataToManga(db, manga, result, 'anilist', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -256,8 +279,7 @@ router.post('/manga/:id/apply-doujinshi-metadata', asyncWrapper(async (req, res)
 
   if (!result) return res.status(404).json({ error: 'Entry not found on Doujinshi.info' });
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'doujinshi');
+  await applyMetadataToManga(db, manga, result, 'doujinshi', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -279,8 +301,7 @@ router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, re
     return res.json({ found: false, message: 'No match found on Doujinshi.info for this title.' });
   }
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'doujinshi');
+  await applyMetadataToManga(db, manga, result, 'doujinshi', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -317,8 +338,7 @@ router.post('/manga/:id/apply-mal-metadata', asyncWrapper(async (req, res) => {
   const result = await fetchByMALId(Number(mal_id), clientId);
   if (!result) return res.status(404).json({ error: 'Entry not found on MyAnimeList' });
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'myanimelist');
+  await applyMetadataToManga(db, manga, result, 'myanimelist', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
@@ -340,8 +360,7 @@ router.post('/manga/:id/refresh-mal-metadata', asyncWrapper(async (req, res) => 
     return res.json({ found: false, message: 'No match found on MyAnimeList for this title.' });
   }
 
-  applyMetadataToDb(db, manga.id, result);
-  await fetchAndStoreCover(db, manga.id, result.cover_url, 'myanimelist');
+  await applyMetadataToManga(db, manga, result, 'myanimelist', { setActive: true });
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -390,6 +409,7 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
   const allManga = db.prepare(
     `SELECT id, title, metadata_source, anilist_id, mal_id, doujinshi_id,
+            anilist_cover, mal_cover,
             last_metadata_fetch_attempt_at
      FROM manga WHERE library_id = ?`
   ).all(library.id);
@@ -468,20 +488,23 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
       console.log(`[BulkMetadata][${source}] (${n}/${total}) No match: "${manga.title}"`);
       return;
     }
-    if (manga.metadata_source === 'local') {
-      applyLinkageOnlyToDb(db, manga.id, result);
-      await fetchAndStoreCover(db, manga.id, result.cover_url, source, { setActive: false });
+    const setActive = shouldPromoteCover(manga, source);
+    const wasLocal  = manga.metadata_source === 'local';
+
+    await applyMetadataToManga(db, manga, result, source, { setActive });
+
+    if (wasLocal) {
       counters.linked++;
       console.log(
         `[BulkMetadata][${source}] (${n}/${total}) Linked (local preserved): ` +
-        `"${manga.title}" → "${result.title}"`
+        `"${manga.title}" → "${result.title}"` +
+        (setActive ? ' [cover updated]' : ' [cover preserved — higher-priority source present]')
       );
     } else {
-      applyMetadataToDb(db, manga.id, result);
-      await fetchAndStoreCover(db, manga.id, result.cover_url, source);
       counters.applied++;
       console.log(
-        `[BulkMetadata][${source}] (${n}/${total}) Applied: "${manga.title}" → "${result.title}"`
+        `[BulkMetadata][${source}] (${n}/${total}) Applied: "${manga.title}" → "${result.title}"` +
+        (setActive ? '' : ' [cover preserved — higher-priority source present]')
       );
     }
   }
@@ -724,18 +747,41 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
     fs.copyFileSync(srcPath, activePath);
     console.log(`[Thumbnail] Set thumbnail for manga ${manga.id} from saved file ${safeName}`);
   } else {
-    // Generate from a page and save as a uniquely-named history file
-    const page = db.prepare('SELECT path FROM pages WHERE id = ?').get(page_id);
+    // Generate from a page and save as a uniquely-named history file.
+    // For CBZ chapters, pages.path is the entry name inside the archive — not a
+    // filesystem path — so we stream the single entry out rather than extract.
+    const page = db.prepare(`
+      SELECT p.path AS page_path, c.type AS chapter_type, c.path AS chapter_path
+      FROM pages p
+      JOIN chapters c ON c.id = p.chapter_id
+      WHERE p.id = ?
+    `).get(page_id);
     if (!page) return res.status(404).json({ error: 'Page not found' });
-    if (!fs.existsSync(page.path)) {
+
+    if (page.chapter_type === 'folder' && !fs.existsSync(page.page_path)) {
       return res.status(404).json({ error: 'Image file not found on disk' });
     }
+    if (page.chapter_type === 'cbz' && !fs.existsSync(page.chapter_path)) {
+      return res.status(404).json({ error: 'Archive file not found on disk' });
+    }
+
+    let input;
+    try {
+      input = await loadCoverSource({
+        type:        page.chapter_type,
+        chapterPath: page.chapter_path,
+        entry:       page.page_path,
+      });
+    } catch (err) {
+      return res.status(404).json({ error: 'Image entry not found in archive' });
+    }
+    if (!input) return res.status(500).json({ error: 'Failed to load page image' });
 
     const histFilename = `${manga.id}_${Date.now()}.webp`;
     ensureShardDir(histFilename);
     const histPath     = thumbnailPath(histFilename);
 
-    await sharp(page.path)
+    await sharp(input)
       .resize(300, 430, { fit: 'cover', position: 'top' })
       .webp({ quality: 85 })
       .toFile(histPath);

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { getResume, clearResume } from '../utils/readingProgress';
 import './MangaDetail.css';
 
 const CHAPTERS_COLLAPSED_COUNT = 5;
@@ -859,6 +860,7 @@ export default function MangaDetail() {
     if (!confirm('Reset all reading progress for this manga?')) return;
     try {
       await api.resetProgress(id);
+      clearResume(id);
       const data = await api.getManga(id);
       setManga(data);
     } catch (err) {
@@ -1056,6 +1058,14 @@ export default function MangaDetail() {
   const hasMoreChapters = displayChapters.length > CHAPTERS_COLLAPSED_COUNT;
 
   function continueReading() {
+    // Prefer this device's saved resume position (per-device, intra-chapter)
+    // over the server-side last-read pointer so a partial read on this device
+    // takes the user back to the exact page they left off on.
+    const resume = getResume(id);
+    if (resume && chapters.some(c => c.id === resume.chapterId)) {
+      navigate(`/read/${resume.chapterId}?page=${resume.page}&mangaId=${id}`);
+      return;
+    }
     if (progress?.current_chapter_id) {
       navigate(`/read/${progress.current_chapter_id}?page=${progress.current_page}&mangaId=${id}`);
     } else if (readingOrderChapters.length > 0) {

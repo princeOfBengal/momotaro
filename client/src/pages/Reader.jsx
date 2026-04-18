@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import ReaderPaged from '../components/ReaderPaged';
 import ReaderScroll from '../components/ReaderScroll';
 import ReaderControls from '../components/ReaderControls';
+import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
 import './Reader.css';
 
 const PROGRESS_DEBOUNCE_MS = 2000;
@@ -39,7 +40,13 @@ export default function Reader() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [animKey, setAnimKey] = useState(0);
   const [animDir, setAnimDir] = useState('next');
-  const [currentPage, setCurrentPage] = useState(() => parseInt(searchParams.get('page') || '0', 10));
+  // URL `?page=` wins; otherwise fall back to this device's saved resume
+  // position for the current chapter, otherwise 0.
+  const [currentPage, setCurrentPage] = useState(() => {
+    const urlPage = searchParams.get('page');
+    if (urlPage !== null) return parseInt(urlPage, 10) || 0;
+    return getResumePageForChapter(mangaId, chapterId) ?? 0;
+  });
   const [galleryPageIds, setGalleryPageIds] = useState(() => new Set());
 
   const progressTimer = useRef(null);
@@ -191,9 +198,18 @@ export default function Reader() {
     }, { replace: true });
   }, [currentPage]);
 
-  // Save progress
+  // Save progress.
+  // Per-device resume position is written to localStorage immediately so an
+  // abrupt exit (close tab, lock phone) still preserves the page. The
+  // server-side progress (used for AniList sync + completion tracking) stays
+  // debounced to avoid spamming the API while the user pages quickly.
   const saveProgress = useCallback((page, completed = false) => {
     if (!mangaId) return;
+    if (completed) {
+      clearResume(mangaId);
+    } else {
+      setResume(mangaId, chapterId, page);
+    }
     clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(() => {
       api.updateProgress(mangaId, {
@@ -333,8 +349,9 @@ export default function Reader() {
     if (idx === -1) return;
     const target = allChapters[idx + delta];
     if (target) {
-      setCurrentPage(0);
-      navigate(`/read/${target.id}?mangaId=${mangaId}&page=0`);
+      const resumePage = getResumePageForChapter(mangaId, target.id) ?? 0;
+      setCurrentPage(resumePage);
+      navigate(`/read/${target.id}?mangaId=${mangaId}&page=${resumePage}`);
     }
   }
 

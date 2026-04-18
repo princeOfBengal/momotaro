@@ -171,6 +171,98 @@ function migrate(db) {
   addColumnIfMissing(db, 'chapters',  'file_count',    'INTEGER');
   addColumnIfMissing(db, 'manga',     'bytes_on_disk', 'INTEGER');
   addColumnIfMissing(db, 'manga',     'file_count',    'INTEGER');
+
+  migrateSearchIndex(db);
+}
+
+/**
+ * Replace the old full-scan search (LIKE %term% + json_each over genres) with
+ * two indexed structures:
+ *
+ *   - manga_fts: FTS5 virtual table over (title, author). Default unicode61
+ *     tokenizer — whole-word case-insensitive match, no prefix. A search for
+ *     "Yona" finds "Yona of the Dawn"; a search for "Daw" does not.
+ *
+ *   - manga_genres: normalised (manga_id, genre COLLATE NOCASE) pairs with a
+ *     composite PK. Multi-term comma search becomes one indexed lookup per
+ *     term, exact-match only.
+ *
+ * Triggers keep both structures in lockstep with `manga.genres` and
+ * `manga.title` / `manga.author`, so no write-path code needed to change —
+ * every route that sets those columns fans out for free.
+ */
+function migrateSearchIndex(db) {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS manga_fts USING fts5(
+      title,
+      author,
+      content='manga',
+      content_rowid='id',
+      tokenize='unicode61'
+    );
+
+    CREATE TABLE IF NOT EXISTS manga_genres (
+      manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+      genre    TEXT    NOT NULL COLLATE NOCASE,
+      PRIMARY KEY (manga_id, genre)
+    );
+    CREATE INDEX IF NOT EXISTS idx_manga_genres_genre ON manga_genres(genre COLLATE NOCASE);
+
+    -- FTS5 sync (external-content pattern).
+    CREATE TRIGGER IF NOT EXISTS manga_fts_ai AFTER INSERT ON manga BEGIN
+      INSERT INTO manga_fts(rowid, title, author) VALUES (NEW.id, NEW.title, NEW.author);
+    END;
+    CREATE TRIGGER IF NOT EXISTS manga_fts_ad AFTER DELETE ON manga BEGIN
+      INSERT INTO manga_fts(manga_fts, rowid, title, author)
+        VALUES ('delete', OLD.id, OLD.title, OLD.author);
+    END;
+    CREATE TRIGGER IF NOT EXISTS manga_fts_au AFTER UPDATE OF title, author ON manga BEGIN
+      INSERT INTO manga_fts(manga_fts, rowid, title, author)
+        VALUES ('delete', OLD.id, OLD.title, OLD.author);
+      INSERT INTO manga_fts(rowid, title, author) VALUES (NEW.id, NEW.title, NEW.author);
+    END;
+
+    -- manga_genres sync. On INSERT/UPDATE, wipe then re-insert from the JSON
+    -- blob — genres are short lists, so the delete+insert cost is trivial
+    -- compared to maintaining a diff. json_each errors on invalid JSON, so
+    -- fall back to '[]' via a CASE.
+    CREATE TRIGGER IF NOT EXISTS manga_genres_ai AFTER INSERT ON manga BEGIN
+      INSERT OR IGNORE INTO manga_genres (manga_id, genre)
+        SELECT NEW.id, value FROM json_each(
+          CASE WHEN json_valid(NEW.genres) THEN NEW.genres ELSE '[]' END
+        );
+    END;
+    CREATE TRIGGER IF NOT EXISTS manga_genres_au AFTER UPDATE OF genres ON manga BEGIN
+      DELETE FROM manga_genres WHERE manga_id = NEW.id;
+      INSERT OR IGNORE INTO manga_genres (manga_id, genre)
+        SELECT NEW.id, value FROM json_each(
+          CASE WHEN json_valid(NEW.genres) THEN NEW.genres ELSE '[]' END
+        );
+    END;
+    -- DELETE handled by ON DELETE CASCADE on the FK.
+  `);
+
+  // One-time backfill: if the FTS table is empty but manga rows exist, seed
+  // it. Same for manga_genres. Both are idempotent (INSERT OR IGNORE), so a
+  // second run after a partial migration is safe.
+  const ftsEmpty = db.prepare('SELECT 1 FROM manga_fts LIMIT 1').get() === undefined;
+  const mangaCount = db.prepare('SELECT COUNT(*) AS n FROM manga').get().n;
+  if (ftsEmpty && mangaCount > 0) {
+    db.exec(`INSERT INTO manga_fts(rowid, title, author) SELECT id, title, author FROM manga;`);
+    console.log(`[DB] Backfilled manga_fts with ${mangaCount} rows.`);
+  }
+
+  const genresEmpty = db.prepare('SELECT 1 FROM manga_genres LIMIT 1').get() === undefined;
+  if (genresEmpty && mangaCount > 0) {
+    const { changes } = db.prepare(`
+      INSERT OR IGNORE INTO manga_genres (manga_id, genre)
+        SELECT m.id, j.value
+        FROM manga m,
+             json_each(CASE WHEN json_valid(m.genres) THEN m.genres ELSE '[]' END) j
+        WHERE m.genres IS NOT NULL
+    `).run();
+    console.log(`[DB] Backfilled manga_genres with ${changes} rows.`);
+  }
 }
 
 /**

@@ -188,21 +188,10 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   `;
   const params = [list.id];
 
-  if (search) {
-    const terms = search.split(',').map(t => t.trim()).filter(Boolean);
-    if (terms.length === 1) {
-      query += ` AND (m.title LIKE ? OR m.author LIKE ? OR EXISTS (
-        SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) LIKE LOWER(?)
-      ))`;
-      params.push(`%${terms[0]}%`, `%${terms[0]}%`, `%${terms[0]}%`);
-    } else {
-      for (const term of terms) {
-        query += ` AND EXISTS (
-          SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) = LOWER(?)
-        )`;
-        params.push(term);
-      }
-    }
+  {
+    const { clause, params: p } = buildSearchClause(search);
+    query += clause;
+    params.push(...p);
   }
 
   const orderMap = { title: 'm.title ASC', updated: 'm.updated_at DESC', year: 'm.year DESC', added: 'rlm.added_at DESC' };
@@ -298,21 +287,10 @@ router.get('/library', asyncWrapper(async (req, res) => {
   let query = `SELECT m.* FROM manga m LEFT JOIN libraries l ON l.id = m.library_id WHERE 1=1`;
   const params = [];
 
-  if (search) {
-    const terms = search.split(',').map(t => t.trim()).filter(Boolean);
-    if (terms.length === 1) {
-      query += ` AND (m.title LIKE ? OR m.author LIKE ? OR EXISTS (
-        SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) LIKE LOWER(?)
-      ))`;
-      params.push(`%${terms[0]}%`, `%${terms[0]}%`, `%${terms[0]}%`);
-    } else {
-      for (const term of terms) {
-        query += ` AND EXISTS (
-          SELECT 1 FROM json_each(m.genres) WHERE LOWER(value) = LOWER(?)
-        )`;
-        params.push(term);
-      }
-    }
+  {
+    const { clause, params: p } = buildSearchClause(search);
+    query += clause;
+    params.push(...p);
   }
   if (status) {
     query += ' AND m.status = ?';
@@ -580,6 +558,64 @@ router.get('/stats', asyncWrapper(async (req, res) => {
 
 function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
+}
+
+/**
+ * Translate a user-entered search string into a `{ clause, params }` pair that
+ * slots into the WHERE of a library listing query.
+ *
+ * Semantics:
+ *   - No comma (single term): title OR author whole-word match via manga_fts,
+ *     OR exact genre match via manga_genres. "Yona" finds "Yona of the Dawn";
+ *     "Daw" does not. "romance" finds manga tagged Romance.
+ *   - Comma-separated: every term must match a genre exactly (AND). Matches
+ *     the historical comma-list tag filter.
+ *
+ * FTS5 MATCH expression is built by stripping everything that isn't a letter,
+ * number, or whitespace (neutralising FTS5 operators like *, ", -, : ) and
+ * then phrase-quoting each surviving word and joining with AND. An empty
+ * input — or one made entirely of punctuation — skips the FTS branch and
+ * matches only against exact genre.
+ */
+function buildSearchClause(search) {
+  if (!search) return { clause: '', params: [] };
+  const terms = String(search).split(',').map(t => t.trim()).filter(Boolean);
+  if (terms.length === 0) return { clause: '', params: [] };
+
+  if (terms.length === 1) {
+    const term = terms[0];
+    const match = toFtsMatchQuery(term);
+    if (!match) {
+      return {
+        clause: ` AND m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)`,
+        params: [term],
+      };
+    }
+    return {
+      clause: ` AND (
+        m.id IN (SELECT rowid FROM manga_fts WHERE manga_fts MATCH ?)
+        OR m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)
+      )`,
+      params: [match, term],
+    };
+  }
+
+  // Multi-term comma list: all terms must match a genre. Repeated subquery
+  // pattern lets the optimizer hit the manga_genres PK once per term.
+  const clause = terms.map(() =>
+    ` AND m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)`
+  ).join('');
+  return { clause, params: terms };
+}
+
+function toFtsMatchQuery(text) {
+  const words = String(text)
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return null;
+  return words.map(w => `"${w}"`).join(' AND ');
 }
 
 module.exports = router;

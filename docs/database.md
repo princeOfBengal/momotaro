@@ -189,6 +189,69 @@ Junction table linking manga to lists.
 
 **Primary key:** `(list_id, manga_id)`
 
+## Search Index (`manga_fts` + `manga_genres`)
+
+Search is served from two derived structures maintained by triggers. No route needs to call `LIKE '%term%'` or `json_each(m.genres)` anymore — every query hits an index.
+
+### `manga_fts` — FTS5 virtual table
+
+```sql
+CREATE VIRTUAL TABLE manga_fts USING fts5(
+  title,
+  author,
+  content='manga',
+  content_rowid='id',
+  tokenize='unicode61'
+);
+```
+
+External-content FTS5 table: the virtual table stores the inverted index only; the source of truth is still `manga.title` / `manga.author`. `content_rowid='id'` links each FTS row to the manga it represents, so `SELECT rowid FROM manga_fts WHERE manga_fts MATCH ?` returns `manga.id` values directly.
+
+Default `unicode61` tokeniser: whole-word, case-insensitive, Unicode-normalised. **Substring matching is intentionally not supported** — a query for `Daw` will not match `Yona of the Dawn`. See [api.md § Search](./api.md#search-search) for the full semantic table.
+
+### `manga_genres` — normalised genre pairs
+
+```sql
+CREATE TABLE manga_genres (
+  manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+  genre    TEXT    NOT NULL COLLATE NOCASE,
+  PRIMARY KEY (manga_id, genre)
+);
+CREATE INDEX idx_manga_genres_genre ON manga_genres(genre COLLATE NOCASE);
+```
+
+One row per (manga, genre) pair. `COLLATE NOCASE` on the column makes `genre = ?` case-insensitive and prevents `"Action"` + `"action"` from ever being two rows. `manga.genres` (the JSON blob) remains the authoritative store; this table is derived from it and rebuilt via triggers whenever the blob changes.
+
+Multi-term genre search (`?search=action,romance`) translates to one `AND m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)` per term, so each check uses the PK directly.
+
+### Triggers
+
+```text
+manga_fts_ai     AFTER INSERT ON manga           → insert new FTS row
+manga_fts_ad     AFTER DELETE ON manga           → delete FTS row (external-content 'delete' form)
+manga_fts_au     AFTER UPDATE OF title,author    → delete + re-insert FTS row
+manga_genres_ai  AFTER INSERT ON manga           → fan out NEW.genres JSON into rows
+manga_genres_au  AFTER UPDATE OF genres ON manga → delete all, fan out NEW.genres JSON
+```
+
+Delete-side for `manga_genres` is handled by `ON DELETE CASCADE` on the FK. Both `_ai`/`_au` triggers guard against malformed JSON with `CASE WHEN json_valid(NEW.genres) THEN NEW.genres ELSE '[]' END` before calling `json_each`, so a bad blob doesn't abort the write.
+
+**No write-path code changes needed anywhere** — every existing `UPDATE manga SET genres = ?` or `UPDATE manga SET title = ?` (scanner, AniList, MAL, doujinshi, local metadata, apply/refresh routes) fans out for free.
+
+### Backfill
+
+On startup, `migrateSearchIndex` detects empty-but-table-exists state and seeds both structures from the existing `manga` rows:
+
+```sql
+-- only if manga_fts is empty while manga has rows
+INSERT INTO manga_fts(rowid, title, author) SELECT id, title, author FROM manga;
+INSERT OR IGNORE INTO manga_genres (manga_id, genre)
+  SELECT m.id, j.value
+  FROM manga m, json_each(CASE WHEN json_valid(m.genres) THEN m.genres ELSE '[]' END) j;
+```
+
+Both are idempotent (`INSERT OR IGNORE`, and the FTS backfill is gated on emptiness), so a crash mid-migration and a retry on next boot is safe.
+
 ## Indexes
 
 ```sql

@@ -76,10 +76,12 @@ Response shape:
 
 ### Search (`?search=`)
 
-The `search` parameter is matched against title, **author/artist name** (partial, case-insensitive), and genres.
+Search is indexed — a FTS5 virtual table over `(title, author)` plus a normalised `manga_genres(manga_id, genre)` table. No full table scan, no `LIKE '%term%'`. See [database.md](./database.md#search-index-manga_fts--manga_genres) for schema and triggers.
 
-- **Single term** — matches any manga whose title, author, or any genre contains the term as a substring. Artist first and last names both match because the comparison is a substring search against the full stored name.
-- **Comma-separated terms** — treated as a genre filter; manga must have **all** listed genres (exact match, case-insensitive). Author is not checked in this mode.
+- **Single term** — matches if the term appears as a **whole word** in the manga's title or author, *or* matches a genre **exactly** (case-insensitive). "Yona" finds "Yona of the Dawn"; "Dawn" finds it too; "Daw" does not. "Romance" matches manga tagged Romance; "rom" does not. Multi-word input is implicit AND: "Yona Dawn" requires both words to appear in the title/author, matching "Yona of the Dawn". Author first and last names both work since each tokenises as a separate word.
+- **Comma-separated terms** — treated as a genre filter; manga must have **all** listed genres (exact match, case-insensitive). Title and author are not checked in this mode.
+
+FTS5 operator characters (`"`, `*`, `+`, `-`, `:`, `(`, `)`, `^`) are stripped from user input before the query is built, so pasting a title with punctuation or accidentally typing `*foo*` still works. An empty or punctuation-only search matches nothing for the FTS branch — the genre branch still applies.
 
 The same logic applies to the reading-list manga endpoint (`GET /api/reading-lists/:id/manga?search=`).
 

@@ -55,12 +55,40 @@ The scanner populates four columns that the stats and info endpoints read direct
 |---|---|---|
 | `chapters` | `bytes_on_disk` | For `folder` chapters: sum of `fs.statSync(page).size` over all image pages. For `cbz` chapters: `fs.statSync(cbzPath).size` (the archive's on-disk size). |
 | `chapters` | `file_count` | Number of image pages (equal to `page_count`). |
-| `manga` | `bytes_on_disk` | Rollup: `SUM(chapters.bytes_on_disk) WHERE manga_id = ?` at the end of `scanMangaDirectory`. |
-| `manga` | `file_count` | Rollup: `SUM(chapters.file_count) WHERE manga_id = ?`. |
+| `manga` | `bytes_on_disk` | Rollup of `SUM(chapters.bytes_on_disk)` for the manga. |
+| `manga` | `file_count` | Rollup of `SUM(chapters.file_count)` for the manga. |
 
-Both rollups run inside `scanMangaDirectory` so that chapters skipped by the incremental mtime check are still counted — their previously-stored `bytes_on_disk` is just re-summed. The update uses a single SQL statement with two correlated subqueries, so the cost is one roundtrip per manga regardless of chapter count.
+Chapters skipped by the incremental mtime check are still counted — their previously-stored `bytes_on_disk` is re-summed from the row, not recomputed from disk.
 
-`GET /api/stats` sums `manga.bytes_on_disk` in a single query; `GET /api/manga/:id/info` reads the columns directly. Before this change both endpoints walked the library folder on every request — untenable at 8 TB.
+### Single-manga path (watcher, optimize route)
+
+`scanMangaDirectory` writes the manga-level rollup itself using two correlated subqueries in one statement — a single round-trip per manga, independent of chapter count.
+
+### Bulk library path (`scanLibrary`)
+
+In a full library walk the per-manga rollup is suppressed — `scanLibrary` passes `{ skipRollup: true }` to each `scanMangaDirectory` call. After the per-manga work and the missing-manga cleanup pass, `scanLibrary` issues **one** grouped update for the whole library:
+
+```sql
+UPDATE manga
+SET bytes_on_disk = COALESCE(agg.bytes, 0),
+    file_count    = COALESCE(agg.files, 0)
+FROM (
+  SELECT c.manga_id,
+         SUM(c.bytes_on_disk) AS bytes,
+         SUM(c.file_count)    AS files
+  FROM chapters c
+  JOIN manga m ON m.id = c.manga_id
+  WHERE m.library_id = ?
+  GROUP BY c.manga_id
+) AS agg
+WHERE manga.id = agg.manga_id;
+```
+
+A second statement zeros out any manga left with no chapter rows so deletions propagate cleanly (the `FROM`-clause aggregate only covers manga that still have chapters).
+
+The trade-off: at N manga with C chapters each, the per-manga path issues N statements hitting the `chapters` table N times; the bulk path replaces that with one `GROUP BY` pass. For a 10 k-manga library this eliminates ~10 k correlated-subquery round-trips per full scan.
+
+`GET /api/stats` sums `manga.bytes_on_disk` in a single query; `GET /api/manga/:id/info` reads the columns directly. Before the cached columns existed both endpoints walked the library folder on every request — untenable at 8 TB.
 
 ## Parallel Scanning
 
@@ -89,7 +117,9 @@ Manual scans via `POST /api/scan` and `POST /api/libraries/:id/scan` pass `force
 
 Page dimensions (width/height) are read with `sharp` so the reader can detect wide pages for double-page spread layout. Per-manga concurrency is capped at `IMAGE_DIM_CONCURRENCY = 3` via `withLimit`.
 
-**CBZ chapters skip dimension fetching at scan time.** Reading dimensions for a page inside a CBZ would require decompressing the entry, which is exactly what the streaming change is meant to avoid. Rows for CBZ pages are inserted with `width` and `height` set to `NULL`; the reader treats `null` dimensions as "unknown orientation" and falls back to single-page layout. Clients that need the true size can read it lazily once the image has been fetched.
+**CBZ chapters skip dimension fetching at scan time.** Reading dimensions for a page inside a CBZ would require decompressing the entry, which is exactly what the streaming change is meant to avoid. Rows for CBZ pages are inserted with `width` and `height` set to `NULL`.
+
+Dimensions for CBZ pages are then filled in lazily by the API the first time the chapter is opened. `GET /api/chapters/:id/pages` ([server/src/routes/pages.js](../server/src/routes/pages.js)) detects any rows with null width/height for a CBZ chapter, decompresses each entry through `sharp.metadata()` at concurrency 4, and persists the results back into the `pages` table inside a single transaction. Every subsequent open of the same chapter hits the cached values, so the cost is paid once per CBZ chapter. This is what lets the **Double Page (Manga)** layout detect true double-page spreads inside CBZ archives — without dimensions the reader can't tell a wide spread from a normal page, and would pair them with the next page instead of rendering them solo.
 
 Folder-chapter pages continue to have their dimensions indexed during the scan — reading a few KB of image header per file is cheap and local.
 
@@ -146,6 +176,19 @@ CBZ files are read via `yauzl` in two modes and are **never extracted to disk**:
 
 1. **At scan time** — `listCbzEntries(cbzPath)` opens the archive, walks the central directory, and returns one entry per image file inside. No compressed data is read, no file is written. For a 100 MB CBZ this is a handful of KB of disk I/O.
 2. **At serve time** — `openCbzEntryStream(cbzPath, entryName)` opens the archive, locates the requested entry, and resolves with a `Readable` stream that decompresses only that one entry. The stream is piped straight through to the HTTP response in [server/src/routes/pages.js](../server/src/routes/pages.js).
+
+### Central-Directory Cache
+
+Parsing a CBZ's central directory via `yauzl`'s `readEntry()` loop costs roughly 1 ms per entry of event-loop overhead. For a 200-page chapter, re-parsing on every single page request would add ~200 ms of latency before the archive is even seeked. To avoid that, `chapterParser.js` keeps a bounded LRU cache keyed by CBZ path:
+
+- **Shape:** `Map<cbzPath, { mtimeMs, entries: Map<entryName, yauzlEntry> }>`
+- **Capacity:** `CBZ_ENTRIES_CACHE_MAX = 500` archives (~10 MB at typical entry counts).
+- **Invalidation:** every hit re-stats the file and compares `mtimeMs`. A mismatch drops the cached map and forces a re-parse.
+- **Holds no file descriptors.** The cache stores only the parsed entry records. Each stream call still opens the zip fresh and relies on `autoClose: true` to close the fd when the stream ends — so there is no fd leak even under high concurrency.
+- **Stream-error safety:** if `openReadStream` errors (cached offsets stale for any reason), the cache entry is dropped before the error propagates. The next caller re-parses.
+- **Explicit invalidation:** `invalidateCbzCache(cbzPath)` is exported for callers that rewrite or delete archives outside the normal scan path (e.g. bulk-optimize flows).
+
+The first read of a given archive pays the parse cost once; every subsequent page from the same archive resolves in microseconds from the `Map` lookup before `openReadStream` is called with pre-known offsets.
 
 ### How page rows represent archive entries
 

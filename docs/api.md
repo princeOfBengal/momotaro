@@ -227,7 +227,9 @@ Page images are served in one of two ways depending on the parent chapter's `typ
 - **Folder chapters** — `res.sendFile(path)` against the absolute filesystem path stored on the page row. Express handles `ETag`, `Last-Modified`, and conditional 304 responses.
 - **CBZ chapters** — `yauzl` opens the archive, locates the entry named by `pages.path`, and pipes the decompressed stream through to the response. No files are extracted to disk. `Cache-Control: public, max-age=86400` is set explicitly because `sendFile`'s automatic cache headers don't apply.
 
-`width` and `height` in `/api/chapters/:id/pages` may be `null` for CBZ pages — dimension fetching is skipped at scan time for archived chapters since it would require decompressing every page. `is_wide` is `null` in that case. Folder-chapter pages always have dimensions populated.
+`width` and `height` in `/api/chapters/:id/pages` are populated for every page. Folder-chapter pages get them at scan time; CBZ-chapter pages start out null (dimension fetching is skipped during the scan to avoid decompressing every entry) and the route then populates them lazily on the first open of each chapter — see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching). The first open of a CBZ chapter therefore briefly waits while every entry is read through `sharp.metadata()`; subsequent opens read the persisted values and respond immediately.
+
+`is_wide` is computed at serve time from the stored `width`/`height` and is `true` only when the page is a true double-page spread — its width is ≥ 1.5× the median page width across the chapter. This catches pages drawn at twice the normal width (so the reader can render them solo in Double Page (Manga) mode) without flagging mildly-landscape pages. It is `null` only when dimensions are still unknown (e.g. an unreadable CBZ entry).
 
 ---
 

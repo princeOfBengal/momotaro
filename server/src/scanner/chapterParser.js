@@ -1,4 +1,5 @@
 const fs = require('fs');
+const fsp = require('fs').promises;
 const path = require('path');
 const yauzl = require('yauzl');
 
@@ -85,44 +86,100 @@ function getFolderPages(dirPath) {
   });
 }
 
+// ── CBZ central-directory cache ───────────────────────────────────────────────
+//
+// Bounded LRU: cbzPath → { mtimeMs, entries: Map<entryName, yauzlEntry> }.
+//
+// Parsing the central directory is the dominant cost for repeat reads from the
+// same archive — walking entries via yauzl's `readEntry()` event loop costs
+// ~1ms/entry of event-loop overhead, so a 200-entry chapter would pay ~200ms
+// per page request. Caching the parsed entry map reduces sequential reads to
+// one parse per archive until the file's mtime changes.
+//
+// Holds NO file descriptors — each stream still opens the zip fresh. Staleness
+// is detected by comparing the file's current mtime on every hit (a cheap stat).
+// Memory budget: ~200 B/entry × ~100 entries/archive × 500 archives ≈ 10 MB.
+const CBZ_ENTRIES_CACHE_MAX = 500;
+const cbzEntriesCache = new Map();
+
+async function getCachedCbzEntries(cbzPath) {
+  let mtimeMs;
+  try {
+    mtimeMs = (await fsp.stat(cbzPath)).mtimeMs;
+  } catch (err) {
+    cbzEntriesCache.delete(cbzPath);
+    throw err;
+  }
+
+  const hit = cbzEntriesCache.get(cbzPath);
+  if (hit && hit.mtimeMs === mtimeMs) {
+    // LRU bump: re-insert so it's now the most-recently-used key
+    cbzEntriesCache.delete(cbzPath);
+    cbzEntriesCache.set(cbzPath, hit);
+    return hit.entries;
+  }
+
+  // Cold or stale — read the central directory once and map every entry.
+  // Non-image and directory entries are kept too: openCbzEntryStream looks up
+  // by exact name, and filtering here would force a re-parse for any caller
+  // that ever asks for a non-image resource inside the archive.
+  const entries = await new Promise((resolve, reject) => {
+    yauzl.open(cbzPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
+      if (err || !zip) return reject(err || new Error('zip open failed'));
+      const map = new Map();
+      zip.on('entry', (entry) => {
+        if (!/\/$/.test(entry.fileName)) map.set(entry.fileName, entry);
+        zip.readEntry();
+      });
+      zip.on('end',   () => resolve(map));
+      zip.on('error', reject);
+      zip.readEntry();
+    });
+  });
+
+  cbzEntriesCache.set(cbzPath, { mtimeMs, entries });
+  if (cbzEntriesCache.size > CBZ_ENTRIES_CACHE_MAX) {
+    cbzEntriesCache.delete(cbzEntriesCache.keys().next().value);
+  }
+  return entries;
+}
+
+/**
+ * Drop any cached entry map for this archive. Safe to call whether or not
+ * the path is currently cached. Exposed for callers that mutate or delete
+ * CBZ files outside the normal scan path.
+ */
+function invalidateCbzCache(cbzPath) {
+  cbzEntriesCache.delete(cbzPath);
+}
+
 /**
  * Open a CBZ and resolve with [{ filename, entryName, size }] sorted
- * naturally. Does NOT extract — just reads the central directory.
+ * naturally. Does NOT extract — reads from the cached central directory.
  *
  * `entryName` is the full path inside the archive (what yauzl calls `fileName`),
  * suitable for stored-path lookup when streaming a single entry later.
  * `filename` is the basename for display purposes.
  */
-function listCbzEntries(cbzPath) {
-  return new Promise((resolve) => {
-    yauzl.open(cbzPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
-      if (err || !zip) {
-        console.error(`[CBZ] Failed to open ${cbzPath}: ${err && err.message}`);
-        return resolve([]);
-      }
-      const out = [];
-      zip.on('entry', (entry) => {
-        if (/\/$/.test(entry.fileName) || !isImage(entry.fileName)) {
-          return zip.readEntry();
-        }
-        out.push({
-          filename:  path.basename(entry.fileName),
-          entryName: entry.fileName,
-          size:      entry.uncompressedSize || 0,
-        });
-        zip.readEntry();
-      });
-      zip.on('end', () => {
-        out.sort((a, b) => naturalSort(a.entryName, b.entryName));
-        resolve(out);
-      });
-      zip.on('error', (e) => {
-        console.error(`[CBZ] Read error on ${cbzPath}: ${e.message}`);
-        resolve(out);
-      });
-      zip.readEntry();
+async function listCbzEntries(cbzPath) {
+  let entries;
+  try {
+    entries = await getCachedCbzEntries(cbzPath);
+  } catch (err) {
+    console.error(`[CBZ] Failed to open ${cbzPath}: ${err.message}`);
+    return [];
+  }
+  const out = [];
+  for (const [name, entry] of entries) {
+    if (!isImage(name)) continue;
+    out.push({
+      filename:  path.basename(name),
+      entryName: name,
+      size:      entry.uncompressedSize || 0,
     });
-  });
+  }
+  out.sort((a, b) => naturalSort(a.entryName, b.entryName));
+  return out;
 }
 
 /**
@@ -145,34 +202,43 @@ async function getChapterPages(chapter) {
 
 /**
  * Open a single entry inside a CBZ as a readable stream.
- * Opens the archive fresh each time — the OS page cache handles hot reads;
- * yauzl is fast at central-directory parsing (one seek + a few KB read).
  *
- * Resolves to a Node Readable stream; rejects if the entry can't be found
- * or the archive can't be opened.
+ * Uses the cached central directory to skip yauzl's per-entry event walk —
+ * on a cache hit we open the archive, call openReadStream directly with the
+ * cached entry (whose offsets are already known), and rely on `autoClose` to
+ * release the fd when the stream ends.
+ *
+ * Rejects if the archive is unreadable or the entry isn't present. On a
+ * "not found" from a cached lookup, the cache is dropped and one re-parse
+ * is attempted — covers the rare case where a file was rewritten with the
+ * same mtime (sub-second precision collisions on some filesystems).
  */
-function openCbzEntryStream(cbzPath, entryName) {
+async function openCbzEntryStream(cbzPath, entryName) {
+  const entries = await getCachedCbzEntries(cbzPath);
+  const entry = entries.get(entryName);
+  if (entry) return openStreamForEntry(cbzPath, entry);
+
+  // Cached map didn't have it — drop and retry fresh before giving up.
+  cbzEntriesCache.delete(cbzPath);
+  const fresh = await getCachedCbzEntries(cbzPath);
+  const retry = fresh.get(entryName);
+  if (!retry) throw new Error(`Entry not found: ${entryName}`);
+  return openStreamForEntry(cbzPath, retry);
+}
+
+function openStreamForEntry(cbzPath, entry) {
   return new Promise((resolve, reject) => {
     yauzl.open(cbzPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
       if (err || !zip) return reject(err || new Error('zip open failed'));
-      let found = false;
-      zip.on('entry', (entry) => {
-        if (entry.fileName === entryName) {
-          found = true;
-          zip.openReadStream(entry, (sErr, stream) => {
-            if (sErr) return reject(sErr);
-            // Closing the stream will autoClose the ZipFile since lazyEntries.
-            resolve(stream);
-          });
-          return;
+      zip.openReadStream(entry, (sErr, stream) => {
+        if (sErr) {
+          // Cached offsets may be out of date — invalidate so the next
+          // caller re-parses the central directory.
+          cbzEntriesCache.delete(cbzPath);
+          return reject(sErr);
         }
-        zip.readEntry();
+        resolve(stream);
       });
-      zip.on('end', () => {
-        if (!found) reject(new Error(`Entry not found: ${entryName}`));
-      });
-      zip.on('error', reject);
-      zip.readEntry();
     });
   });
 }
@@ -200,4 +266,5 @@ module.exports = {
   listCbzEntries,
   openCbzEntryStream,
   detectChapterType,
+  invalidateCbzCache,
 };

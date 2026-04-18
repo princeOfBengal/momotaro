@@ -34,7 +34,7 @@ The reader is a fullscreen page viewer with three reading modes and rich gesture
 
 ### Double-Manga Spread Detection
 
-`mangaSpreads` (computed in `Reader.jsx`) builds an array of spread groups. A page is considered **wide** when `page.is_wide === 1` (set by the scanner when `width > height`). Wide pages and the first page always render solo. Normal pages are paired greedily.
+`mangaSpreads` (computed in `Reader.jsx`) builds an array of spread groups. A page is considered **wide** when `page.is_wide === 1` — set by the API when the page is a true double-page spread (width ≥ 1.5× the median page width in the chapter, so it visually occupies the space of two normal pages). Wide pages and the first page always render solo. Normal pages are paired greedily.
 
 ## Scale Types (Paged Mode)
 

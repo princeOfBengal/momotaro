@@ -211,7 +211,7 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
       scanState.currentMangaName = folderName;
       const mangaPath = path.join(library.path, folderName);
       try {
-        await scanMangaDirectory(mangaPath, folderName, library.id);
+        await scanMangaDirectory(mangaPath, folderName, library.id, { skipRollup: true });
       } catch (err) {
         console.error(`[Scanner] Error scanning ${folderName}:`, err.message);
       }
@@ -229,6 +229,33 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
         console.log(`[Scanner] Removed deleted manga: ${path.basename(m.path)}`);
       }
     }
+
+    // Single grouped rollup for every manga in this library — runs one
+    // SUM/GROUP BY pass over the chapters table instead of N correlated
+    // subqueries (one per scanMangaDirectory call). Manga with no chapter
+    // rows are force-zeroed separately so deletions propagate cleanly.
+    db.prepare(`
+      UPDATE manga
+      SET bytes_on_disk = COALESCE(agg.bytes, 0),
+          file_count    = COALESCE(agg.files, 0)
+      FROM (
+        SELECT c.manga_id,
+               SUM(c.bytes_on_disk) AS bytes,
+               SUM(c.file_count)    AS files
+        FROM chapters c
+        JOIN manga m ON m.id = c.manga_id
+        WHERE m.library_id = ?
+        GROUP BY c.manga_id
+      ) AS agg
+      WHERE manga.id = agg.manga_id
+    `).run(library.id);
+
+    db.prepare(`
+      UPDATE manga
+      SET bytes_on_disk = 0, file_count = 0
+      WHERE library_id = ?
+        AND NOT EXISTS (SELECT 1 FROM chapters WHERE manga_id = manga.id)
+    `).run(library.id);
 
     if (rootMtimeMs !== null) {
       db.prepare('UPDATE libraries SET last_scan_mtime_ms = ? WHERE id = ?')
@@ -266,8 +293,13 @@ function computeChapterStats(type, chapterPath, pages) {
 /**
  * Scan a single manga directory. Idempotent — safe to call repeatedly.
  * Uses file_mtime on each chapter to skip re-processing unchanged content.
+ *
+ * `skipRollup: true` suppresses the per-manga rollup UPDATE at the end of the
+ * function. The bulk `scanLibrary` path sets this so it can run one grouped
+ * rollup across every manga in the library in a single statement — see there
+ * for rationale.
  */
-async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
+async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { skipRollup = false } = {}) {
   const db = getDb();
 
   const existing = db.prepare('SELECT id, library_id FROM manga WHERE path = ?').get(mangaPath);
@@ -450,16 +482,21 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null) {
   }
 
   // Roll up chapter stats to the manga row in a single query.
-  db.prepare(`
-    UPDATE manga
-    SET bytes_on_disk = COALESCE(
-          (SELECT SUM(bytes_on_disk) FROM chapters WHERE manga_id = ?), 0
-        ),
-        file_count    = COALESCE(
-          (SELECT SUM(file_count)    FROM chapters WHERE manga_id = ?), 0
-        )
-    WHERE id = ?
-  `).run(mangaId, mangaId, mangaId);
+  // In bulk library scans this is skipped in favour of one grouped UPDATE over
+  // every manga in the library — avoids N subquery passes over the chapters
+  // table when we're about to walk every row anyway.
+  if (!skipRollup) {
+    db.prepare(`
+      UPDATE manga
+      SET bytes_on_disk = COALESCE(
+            (SELECT SUM(bytes_on_disk) FROM chapters WHERE manga_id = ?), 0
+          ),
+          file_count    = COALESCE(
+            (SELECT SUM(file_count)    FROM chapters WHERE manga_id = ?), 0
+          )
+      WHERE id = ?
+    `).run(mangaId, mangaId, mangaId);
+  }
 
   // Generate thumbnail if we have a cover candidate and none exists yet.
   if (coverPage && (!existing || !existing.cover_image)) {

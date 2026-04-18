@@ -54,7 +54,7 @@ One row per manga folder.
 | `anilist_cover` | TEXT | Filename of the AniList-sourced thumbnail, e.g. `5_anilist.webp` |
 | `original_cover` | TEXT | Filename of the first-ever generated thumbnail, e.g. `5_original.webp` — set once and never overwritten |
 | `last_metadata_fetch_attempt_at` | INTEGER | Unix timestamp of the last bulk-pull attempt (any source) — used to skip recently-tried no-match titles |
-| `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Updated at the end of every `scanMangaDirectory` so `/api/stats` and `/api/manga/:id/info` can answer without walking the library. |
+| `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Refreshed per-manga by the watcher / optimize paths, and via one grouped `UPDATE … FROM (SELECT … GROUP BY manga_id)` at the end of each `scanLibrary` run. Lets `/api/stats` and `/api/manga/:id/info` answer without walking the library. |
 | `file_count` | INTEGER | Cached rollup of `SUM(chapters.file_count)` — total image pages across all chapters. |
 | `created_at` | INTEGER | |
 | `updated_at` | INTEGER | |
@@ -90,9 +90,9 @@ One row per image page.
 | `page_index` | INTEGER | 0-based position |
 | `filename` | TEXT | Basename for display (e.g. `001.jpg`) |
 | `path` | TEXT | **Dual-purpose by chapter type.** For `chapters.type = 'folder'` rows: absolute filesystem path. For `chapters.type = 'cbz'` rows: the ZIP entry name inside `chapters.path` (used by `yauzl` to stream the entry on demand). |
-| `width` | INTEGER | Pixel dimensions (may be null — always null for CBZ pages, which skip dimension fetching at scan time; see [scanner.md](./scanner.md#image-dimension-fetching)) |
+| `width` | INTEGER | Pixel dimensions. Folder-chapter pages get them at scan time; CBZ pages start null and are populated by the API the first time the chapter is opened (see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching)). Stays null only when an entry is unreadable. |
 | `height` | INTEGER | |
-| `is_wide` | INTEGER | 1 if width > height (auto-detected for double-page spreads; null when dimensions are unknown) |
+| `is_wide` | — | Not a column. Derived at API serve time from `width`/`height`: `true` when the page's width is ≥ 1.5× the median page width across the chapter (a true double-page spread that visually occupies two normal pages). `null` when dimensions are unknown. |
 
 **Unique constraint:** `(chapter_id, page_index)`
 

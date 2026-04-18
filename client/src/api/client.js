@@ -17,8 +17,9 @@ function getDeviceId() {
 }
 
 async function apiFetch(path, options = {}) {
+  const { timeoutMs = 15_000, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const resp = await fetch(`${BASE}${path}`, {
@@ -26,9 +27,9 @@ async function apiFetch(path, options = {}) {
       headers: {
         'Content-Type': 'application/json',
         'X-Device-ID': getDeviceId(),
-        ...options.headers,
+        ...fetchOptions.headers,
       },
-      ...options,
+      ...fetchOptions,
     });
     const json = await resp.json();
     if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
@@ -127,7 +128,12 @@ export const api = {
   bulkOptimize: (libraryId) =>
     apiFetch(`/api/libraries/${libraryId}/bulk-optimize`, { method: 'POST' }),
   exportMetadata: (libraryId) =>
-    apiFetch(`/api/libraries/${libraryId}/export-metadata`, { method: 'POST' }),
+    apiFetch(`/api/libraries/${libraryId}/export-metadata`, {
+      method: 'POST',
+      // Local-source manga linked to a third-party trigger per-item API fetches,
+      // so allow up to 10 minutes for very large libraries.
+      timeoutMs: 600_000,
+    }),
   searchAnilist: (q, page = 1) =>
     apiFetch(`/api/anilist/search?${new URLSearchParams({ q, page })}`),
   applyMetadata: (mangaId, anilistId) =>
@@ -142,8 +148,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ slug }),
     }),
-  resetMetadata: (mangaId) =>
-    apiFetch(`/api/manga/${mangaId}/reset-metadata`, { method: 'POST' }),
+  resetMetadata: (mangaId, source) =>
+    apiFetch(`/api/manga/${mangaId}/reset-metadata`, {
+      method: 'POST',
+      body: JSON.stringify(source ? { source } : {}),
+    }),
   exportMangaMetadata: (mangaId) =>
     apiFetch(`/api/manga/${mangaId}/export-metadata`, { method: 'POST' }),
   refreshMalMetadata: (mangaId) =>

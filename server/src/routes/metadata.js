@@ -562,38 +562,103 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   );
 }));
 
-// POST /api/libraries/:id/export-metadata — write metadata.json to each manga folder that has
-// third-party metadata (metadata_source != 'none').  Responds synchronously with counts.
+// Build the metadata.json payload from a manga row + optional fetched third-party record.
+// When `remote` is provided (local-source manga linked to a third-party), its fields override
+// the DB fields so the exported JSON reflects the third-party data rather than the local entry.
+function buildExportPayload(manga, remote) {
+  const genres = remote?.genres ?? safeJsonParse(manga.genres, []);
+  const title          = remote?.title       ?? manga.title;
+  const author         = remote?.author      ?? manga.author;
+  const description    = remote?.description ?? manga.description;
+  const year           = remote?.year        ?? manga.year;
+  const score          = remote?.score       ?? manga.score;
+  const status         = remote?.status      ?? manga.status;
+  const anilist_id     = remote?.anilist_id   ?? manga.anilist_id;
+  const mal_id         = remote?.mal_id       ?? manga.mal_id;
+  const doujinshi_id   = remote?.doujinshi_id ?? manga.doujinshi_id;
+  const metadata_source = remote?.source      ?? manga.metadata_source;
+
+  return {
+    title,
+    ...(author      ? { author }      : {}),
+    ...(description ? { description } : {}),
+    ...(genres && genres.length ? { genres } : {}),
+    ...(year   ? { year }   : {}),
+    ...(score  ? { score }  : {}),
+    ...(status ? { status } : {}),
+    ...(anilist_id   ? { anilist_id }   : {}),
+    ...(mal_id       ? { mal_id }       : {}),
+    ...(doujinshi_id ? { doujinshi_id } : {}),
+    metadata_source,
+    exported_at: new Date().toISOString(),
+  };
+}
+
+// Re-fetch third-party metadata for a local-source manga that has been linked.
+// Picks the highest-priority linked source (anilist > mal > doujinshi). Returns
+// null if no linkage present or the fetch fails.
+async function fetchRemoteForLocal(manga, { anilistToken, malClientId, doujinshiToken }) {
+  try {
+    if (manga.anilist_id) {
+      return await fetchByAniListId(Number(manga.anilist_id), anilistToken);
+    }
+    if (manga.mal_id && malClientId) {
+      return await fetchByMALId(Number(manga.mal_id), malClientId);
+    }
+    if (manga.doujinshi_id) {
+      return await fetchByDoujinshiSlug(manga.doujinshi_id, doujinshiToken);
+    }
+  } catch (err) {
+    console.warn(`[ExportMetadata] Remote fetch failed for "${manga.title}": ${err.message}`);
+  }
+  return null;
+}
+
+// POST /api/libraries/:id/export-metadata — write metadata.json to each manga folder.
+// Behavior:
+//   metadata_source in ('anilist'|'myanimelist'|'doujinshi') → export DB fields directly
+//   metadata_source === 'local' with a third-party link (anilist_id / mal_id / doujinshi_id)
+//                             → re-fetch third-party metadata and write THAT (overwrites
+//                               any existing local metadata.json). DB remains untouched so
+//                               in-app display still uses the local record.
+//   metadata_source === 'local' with no link → skip (nothing third-party to export)
+//   metadata_source === 'none'               → skip
 router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
 
   const totalCount = db.prepare('SELECT COUNT(*) AS n FROM manga WHERE library_id = ?').get(library.id).n;
-  const mangaList  = db.prepare(
-    "SELECT * FROM manga WHERE library_id = ? AND metadata_source != 'none'"
-  ).all(library.id);
+  const allManga   = db.prepare('SELECT * FROM manga WHERE library_id = ?').all(library.id);
 
-  let exported = 0;
-  let writeErrors = 0;
+  const anilistToken   = getToken(db);
+  const doujinshiToken = getDoujinshiToken(db);
+  const malClientId    = getMalClientId(db);
 
-  for (const manga of mangaList) {
+  let exported      = 0;
+  let exportedLocal = 0; // local-source manga exported with fetched third-party data
+  let skipped       = 0;
+  let writeErrors   = 0;
+
+  for (const manga of allManga) {
+    const source = manga.metadata_source;
+    const hasThirdPartyLink = !!(manga.anilist_id || manga.mal_id || manga.doujinshi_id);
+
+    if (source === 'none')                             { skipped++; continue; }
+    if (source === 'local' && !hasThirdPartyLink)      { skipped++; continue; }
+
     try {
-      const genres = safeJsonParse(manga.genres, []);
-      const payload = {
-        title:           manga.title,
-        ...(manga.author      ? { author:      manga.author }      : {}),
-        ...(manga.description ? { description: manga.description } : {}),
-        ...(genres.length     ? { genres }                         : {}),
-        ...(manga.year        ? { year:        manga.year }        : {}),
-        ...(manga.score       ? { score:       manga.score }       : {}),
-        ...(manga.status      ? { status:      manga.status }      : {}),
-        ...(manga.anilist_id  ? { anilist_id:  manga.anilist_id }  : {}),
-        ...(manga.mal_id      ? { mal_id:      manga.mal_id }      : {}),
-        ...(manga.doujinshi_id ? { doujinshi_id: manga.doujinshi_id } : {}),
-        metadata_source: manga.metadata_source,
-        exported_at:     new Date().toISOString(),
-      };
+      let payload;
+      if (source === 'local') {
+        const remote = await fetchRemoteForLocal(manga, { anilistToken, malClientId, doujinshiToken });
+        if (!remote) { skipped++; continue; }
+        payload = buildExportPayload(manga, remote);
+        exportedLocal++;
+        // AniList is the common path — be polite on the rate limit
+        if (manga.anilist_id) await new Promise(r => setTimeout(r, 700));
+      } else {
+        payload = buildExportPayload(manga, null);
+      }
       const outPath = path.join(manga.path, 'metadata.json');
       fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
       exported++;
@@ -603,71 +668,123 @@ router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
     }
   }
 
-  const skipped = totalCount - mangaList.length;
   console.log(
-    `[ExportMetadata] "${library.name}": exported ${exported}, ` +
-    `skipped ${skipped} (no metadata), ${writeErrors} write errors.`
+    `[ExportMetadata] "${library.name}": exported ${exported} ` +
+    `(${exportedLocal} local-source overwritten with third-party data), ` +
+    `skipped ${skipped}, ${writeErrors} write errors.`
   );
 
   res.json({
-    data: { total: totalCount, exported, skipped, errors: writeErrors },
+    data: { total: totalCount, exported, exported_local: exportedLocal, skipped, errors: writeErrors },
   });
 }));
 
-// POST /api/manga/:id/export-metadata — write metadata.json to this manga's folder on disk
+// POST /api/manga/:id/export-metadata — write metadata.json to this manga's folder on disk.
+// Local-source manga with a third-party link are re-fetched from that source so the exported
+// JSON reflects third-party data (overwriting any existing local metadata.json).
 router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
-  if (!manga.metadata_source || manga.metadata_source === 'none') {
+
+  const source = manga.metadata_source;
+  const hasThirdPartyLink = !!(manga.anilist_id || manga.mal_id || manga.doujinshi_id);
+
+  if (!source || source === 'none' || (source === 'local' && !hasThirdPartyLink)) {
     return res.status(400).json({ error: 'This manga has no linked metadata to export.' });
   }
 
-  const genres = safeJsonParse(manga.genres, []);
-  const payload = {
-    title:           manga.title,
-    ...(manga.author       ? { author:       manga.author }       : {}),
-    ...(manga.description  ? { description:  manga.description }  : {}),
-    ...(genres.length      ? { genres }                           : {}),
-    ...(manga.year         ? { year:         manga.year }         : {}),
-    ...(manga.score        ? { score:        manga.score }        : {}),
-    ...(manga.status       ? { status:       manga.status }       : {}),
-    ...(manga.anilist_id   ? { anilist_id:   manga.anilist_id }   : {}),
-    ...(manga.mal_id       ? { mal_id:       manga.mal_id }       : {}),
-    ...(manga.doujinshi_id ? { doujinshi_id: manga.doujinshi_id } : {}),
-    metadata_source: manga.metadata_source,
-    exported_at:     new Date().toISOString(),
-  };
+  let remote = null;
+  if (source === 'local') {
+    remote = await fetchRemoteForLocal(manga, {
+      anilistToken:   getToken(db),
+      malClientId:    getMalClientId(db),
+      doujinshiToken: getDoujinshiToken(db),
+    });
+    if (!remote) {
+      return res.status(502).json({ error: 'Could not fetch metadata from the linked source.' });
+    }
+  }
 
+  const payload = buildExportPayload(manga, remote);
   const outPath = path.join(manga.path, 'metadata.json');
   fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
 
-  console.log(`[ExportMetadata] Wrote metadata.json for "${manga.title}" (${manga.metadata_source})`);
+  console.log(
+    `[ExportMetadata] Wrote metadata.json for "${manga.title}" ` +
+    `(source=${source}${remote ? ' → re-fetched third-party' : ''})`
+  );
   res.json({ data: { path: outPath } });
 }));
 
-// POST /api/manga/:id/reset-metadata — break external linkage and clear all sourced metadata fields
+// POST /api/manga/:id/reset-metadata — break external linkage and clear sourced metadata fields
+// Body: { source?: 'anilist' | 'myanimelist' | 'doujinshi' }
+//   omitted → full reset: clears all IDs, metadata fields, sets metadata_source to 'none'
+//   given  → break only that source's linkage:
+//            - always NULLs the corresponding *_id (and source cover column, if any)
+//            - when metadata_source matches source: also clears metadata fields and sets to 'none'
+//            - when metadata_source is 'local' or another third-party: preserves fields so that
+//              local JSON / other-source data remains the display source
 router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  db.prepare(`
-    UPDATE manga SET
-      anilist_id                     = NULL,
-      mal_id                         = NULL,
-      doujinshi_id                   = NULL,
-      metadata_source                = 'none',
-      description                    = NULL,
-      status                         = NULL,
-      year                           = NULL,
-      genres                         = NULL,
-      score                          = NULL,
-      author                         = NULL,
-      last_metadata_fetch_attempt_at = NULL,
-      updated_at                     = unixepoch()
-    WHERE id = ?
-  `).run(manga.id);
+  const { source } = req.body || {};
+  const SOURCE_MAP = {
+    anilist:     { idField: 'anilist_id',   coverField: 'anilist_cover' },
+    myanimelist: { idField: 'mal_id',       coverField: 'mal_cover'     },
+    doujinshi:   { idField: 'doujinshi_id', coverField: null            },
+  };
+
+  if (source !== undefined) {
+    if (!SOURCE_MAP[source]) return res.status(400).json({ error: 'Invalid source' });
+    const { idField, coverField } = SOURCE_MAP[source];
+    const fullReset = manga.metadata_source === source;
+
+    if (fullReset) {
+      db.prepare(`
+        UPDATE manga SET
+          ${idField}                     = NULL,
+          ${coverField ? `${coverField} = NULL,` : ''}
+          metadata_source                = 'none',
+          description                    = NULL,
+          status                         = NULL,
+          year                           = NULL,
+          genres                         = NULL,
+          score                          = NULL,
+          author                         = NULL,
+          last_metadata_fetch_attempt_at = NULL,
+          updated_at                     = unixepoch()
+        WHERE id = ?
+      `).run(manga.id);
+    } else {
+      db.prepare(`
+        UPDATE manga SET
+          ${idField}                     = NULL,
+          ${coverField ? `${coverField} = NULL,` : ''}
+          updated_at                     = unixepoch()
+        WHERE id = ?
+      `).run(manga.id);
+    }
+  } else {
+    db.prepare(`
+      UPDATE manga SET
+        anilist_id                     = NULL,
+        mal_id                         = NULL,
+        doujinshi_id                   = NULL,
+        metadata_source                = 'none',
+        description                    = NULL,
+        status                         = NULL,
+        year                           = NULL,
+        genres                         = NULL,
+        score                          = NULL,
+        author                         = NULL,
+        last_metadata_fetch_attempt_at = NULL,
+        updated_at                     = unixepoch()
+      WHERE id = ?
+    `).run(manga.id);
+  }
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });

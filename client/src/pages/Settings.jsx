@@ -183,12 +183,15 @@ function LibrariesSection() {
     setExportStatus(null);
     try {
       const result = await api.exportMetadata(lib.id);
-      const { exported, skipped, errors } = result;
+      const { exported, exported_local = 0, skipped, errors } = result;
       let message;
       if (exported === 0 && skipped > 0) {
         message = `No metadata to export — none of the ${skipped} title${skipped !== 1 ? 's' : ''} have third-party metadata yet.`;
       } else {
         message = `Exported metadata for ${exported} title${exported !== 1 ? 's' : ''}.`;
+        if (exported_local > 0) {
+          message += ` ${exported_local} local-metadata title${exported_local !== 1 ? 's' : ''} overwritten with third-party data.`;
+        }
         if (skipped > 0) message += ` ${skipped} skipped (no metadata).`;
         if (errors  > 0) message += ` ${errors} write error${errors !== 1 ? 's' : ''}.`;
       }

@@ -316,7 +316,11 @@ Author is extracted from the `authors` field of the MAL response, preferring ent
 | ------ | -------------------------------- | ---------------------------------------------------- |
 | POST   | `/api/manga/:id/export-metadata` | Write `metadata.json` to this manga's folder on disk |
 
-Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. The manga must have `metadata_source != 'none'`; returns 400 otherwise. The file includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
+Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. Requires either `metadata_source != 'none'` or a `metadata_source = 'local'` manga with a third-party link (`anilist_id` / `mal_id` / `doujinshi_id`); returns 400 otherwise.
+
+**Local-source with third-party link** — when `metadata_source === 'local'` and at least one ID is present, the server re-fetches the linked third-party source (priority AniList > MyAnimeList > Doujinshi.info) and writes *that* data into the JSON, overwriting any existing file. The database row is not modified, so in-app display continues to use the local record. If the remote fetch fails, the endpoint returns 502.
+
+For all other linked sources, the file is written directly from the DB fields. Includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
 
 **Response shape:**
 
@@ -328,24 +332,32 @@ Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. The manga
 
 | Method | Path                            | Description                                                  |
 | ------ | ------------------------------- | ------------------------------------------------------------ |
-| POST   | `/api/manga/:id/reset-metadata` | Break external linkage and clear all sourced metadata fields |
+| POST   | `/api/manga/:id/reset-metadata` | Break external linkage; optionally clear sourced fields      |
 
-Clears the AniList or Doujinshi.info linkage for a manga and resets all fields that were populated by the external source:
+**Request body** (optional):
 
-| Field reset       | Value after reset |
-| ----------------- | ----------------- |
-| `anilist_id`      | `NULL`            |
-| `mal_id`          | `NULL`            |
-| `doujinshi_id`    | `NULL`            |
-| `metadata_source` | `'none'`          |
-| `description`     | `NULL`            |
-| `status`          | `NULL`            |
-| `year`            | `NULL`            |
-| `genres`          | `NULL`            |
-| `score`           | `NULL`            |
-| `author`          | `NULL`            |
+```json
+{ "source": "anilist" | "myanimelist" | "doujinshi" }
+```
 
-`title` and `cover_image` are left untouched. Returns the updated manga row. Use this when the wrong title was auto-matched and you want a clean slate before re-linking to the correct entry.
+Behavior depends on whether `source` is supplied:
+
+- **`source` omitted** — full reset. Clears `anilist_id`, `mal_id`, `doujinshi_id`, all sourced metadata fields (`description`, `status`, `year`, `genres`, `score`, `author`), sets `metadata_source = 'none'`, and clears `last_metadata_fetch_attempt_at`.
+- **`source` supplied, matches `metadata_source`** — full reset as above, but only the specified source's ID (`anilist_id` / `mal_id` / `doujinshi_id`) and cover column (`anilist_cover` / `mal_cover`) are cleared. Doujinshi.info has no dedicated cover column.
+- **`source` supplied, does *not* match `metadata_source`** (e.g. source is `'anilist'` but the manga displays `'local'` or `'myanimelist'`) — **link-only break**. Only the specified source's `*_id` and cover column are nulled. All metadata fields, `metadata_source`, and any other linkage IDs are preserved. This is how the UI detaches an auxiliary link while keeping the user's chosen display source intact.
+
+Per-field summary:
+
+| Field                            | Full reset | Link-only break |
+| -------------------------------- | ---------- | --------------- |
+| `<source>_id`                    | `NULL`     | `NULL`          |
+| `<source>_cover` (if applicable) | `NULL`     | `NULL`          |
+| `metadata_source`                | `'none'`   | unchanged       |
+| sourced fields (desc / status / year / genres / score / author) | `NULL` | unchanged |
+| `last_metadata_fetch_attempt_at` | `NULL`     | unchanged       |
+| `title`, `cover_image`           | unchanged  | unchanged       |
+
+Returns the updated manga row. Use the full-reset form when the wrong title was auto-matched; use the link-only form to detach an AniList/MAL link from a manga that's displaying local-JSON metadata.
 
 ### Bulk Metadata Pull
 
@@ -410,9 +422,18 @@ A lower-priority source's cover file is still downloaded and saved to its column
 
 ### Export Metadata
 
-`POST /api/libraries/:id/export-metadata` writes a `metadata.json` sidecar file into each manga's folder for titles that have third-party metadata (`metadata_source != 'none'`). No request body is required.
+`POST /api/libraries/:id/export-metadata` writes a `metadata.json` sidecar file into each manga's folder. No request body is required.
 
-The endpoint runs synchronously — it only writes files, no network calls — and responds with counts once all files are written.
+Export behaviour per title:
+
+| `metadata_source`                           | Link present                                    | Action |
+| ------------------------------------------- | ----------------------------------------------- | ------ |
+| `'anilist'` / `'myanimelist'` / `'doujinshi'` | —                                             | Write DB fields to `metadata.json`. |
+| `'local'`                                   | `anilist_id` / `mal_id` / `doujinshi_id` set    | **Re-fetch** the linked source (priority AniList > MAL > Doujinshi.info) and write *that* data to `metadata.json`, overwriting any existing file. DB is not modified. |
+| `'local'`                                   | no link                                         | Skip. |
+| `'none'`                                    | —                                               | Skip. |
+
+The endpoint is not fully synchronous any more — it may issue upstream HTTP requests for each local-source manga with a link. AniList fetches are spaced 700 ms apart for rate limiting. The client allows up to 10 minutes per request (`timeoutMs: 600_000`) for large libraries.
 
 **Response shape:**
 ```json
@@ -420,6 +441,7 @@ The endpoint runs synchronously — it only writes files, no network calls — a
   "data": {
     "total": 50,
     "exported": 38,
+    "exported_local": 4,
     "skipped": 12,
     "errors": 0
   }
@@ -427,8 +449,9 @@ The endpoint runs synchronously — it only writes files, no network calls — a
 ```
 
 - `total` — total manga in the library
-- `exported` — manga that had third-party metadata and received a `metadata.json` file
-- `skipped` — manga with `metadata_source = 'none'` (nothing to export)
+- `exported` — total number of `metadata.json` files written (includes `exported_local`)
+- `exported_local` — subset of `exported` where a local-source manga had its file overwritten with freshly-fetched third-party data
+- `skipped` — manga with `metadata_source = 'none'`, or `'local'` with no third-party link, or a linked `'local'` manga whose remote fetch returned nothing
 - `errors` — manga whose folder could not be written to (permissions, path missing, etc.); these are logged server-side
 
 **Written file** — each `metadata.json` is pretty-printed JSON written to `{manga.path}/metadata.json`. It includes only non-null fields. Example:

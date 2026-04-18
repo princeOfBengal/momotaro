@@ -553,7 +553,7 @@ function EditableNumber({ value, onSave, saving, step = 1, min = 0, max, display
   );
 }
 
-function AnilistStatusPanel({ status, onEntryChange, mangaId }) {
+function AnilistStatusPanel({ status, onEntryChange, onBreakLinkage, mangaId }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
 
@@ -615,14 +615,25 @@ function AnilistStatusPanel({ status, onEntryChange, mangaId }) {
       <div className="al-status-header">
         <span className="al-status-source">AniList</span>
         {anilist_id && (
-          <a
-            className="al-status-link"
-            href={`https://anilist.co/manga/${anilist_id}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            View on AniList ↗
-          </a>
+          <div className="al-status-header-links">
+            <a
+              className="al-status-link"
+              href={`https://anilist.co/manga/${anilist_id}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on AniList ↗
+            </a>
+            {onBreakLinkage && (
+              <button
+                type="button"
+                className="al-status-break-btn"
+                onClick={onBreakLinkage}
+              >
+                Break Linkage
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -924,17 +935,32 @@ export default function MangaDetail() {
     setMetaMessage({ type: 'success', text: 'Metadata applied from Doujinshi.info.' });
   }
 
-  async function handleResetMetadata() {
+  async function handleResetMetadata(source) {
     setFetchingMeta(true);
     setMetaMessage(null);
     try {
-      const result = await api.resetMetadata(id);
+      const result = await api.resetMetadata(id, source);
       setManga(prev => ({ ...prev, ...result, chapters: prev.chapters, progress: prev.progress }));
       setMetaMessage({ type: 'success', text: 'Metadata linkage removed.' });
     } catch (err) {
       setMetaMessage({ type: 'error', text: 'Error: ' + err.message });
     } finally {
       setFetchingMeta(false);
+    }
+  }
+
+  async function handleBreakAnilistLinkage() {
+    if (!confirm('Remove the AniList link for this manga?')) return;
+    try {
+      const result = await api.resetMetadata(id, 'anilist');
+      setManga(prev => ({ ...prev, ...result, chapters: prev.chapters, progress: prev.progress }));
+      setCoverBust(Date.now());
+      // AniList panel state reflects the new unlinked status
+      setAnilistStatus(prev => prev?.logged_in
+        ? { logged_in: true, linked: false }
+        : prev);
+    } catch (err) {
+      alert('Failed to remove AniList linkage: ' + err.message);
     }
   }
 
@@ -1307,6 +1333,7 @@ export default function MangaDetail() {
           status={anilistStatus}
           mangaId={id}
           onEntryChange={entry => setAnilistStatus(prev => ({ ...prev, entry }))}
+          onBreakLinkage={manga.anilist_id ? handleBreakAnilistLinkage : null}
         />
 
         {/* Tracking settings */}
@@ -1669,25 +1696,29 @@ export default function MangaDetail() {
                 </div>
               )}
 
-              {(manga.metadata_source === 'anilist' || manga.metadata_source === 'myanimelist' || manga.metadata_source === 'doujinshi') && (
+              {((metaSource === 'anilist'     && manga.anilist_id) ||
+                (metaSource === 'myanimelist' && manga.mal_id)     ||
+                (metaSource === 'doujinshi'   && manga.doujinshi_id)) && (
                 <div className="meta-modal-actions">
                   <div className="meta-modal-action-row">
                     <div className="meta-modal-action-info">
                       <span className="meta-modal-action-label">Break Linkage</span>
                       <span className="meta-modal-action-desc">
                         Remove the connection to{' '}
-                        {manga.metadata_source === 'anilist' ? 'AniList'
-                          : manga.metadata_source === 'myanimelist' ? 'MyAnimeList'
-                          : 'Doujinshi.info'}{' '}
-                        and clear all linked metadata. Use this if the wrong title was matched.
+                        {metaSource === 'anilist' ? 'AniList'
+                          : metaSource === 'myanimelist' ? 'MyAnimeList'
+                          : 'Doujinshi.info'}.{' '}
+                        {manga.metadata_source === metaSource
+                          ? 'All fetched metadata will be cleared.'
+                          : 'Your existing metadata will be preserved — only the link is removed.'}
                       </span>
                     </div>
                     <button
                       className="btn btn-danger btn-sm"
-                      onClick={handleResetMetadata}
+                      onClick={() => handleResetMetadata(metaSource)}
                       disabled={fetchingMeta}
                     >
-                      Reset
+                      Break
                     </button>
                   </div>
                 </div>

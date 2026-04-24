@@ -104,7 +104,7 @@ export default defineConfig({
           // instantly and refreshing in the background (StaleWhileRevalidate)
           // gives the best perceived performance without sacrificing freshness.
           {
-            urlPattern: /\/api\/(library|libraries|manga|chapters|reading-lists|stats)/,
+            urlPattern: /\/api\/(library|libraries|manga|chapters|reading-lists|stats|home)/,
             handler: 'StaleWhileRevalidate',
             options: {
               cacheName: 'browse-data',

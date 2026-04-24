@@ -227,8 +227,17 @@ export const api = {
   getSystemLogs: () => apiFetch('/api/admin/logs'),
   systemLogsExportUrl: () => `${BASE}/api/admin/logs/export`,
 
-  // Statistics
-  getStats: () => apiFetch('/api/stats'),
+  // Home page — single aggregate fetch for every ribbon (continue reading,
+  // discover, art gallery, top-manga-per-genre). Scoped server-side to
+  // visible libraries; cached for 30 s in-process.
+  getHome: () => apiFetch('/api/home'),
+
+  // Statistics. Pass a library ID to scope every aggregate to that library;
+  // omit or pass null for the All Libraries view.
+  getStats: (libraryId = null) => {
+    const q = libraryId == null ? '' : `?library_id=${encodeURIComponent(libraryId)}`;
+    return apiFetch(`/api/stats${q}`);
+  },
 
   // Helpers
   pageImageUrl: (pageId) => `${BASE}/api/pages/${pageId}/image`,

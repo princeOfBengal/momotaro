@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import MangaCard from '../components/MangaCard';
+import AppSidebar from '../components/AppSidebar';
 import './Library.css';
 
 export default function Library() {
@@ -25,15 +26,8 @@ export default function Library() {
   const [readingLists, setReadingLists] = useState([]);
   const [activeList, setActiveList] = useState(location.state?.list ?? null);
 
-  // New list creation
   // Mobile drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
-
-  // New list creation
-  const [creatingList, setCreatingList] = useState(false);
-  const [newListName, setNewListName] = useState('');
-  const [savingList, setSavingList] = useState(false);
-  const newListInputRef = useRef(null);
 
   function loadLibraries() {
     api.getLibraries().then(data => setLibraries(data)).catch(() => {});
@@ -47,11 +41,6 @@ export default function Library() {
     loadLibraries();
     loadReadingLists();
   }, []);
-
-  // Focus the new-list input when it appears
-  useEffect(() => {
-    if (creatingList) newListInputRef.current?.focus();
-  }, [creatingList]);
 
   const load = useCallback(async () => {
     try {
@@ -95,35 +84,6 @@ export default function Library() {
       setScanning(false);
     }
   }
-
-  async function handleCreateList(e) {
-    e.preventDefault();
-    if (!newListName.trim() || savingList) return;
-    setSavingList(true);
-    try {
-      await api.createReadingList({ name: newListName.trim() });
-      setNewListName('');
-      setCreatingList(false);
-      loadReadingLists();
-    } catch (err) {
-      alert('Failed to create list: ' + err.message);
-    } finally {
-      setSavingList(false);
-    }
-  }
-
-  async function handleDeleteList(e, id) {
-    e.stopPropagation();
-    try {
-      await api.deleteReadingList(id);
-      if (activeList === id) selectAll();
-      loadReadingLists();
-    } catch (err) {
-      alert('Failed to delete list: ' + err.message);
-    }
-  }
-
-  const isViewingAll = activeLibrary === null && activeList === null;
 
   return (
     <div className="library-page">
@@ -188,96 +148,18 @@ export default function Library() {
       />
 
       <div className="library-layout">
-        {/* ── Sidebar ── */}
-        <aside className={`library-sidebar${drawerOpen ? ' drawer-open' : ''}`}>
-          <div className="lib-drawer-header">
-            <span className="lib-drawer-title">Menu</span>
-            <button className="lib-drawer-close" onClick={() => setDrawerOpen(false)} aria-label="Close menu">✕</button>
-          </div>
-
-          {/* Libraries section — always shown when at least one library exists */}
-          {libraries.length > 0 && (
-            <>
-              <p className="library-sidebar-heading">Libraries</p>
-              {libraries.length > 1 && (
-                <button
-                  className={`library-sidebar-item${isViewingAll ? ' active' : ''}`}
-                  onClick={selectAll}
-                >
-                  All Libraries
-                  <span className="library-sidebar-count">
-                    {libraries.reduce((s, l) => s + l.manga_count, 0)}
-                  </span>
-                </button>
-              )}
-              {libraries.map(lib => (
-                <button
-                  key={lib.id}
-                  className={`library-sidebar-item${activeLibrary === lib.id ? ' active' : ''}`}
-                  onClick={() => selectLibrary(lib.id)}
-                >
-                  {lib.name}
-                  <span className="library-sidebar-count">{lib.manga_count}</span>
-                </button>
-              ))}
-              <div className="library-sidebar-divider" />
-            </>
-          )}
-
-          {/* Reading List section */}
-          <div className="library-sidebar-section-header">
-            <p className="library-sidebar-heading">Reading List</p>
-            {!creatingList && (
-              <button
-                className="library-sidebar-add-btn"
-                onClick={() => setCreatingList(true)}
-                title="New reading list"
-              >+</button>
-            )}
-          </div>
-
-          {readingLists.map(list => (
-            <div key={list.id} className="library-sidebar-item-row">
-              <button
-                className={`library-sidebar-item${activeList === list.id ? ' active' : ''}`}
-                onClick={() => selectList(list.id)}
-              >
-                {list.name}
-                <span className="library-sidebar-count">{list.manga_count}</span>
-              </button>
-              {!list.is_default && (
-                <button
-                  className="library-sidebar-delete-btn"
-                  onClick={e => handleDeleteList(e, list.id)}
-                  title={`Delete "${list.name}"`}
-                >×</button>
-              )}
-            </div>
-          ))}
-
-          {creatingList && (
-            <form className="library-sidebar-new-list" onSubmit={handleCreateList}>
-              <input
-                ref={newListInputRef}
-                className="library-sidebar-new-list-input"
-                type="text"
-                placeholder="List name..."
-                value={newListName}
-                onChange={e => setNewListName(e.target.value)}
-                onKeyDown={e => e.key === 'Escape' && setCreatingList(false)}
-                maxLength={60}
-              />
-              <div className="library-sidebar-new-list-actions">
-                <button type="submit" className="library-sidebar-new-list-save" disabled={!newListName.trim() || savingList}>
-                  Add
-                </button>
-                <button type="button" className="library-sidebar-new-list-cancel" onClick={() => { setCreatingList(false); setNewListName(''); }}>
-                  Cancel
-                </button>
-              </div>
-            </form>
-          )}
-        </aside>
+        <AppSidebar
+          libraries={libraries}
+          readingLists={readingLists}
+          activeLibrary={activeLibrary}
+          activeList={activeList}
+          onSelectAll={selectAll}
+          onSelectLibrary={selectLibrary}
+          onSelectList={selectList}
+          drawerOpen={drawerOpen}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onReadingListsChanged={loadReadingLists}
+        />
 
         <main className="library-main">
           {loading && (

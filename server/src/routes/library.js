@@ -491,36 +491,105 @@ router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
 
 // ── Statistics ───────────────────────────────────────────────────────────────
 
-let _statsCache = null;
-let _statsCacheTime = 0;
+// Keyed by library_id (null key = all libraries). Cleared every 5 minutes per
+// slot. Keeping the cache at all because the genre aggregates walk json_each
+// for every manga; caching keeps the Statistics page snappy when the user
+// toggles between libraries.
+const _statsCache = new Map(); // key -> { payload, ts }
+const STATS_TTL_MS = 5 * 60 * 1000;
 
-// GET /api/stats
+function cacheKey(libraryId) {
+  return libraryId == null ? '__all__' : `lib:${libraryId}`;
+}
+
+// GET /api/stats  —  optional ?library_id=N scopes every aggregate to one
+// library; omit for All Libraries.
 router.get('/stats', asyncWrapper(async (req, res) => {
-  const now = Date.now();
-  if (_statsCache && (now - _statsCacheTime) < 5 * 60 * 1000) {
-    return res.json({ data: _statsCache });
-  }
-
   const db = getDb();
 
-  const { total_manga }    = db.prepare('SELECT COUNT(*) as total_manga FROM manga').get();
-  const { total_chapters } = db.prepare('SELECT COUNT(*) as total_chapters FROM chapters').get();
-  const { total_pages }    = db.prepare('SELECT COALESCE(SUM(page_count), 0) as total_pages FROM chapters').get();
+  let libraryId = null;
+  if (req.query.library_id !== undefined && req.query.library_id !== '') {
+    const parsed = parseInt(req.query.library_id, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return res.status(400).json({ error: 'library_id must be a positive integer' });
+    }
+    const exists = db.prepare('SELECT 1 FROM libraries WHERE id = ?').pluck().get(parsed);
+    if (!exists) return res.status(404).json({ error: 'Library not found' });
+    libraryId = parsed;
+  }
 
-  // Genre counts — aggregated in SQLite via json_each
+  const key = cacheKey(libraryId);
+  const cached = _statsCache.get(key);
+  const now = Date.now();
+  if (cached && (now - cached.ts) < STATS_TTL_MS) {
+    return res.json({ data: cached.payload });
+  }
+
+  // Every aggregate either filters `manga.library_id = ?` directly or joins
+  // through `manga` to do so. Building the WHERE fragment once keeps each
+  // query body consistent.
+  const libClause      = libraryId == null ? '' : ' AND m.library_id = ?';
+  const libClauseBare  = libraryId == null ? '' : ' WHERE library_id = ?';
+  const libJoinClause  = libraryId == null ? '' : ' WHERE m.library_id = ?';
+  const libParams      = libraryId == null ? [] : [libraryId];
+
+  const { total_manga } = db.prepare(
+    `SELECT COUNT(*) as total_manga FROM manga${libClauseBare}`
+  ).get(...libParams);
+
+  const { total_chapters } = db.prepare(`
+    SELECT COUNT(*) as total_chapters
+    FROM chapters c
+    JOIN manga m ON m.id = c.manga_id
+    ${libJoinClause}
+  `).get(...libParams);
+
+  const { total_pages } = db.prepare(`
+    SELECT COALESCE(SUM(c.page_count), 0) as total_pages
+    FROM chapters c
+    JOIN manga m ON m.id = c.manga_id
+    ${libJoinClause}
+  `).get(...libParams);
+
+  // Genre inventory — normalised `manga_genres` table keeps this cheap.
   const { total_genres } = db.prepare(`
-    SELECT COUNT(DISTINCT value) as total_genres
-    FROM manga, json_each(manga.genres)
-    WHERE manga.genres IS NOT NULL AND manga.genres != '[]'
-  `).get();
+    SELECT COUNT(DISTINCT g.genre COLLATE NOCASE) as total_genres
+    FROM manga_genres g
+    JOIN manga m ON m.id = g.manga_id
+    ${libJoinClause}
+  `).get(...libParams);
+
   const top_genres = db.prepare(`
-    SELECT value as genre, COUNT(*) as count
-    FROM manga, json_each(manga.genres)
-    WHERE manga.genres IS NOT NULL AND manga.genres != '[]'
-    GROUP BY value
-    ORDER BY count DESC
+    SELECT g.genre as genre, COUNT(*) as count
+    FROM manga_genres g
+    JOIN manga m ON m.id = g.manga_id
+    ${libJoinClause}
+    GROUP BY g.genre COLLATE NOCASE
+    ORDER BY count DESC, g.genre ASC
     LIMIT 10
-  `).all().map(r => ({ genre: r.genre, count: r.count }));
+  `).all(...libParams).map(r => ({ genre: r.genre, count: r.count }));
+
+  // Favorite Genres — ranking weighted by reading history. Each completed
+  // chapter contributes one point to every genre tagged on its manga, so a
+  // user who has read 40 chapters of a 3-genre manga adds 40 to each of
+  // those three genres. Only manga with at least one completed chapter
+  // contribute. Titles with no AniList/MAL/local metadata have no genres
+  // and are naturally excluded.
+  const favorite_genres = db.prepare(`
+    SELECT g.genre as genre,
+           SUM(json_array_length(p.completed_chapters)) as chapters_read
+    FROM progress p
+    JOIN manga m        ON m.id = p.manga_id
+    JOIN manga_genres g ON g.manga_id = p.manga_id
+    WHERE json_array_length(p.completed_chapters) > 0
+    ${libClause}
+    GROUP BY g.genre COLLATE NOCASE
+    ORDER BY chapters_read DESC, g.genre ASC
+    LIMIT 10
+  `).all(...libParams).map(r => ({
+    genre: r.genre,
+    chapters_read: r.chapters_read,
+  }));
 
   // Estimated read time via a single JOIN — no JS iteration over all chapters
   const { estimated_read_time_minutes } = db.prepare(`
@@ -530,7 +599,9 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     ) as estimated_read_time_minutes
     FROM progress p, json_each(p.completed_chapters) je
     JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
-  `).get();
+    JOIN manga m    ON m.id = p.manga_id
+    ${libClause.replace(/^ AND/, ' WHERE')}
+  `).get(...libParams);
 
   // Popular manga — sorted by completed chapter count in SQL
   const top_manga = db.prepare(`
@@ -538,9 +609,10 @@ router.get('/stats', asyncWrapper(async (req, res) => {
            json_array_length(p.completed_chapters) as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
+    ${libJoinClause}
     ORDER BY chapters_read DESC
     LIMIT 10
-  `).all().map(r => ({
+  `).all(...libParams).map(r => ({
     id: r.id,
     title: r.title,
     cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
@@ -550,10 +622,11 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   // Total disk size is now a single SUM over cached per-manga values —
   // previously this walked every library, which doesn't scale past a few TB.
   const { total_size_bytes } = db.prepare(
-    'SELECT COALESCE(SUM(bytes_on_disk), 0) as total_size_bytes FROM manga'
-  ).get();
+    `SELECT COALESCE(SUM(bytes_on_disk), 0) as total_size_bytes FROM manga${libClauseBare}`
+  ).get(...libParams);
 
-  _statsCache = {
+  const payload = {
+    library_id: libraryId,
     total_manga,
     total_chapters,
     total_pages,
@@ -561,11 +634,212 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     total_genres,
     estimated_read_time_minutes: Math.round(estimated_read_time_minutes || 0),
     top_genres,
+    favorite_genres,
     top_manga,
   };
-  _statsCacheTime = Date.now();
+  _statsCache.set(key, { payload, ts: Date.now() });
 
-  res.json({ data: _statsCache });
+  res.json({ data: payload });
+}));
+
+// ── Home page ────────────────────────────────────────────────────────────────
+//
+// Single aggregate endpoint that powers the Home landing page. Everything is
+// scoped to libraries that are visible in the "All Libraries" view
+// (`libraries.show_in_all = 1` or `manga.library_id IS NULL`) — a library
+// hidden from All Libraries never surfaces on Home either.
+//
+// Response is cached in-memory with a short TTL (30 s) to absorb the rapid
+// repeat-fetches caused by PWA prefetching, client-side StaleWhileRevalidate,
+// and bfcache restores. All underlying queries hit indexed columns; cache is
+// there to keep per-request cost ~0, not because any single query is slow.
+
+const HOME_TTL_MS = 30 * 1000;
+let _homeCache = null;
+let _homeCacheTime = 0;
+
+// Caller-tunable limits, bounded to protect the server from pathological
+// clients. The client only ever sends defaults right now; these exist so the
+// endpoint remains safe if the client layer is ever swapped out.
+const HOME_LIMITS = {
+  continue:     { default: 15, max: 50 },
+  discover:     { default: 30, max: 60 },
+  gallery:      { default: 50, max: 100 },
+  genreRibbons: { default: 15, max: 30 }, // items per genre ribbon
+};
+
+function clampLimit(q, cfg) {
+  const n = parseInt(q, 10);
+  if (!Number.isFinite(n) || n <= 0) return cfg.default;
+  return Math.min(n, cfg.max);
+}
+
+// GET /api/home
+router.get('/home', asyncWrapper(async (req, res) => {
+  const now = Date.now();
+  if (_homeCache && (now - _homeCacheTime) < HOME_TTL_MS) {
+    return res.json({ data: _homeCache });
+  }
+
+  const db = getDb();
+
+  const limContinue = clampLimit(req.query.continue_limit, HOME_LIMITS.continue);
+  const limDiscover = clampLimit(req.query.discover_limit, HOME_LIMITS.discover);
+  const limGallery  = clampLimit(req.query.gallery_limit,  HOME_LIMITS.gallery);
+  const limRibbon   = clampLimit(req.query.ribbon_limit,   HOME_LIMITS.genreRibbons);
+
+  // ── Continue Reading ─────────────────────────────────────────────────────
+  // Manga the user has opened, most-recent first. Joined to chapters so the
+  // UI can show the label of the current chapter without a follow-up fetch.
+  const continueReadingRows = db.prepare(`
+    SELECT m.id, m.title, m.cover_image, m.track_volumes,
+           p.current_chapter_id, p.current_page, p.last_read_at,
+           c.number AS cur_number, c.volume AS cur_volume, c.folder_name AS cur_folder,
+           (SELECT COUNT(*) FROM chapters ch WHERE ch.manga_id = m.id) AS total_chapters,
+           json_array_length(p.completed_chapters) AS completed_count
+    FROM progress p
+    JOIN manga m ON m.id = p.manga_id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    LEFT JOIN chapters c  ON c.id = p.current_chapter_id
+    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+    ORDER BY p.last_read_at DESC
+    LIMIT ?
+  `).all(limContinue);
+
+  const continue_reading = continueReadingRows.map(r => ({
+    id:                r.id,
+    title:             r.title,
+    cover_url:         r.cover_image ? thumbnailUrl(r.cover_image) : null,
+    track_volumes:     r.track_volumes,
+    current_chapter_id: r.current_chapter_id,
+    current_chapter: r.current_chapter_id ? {
+      id:          r.current_chapter_id,
+      folder_name: r.cur_folder,
+      number:      r.cur_number,
+      volume:      r.cur_volume,
+    } : null,
+    current_page:      r.current_page,
+    total_chapters:    r.total_chapters,
+    completed_count:   r.completed_count || 0,
+    last_read_at:      r.last_read_at,
+  }));
+
+  // ── Favorite genres (scoped to visible libraries) ─────────────────────────
+  const favoriteGenreRows = db.prepare(`
+    SELECT g.genre AS genre,
+           SUM(json_array_length(p.completed_chapters)) AS chapters_read
+    FROM progress p
+    JOIN manga m        ON m.id = p.manga_id
+    JOIN manga_genres g ON g.manga_id = p.manga_id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE json_array_length(p.completed_chapters) > 0
+      AND (m.library_id IS NULL OR l.show_in_all = 1)
+    GROUP BY g.genre COLLATE NOCASE
+    ORDER BY chapters_read DESC, g.genre ASC
+    LIMIT 4
+  `).all();
+  const favoriteGenres = favoriteGenreRows.map(r => r.genre);
+
+  // ── Discover New Series ──────────────────────────────────────────────────
+  // Unread manga (no progress row, or a progress row with zero completed
+  // chapters) tagged with at least one favorite genre. Ranked by match count
+  // so a manga matching 3 of the top 4 genres ranks above one matching 1.
+  // Unrated AniList/MAL score sinks to the bottom within each match-count
+  // tier so the user sees scored picks first.
+  let discover_candidates = [];
+  if (favoriteGenres.length > 0) {
+    const placeholders = favoriteGenres.map(() => '?').join(',');
+    discover_candidates = db.prepare(`
+      SELECT m.id, m.title, m.cover_image, m.score,
+             COUNT(DISTINCT g.genre COLLATE NOCASE) AS match_count
+      FROM manga m
+      JOIN manga_genres g ON g.manga_id = m.id
+      LEFT JOIN libraries l ON l.id = m.library_id
+      LEFT JOIN progress p  ON p.manga_id = m.id
+      WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+        AND (p.manga_id IS NULL
+             OR p.completed_chapters IS NULL
+             OR p.completed_chapters = '[]')
+        AND g.genre IN (${placeholders}) COLLATE NOCASE
+      GROUP BY m.id
+      ORDER BY match_count DESC, m.score DESC NULLS LAST, m.id ASC
+      LIMIT ?
+    `).all(...favoriteGenres, limDiscover).map(r => ({
+      id:          r.id,
+      title:       r.title,
+      cover_url:   r.cover_image ? thumbnailUrl(r.cover_image) : null,
+      score:       r.score,
+      match_count: r.match_count,
+    }));
+  }
+
+  // ── Art Gallery ──────────────────────────────────────────────────────────
+  const galleryRows = db.prepare(`
+    SELECT ag.id, ag.manga_id, m.title AS manga_title, m.track_volumes,
+           ag.chapter_id, c.folder_name AS chapter_folder,
+           c.number AS chapter_number, c.volume AS chapter_volume,
+           ag.page_id, pg.page_index, ag.created_at
+    FROM art_gallery ag
+    JOIN manga m    ON m.id = ag.manga_id
+    JOIN chapters c ON c.id = ag.chapter_id
+    JOIN pages pg   ON pg.id = ag.page_id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+    ORDER BY ag.created_at DESC
+    LIMIT ?
+  `).all(limGallery);
+
+  const art_gallery = galleryRows.map(r => ({
+    id:              r.id,
+    manga_id:        r.manga_id,
+    manga_title:     r.manga_title,
+    track_volumes:   r.track_volumes,
+    chapter_id:      r.chapter_id,
+    chapter_folder_name: r.chapter_folder,
+    chapter_number:  r.chapter_number,
+    chapter_volume:  r.chapter_volume,
+    page_id:         r.page_id,
+    page_index:      r.page_index,
+    page_image_url:  `/api/pages/${r.page_id}/image`,
+    created_at:      r.created_at,
+  }));
+
+  // ── Top Manga per Favorite Genre (up to 4 ribbons) ───────────────────────
+  // One indexed query per ribbon. 4 queries × ~15 rows = cheap even at 10k
+  // manga; switching to a single window-function query buys nothing at this
+  // scale and makes the code harder to read.
+  const topByGenreStmt = db.prepare(`
+    SELECT m.id, m.title, m.cover_image, m.score
+    FROM manga m
+    JOIN manga_genres g ON g.manga_id = m.id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+      AND g.genre = ? COLLATE NOCASE
+    ORDER BY m.score DESC NULLS LAST, m.id ASC
+    LIMIT ?
+  `);
+
+  const favorite_genres_ribbons = favoriteGenres.map(genre => ({
+    genre,
+    manga: topByGenreStmt.all(genre, limRibbon).map(r => ({
+      id:        r.id,
+      title:     r.title,
+      cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
+      score:     r.score,
+    })),
+  })).filter(r => r.manga.length > 0);
+
+  const payload = {
+    continue_reading,
+    discover_candidates,
+    art_gallery,
+    favorite_genres_ribbons,
+  };
+
+  _homeCache = payload;
+  _homeCacheTime = Date.now();
+
+  res.json({ data: payload });
 }));
 
 

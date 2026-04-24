@@ -1014,7 +1014,7 @@ export default function MangaDetail() {
             <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
           </svg>
         </button>
-        <Link to="/" className="btn btn-ghost">← Back</Link>
+        <Link to="/library" className="btn btn-ghost">← Back</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
         <button className="btn-settings" onClick={() => navigate('/settings')} aria-label="Open settings" title="Settings">⚙</button>
@@ -1031,7 +1031,7 @@ export default function MangaDetail() {
             <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
           </svg>
         </button>
-        <Link to="/" className="btn btn-ghost">← Back</Link>
+        <Link to="/library" className="btn btn-ghost">← Back</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
         <button className="btn-settings" onClick={() => navigate('/settings')} aria-label="Open settings" title="Settings">⚙</button>
@@ -1134,12 +1134,12 @@ export default function MangaDetail() {
 
   function goToLibrary(libraryId) {
     setShowNavDrawer(false);
-    navigate('/', { state: { library: libraryId } });
+    navigate('/library', { state: { library: libraryId } });
   }
 
   function goToList(listId) {
     setShowNavDrawer(false);
-    navigate('/', { state: { list: listId } });
+    navigate('/library', { state: { list: listId } });
   }
 
   async function handleOpenInfo() {
@@ -1177,7 +1177,7 @@ export default function MangaDetail() {
             <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
           </svg>
         </button>
-        <Link to="/" className="btn btn-ghost">← Library</Link>
+        <Link to="/library" className="btn btn-ghost">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
         <button

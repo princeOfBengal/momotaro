@@ -8,13 +8,41 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 
 | Path | Component | Description |
 | --- | --- | --- |
-| `/` | `Library` | Main manga grid |
+| `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Discover, Art Gallery, Top Manga per favourite genre) |
+| `/library` | `Library` | Main manga grid with search, sort, and the libraries / reading-lists sidebar |
 | `/manga/:mangaId` | `MangaDetail` | Manga info and chapter list |
 | `/read/:chapterId` | `Reader` | Full-screen reader |
 | `/settings` | `Settings` | App settings + AniList OAuth |
 | `/auth/anilist/callback` | `AnilistCallback` | OAuth redirect handler |
 
+**Back-link convention:** the `<Link to="/">` used as the navbar logo on every page always returns to Home. "← Back" / "← Library" buttons (on MangaDetail, Settings, Libraries) target `/library` so they return to the full browsable grid, not the ribbon landing page.
+
 ## Pages
+
+### Home (`src/pages/Home.jsx`)
+
+Landing page at `/`. Renders the shared [`AppSidebar`](../client/src/components/AppSidebar.jsx) on the left (libraries + reading lists, same component used by the Library page) and a stack of horizontal-scrolling **ribbons** on the right, fed by a single `GET /api/home` fetch (see [api.md § Home](./api.md#home)). Every ribbon is scoped to manga in libraries that are visible in the All Libraries view — hiding a library via `show_in_all = 0` hides it from Home everywhere too.
+
+Selecting a library or reading list in the sidebar navigates the user to `/library` with the filter pre-applied via React Router location state; on Library the same selections mutate in-place instead. The sidebar layout (`.library-layout` + `.library-sidebar` grid, mobile drawer behaviour, backdrop) is inherited from `Library.css`, which Home imports explicitly so both pages share the same CSS without duplication.
+
+**Ribbons** (in order; empty ribbons are omitted from the render):
+
+1. **Continue Reading** — manga with a `progress` row, newest `last_read_at` first. Each tile shows the cover, title, current-chapter label (respects `track_volumes`), and a thin progress bar along the bottom of the cover proportional to `completed_count / total_chapters`.
+2. **Discover New Series** — unread manga tagged with at least one of the reader's top 4 favourite genres (favourites computed exactly as on the Statistics page, but scoped to visible libraries only). Server returns the top ~30 candidates ranked by `(match_count DESC, score DESC NULLS LAST)`; the client picks a stable seeded-random 15-item slice and re-seeds on a user-chosen cadence (see *Discover refresh cadence* below). The ribbon header exposes a manual **Refresh** button that shuffles immediately without waiting for the next interval.
+3. **Art Gallery** — every page the user has bookmarked via the *Add to Art Gallery* button in the reader. Implemented as [components/ArtGalleryRibbon.jsx](../client/src/components/ArtGalleryRibbon.jsx) — a CSS keyframe animation auto-scrolls the track at a pace proportional to item count, with the track content duplicated so the keyframe can loop seamlessly at translateX(-50 %). The animation pauses on mouse hover, keyboard focus-within, and during touch drags; an `IntersectionObserver` also pauses it when the ribbon is off-screen so a background tab burns zero GPU cycles. `@media (prefers-reduced-motion: reduce)` disables the animation entirely and exposes a native scroll instead.
+4. **Top Manga in XXX** — one ribbon per favourite genre (up to 4). Each tile shows the cover, title, and AniList/MAL score in the corner. Ordered by `score DESC NULLS LAST`, so rated titles lead and unrated ones trail within the genre.
+
+**Discover refresh cadence** — the visible Discover slice is deterministic for a given seed (uses a Mulberry32 PRNG seeded from a 32-bit integer persisted to `localStorage`). On mount, Home checks `home_discover_last_refresh` against `home_discover_refresh_ms` (set in Settings → Homepage Settings, default 24 h). If the window has elapsed, a fresh seed is generated and the last-refresh stamp is updated. `Manual only` (interval = 0) disables automatic rotation entirely; the user can still press **Refresh** or tap **Reshuffle now** in Settings.
+
+**Component structure:**
+
+- [components/Ribbon.jsx](../client/src/components/Ribbon.jsx) — generic horizontal ribbon with a title, optional action slot, disabled-aware left/right scroll arrows, and a CSS `scroll-snap-type: x proximity` track. Native scroll drives touch momentum, trackpad swipe, and mouse wheel; the arrows are a mouse-user affordance and are hidden on `(hover: none)` and under 700 px via media query. Per-ribbon `contain: paint` means scrolling one ribbon never repaints another.
+- [components/ArtGalleryRibbon.jsx](../client/src/components/ArtGalleryRibbon.jsx) — the auto-rotating variant described above.
+- Tile markup is owned by Home.jsx (three variants: Continue-Reading tile with progress bar, generic MangaTile with score badge, gallery tile). All tiles reuse the `.ribbon-tile*` class family from [components/Ribbon.css](../client/src/components/Ribbon.css).
+
+**Empty state** — when Continue Reading, Discover, Art Gallery, and all four genre ribbons are empty (fresh install with no reading history), Home renders a "Welcome to Momotaro" empty state that links to `/library`. Individual empty ribbons are suppressed from the layout rather than rendered as dead sections.
+
+**PWA behaviour** — `/api/home` is registered under the `browse-data` StaleWhileRevalidate rule in the service worker (see *PWA caching strategy* below), so Home hydrates instantly from cache on every visit while a fresh response arrives in the background. The 30-second server-side cache absorbs the resulting burst of prefetches without extra DB load.
 
 ### Library (`src/pages/Library.jsx`)
 
@@ -73,6 +101,11 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 ### Settings (`src/pages/Settings.jsx`)
 
 - Accepts an optional `location.state.section` value on navigation to open a specific tab directly (e.g. the "Go to Library Management" button in the first-time setup state passes `{ section: 'libraries' }`)
+- **Statistics tab**: overview of the manga library. When more than one library exists, a row of pill buttons (**All Libraries** plus one per library) appears above the tiles — selecting a library re-fetches `GET /api/stats?library_id=N` so every tile and ranked list switches to that scope. With a single library the switcher is hidden. Contents:
+  - *Stat tiles* — Total Series, Total Chapters, Total Size, Total Genres, Estimated Read Time.
+  - *Popular Series* — top 10 by chapters read.
+  - *Popular Genres* — top 10 genres by number of series tagged with each (the library's genre inventory).
+  - *Favorite Genres* — top 10 genres weighted by **reading history**. Each completed chapter contributes one point to every genre tagged on that chapter's manga, so a reader who has finished 40 chapters of a 3-genre series adds 40 to each of those three genres. Empty-state copy prompts the user to read some chapters when no progress exists. The three ranked lists use a `repeat(auto-fit, minmax(300px, 1fr))` grid so wide screens get 3 columns, typical laptops get 2, and mobile collapses to 1.
 - **AniList tab**: enter client ID + secret, trigger OAuth flow; login state is per-device
 - **MyAnimeList tab**: enter Client ID (no login required); stored server-wide. Shows "Client ID configured" when set, with a *Remove Client ID* button to clear it
 - **Doujinshi.Info tab**: email + password login form; login state is server-wide (shared across all devices)
@@ -82,8 +115,9 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - **Bulk Optimize** — converts chapters to CBZ and standardises filenames
   - **Export Metadata** — calls `POST /api/libraries/:id/export-metadata`, which writes a `metadata.json` sidecar file into every manga folder that has third-party metadata. Titles where `metadata_source === 'local'` but a third-party link exists (`anilist_id` / `mal_id` / `doujinshi_id`) are re-fetched from the linked source and the resulting JSON overwrites any existing `metadata.json`. The status line reports the total exported plus a count of `exported_local` titles that had their file overwritten with freshly-fetched third-party data. Because the endpoint may issue many upstream requests for large libraries, the client's per-request timeout is raised to 10 minutes for this call only. The exported files use field names that the local metadata scanner already understands, so a database reset followed by a rescan will re-import the metadata automatically.
   - **Edit** / **Delete** — rename or remove the library
-- **Homepage Settings tab**: preferences that affect the main library page. Each entry is stored in the browser's `localStorage`, not on the server — per-device, not synced across browsers.
+- **Homepage Settings tab**: preferences that affect Home and the main library page. Each entry is stored in the browser's `localStorage`, not on the server — per-device, not synced across browsers.
   - *Default sort order* — picker with A–Z (title) / Recently Updated / Year / Rating (AniList / MyAnimeList). Backed by `localStorage.home_default_sort`; `Library.jsx` reads it on mount.
+  - *Discover refresh interval* — picker with Every 6 hours / Every 12 hours / Daily (default) / Weekly / Manual only. Backed by `localStorage.home_discover_refresh_ms` (value in ms, `0` = manual-only). `Home.jsx` reads it when deciding whether to re-seed the Discover shuffle. Also writes `home_discover_last_refresh` on change so lowering the cadence starts a fresh window immediately. A **Reshuffle now** button clears the stamp so Home picks a new seed on the next visit.
 - **Database tab**: maintenance operations for the server's database and on-disk cache:
   - *CBZ Cache* — displays the current cache size alongside the configured cap (e.g. `1.4 GB / 20.0 GB`). **Clear Cache** deletes every extracted chapter directory in `CBZ_CACHE_DIR` (pages are re-extracted on next access). Below the current-size row, an expanded block exposes:
     - *Maximum cache size* — numeric input in GB. Saved value is persisted as `cbz_cache_limit_bytes` in the `settings` table and applied live via `cbzCache.setLimitBytes()` — any chapters over the new cap are evicted immediately.
@@ -125,11 +159,17 @@ The "Momotaro" logo (`/logo.png`) appears in the navbar of every page as a `<Lin
 
 See [reader.md](./reader.md).
 
-### `Sidebar`
+### `AppSidebar`
 
-- Library list + reading list filter
-- Controlled via `SidebarContext` for mobile open/close
-- Hamburger button in Library header opens it on mobile
+Shared left-rail sidebar rendered by both Home and Library. Contents, top to bottom:
+
+- **Home** shortcut (always present) — `<Link to="/">` with a house icon.
+- **Libraries** — each configured library (with manga count) and, when there are ≥ 2, an **All Libraries** aggregate entry.
+- **Reading Lists** — every list with an inline `+` affordance to create a new one and `×` to delete non-default lists.
+
+Selection is driven by optional `onSelectAll` / `onSelectLibrary` / `onSelectList` props. Library passes in-place setState callbacks; Home omits them, which causes the sidebar to navigate to `/library` with the chosen filter in React Router location state. List creation and deletion are managed inside the component itself, with `onReadingListsChanged` letting the host refetch counts afterwards.
+
+Mobile behaviour is managed by the host via `drawerOpen` + `onCloseDrawer` props — the hamburger button on each page's navbar toggles `drawerOpen`, and the sidebar applies the slide-in transform when it's true. Styling uses the `.library-sidebar*` class family in [pages/Library.css](../client/src/pages/Library.css); Home imports that file explicitly so both pages share the exact same layout rules.
 
 ## API Client (`src/api/client.js`)
 
@@ -247,7 +287,7 @@ The service worker uses five named caches with different strategies matched in p
 | `page-images` | `/api/pages/:id/image` | CacheFirst | 5 000 | 1 year |
 | `thumbnails` | `/thumbnails/*` | CacheFirst | 2 000 | 1 year |
 | `chapter-pages-meta` | `/api/chapters/:id/pages` | CacheFirst | 1 000 | 30 days |
-| `browse-data` | `/api/(library\|libraries\|manga\|chapters\|reading-lists\|stats)` | StaleWhileRevalidate | 500 | 30 days |
+| `browse-data` | `/api/(library\|libraries\|manga\|chapters\|reading-lists\|stats\|home)` | StaleWhileRevalidate | 500 | 30 days |
 | `api-misc` | `/api/*` (catch-all) | NetworkFirst | 200 | 7 days |
 
 **Why each strategy:**

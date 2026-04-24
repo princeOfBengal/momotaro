@@ -262,10 +262,11 @@
   white-space: nowrap;
 }
 
-/* Two-column ranked lists */
+/* Ranked lists — auto-fit so we get 3 columns on wide screens,
+   2 columns on typical laptops, 1 column on mobile. */
 .stat-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 16px;
 }
 

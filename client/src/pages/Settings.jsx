@@ -821,15 +821,47 @@ const DEFAULT_SORT_OPTIONS = [
   { value: 'rating',  label: 'Rating (AniList / MyAnimeList)' },
 ];
 
+// Discover refresh cadence options. Value is milliseconds; 0 == manual-only.
+// Default is one day; values must match what resolveDiscoverSeed() in
+// Home.jsx reads out of localStorage.
+const DISCOVER_INTERVAL_OPTIONS = [
+  { value: String(6 * 60 * 60 * 1000),  label: 'Every 6 hours'  },
+  { value: String(12 * 60 * 60 * 1000), label: 'Every 12 hours' },
+  { value: String(24 * 60 * 60 * 1000), label: 'Daily (default)' },
+  { value: String(7 * 24 * 60 * 60 * 1000), label: 'Weekly' },
+  { value: '0', label: 'Manual only' },
+];
+const DEFAULT_DISCOVER_INTERVAL = String(24 * 60 * 60 * 1000);
+
 function HomepageSection() {
   const [defaultSort, setDefaultSort] = useState(() => {
     const saved = localStorage.getItem('home_default_sort');
     return DEFAULT_SORT_OPTIONS.some(o => o.value === saved) ? saved : 'title';
   });
+  const [discoverInterval, setDiscoverInterval] = useState(() => {
+    const saved = localStorage.getItem('home_discover_refresh_ms');
+    return DISCOVER_INTERVAL_OPTIONS.some(o => o.value === saved)
+      ? saved
+      : DEFAULT_DISCOVER_INTERVAL;
+  });
 
   useEffect(() => {
     localStorage.setItem('home_default_sort', defaultSort);
   }, [defaultSort]);
+
+  useEffect(() => {
+    localStorage.setItem('home_discover_refresh_ms', discoverInterval);
+    // When the user lowers the cadence, reset the last-refresh stamp so the
+    // new window starts now — otherwise they'd have to wait out the previous
+    // (longer) window before seeing a change.
+    localStorage.setItem('home_discover_last_refresh', String(Date.now()));
+  }, [discoverInterval]);
+
+  function handleResetDiscoverNow() {
+    localStorage.removeItem('home_discover_last_refresh');
+    localStorage.removeItem('home_discover_seed');
+    alert('Discover picks will reshuffle the next time you open Home.');
+  }
 
   return (
     <div>
@@ -837,12 +869,13 @@ function HomepageSection() {
         <div>
           <h2 className="sp-section-title">Homepage Settings</h2>
           <p className="sp-section-desc">
-            Controls for the main library page. These preferences are saved in this browser.
+            Controls for the Home page and the main library page.
+            These preferences are saved in this browser.
           </p>
         </div>
       </div>
 
-      <div className="settings-card">
+      <div className="settings-card" style={{ marginBottom: 16 }}>
         <div className="setting-group">
           <label className="setting-group-label">Default sort order</label>
           <p className="rs-setting-hint">
@@ -860,6 +893,37 @@ function HomepageSection() {
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <div className="setting-group">
+          <label className="setting-group-label">Discover refresh interval</label>
+          <p className="rs-setting-hint">
+            Controls how often the <strong>Discover New Series</strong> ribbon on Home
+            reshuffles its picks. The underlying candidate list is ranked by how many of
+            your favourite genres each manga matches; the visible slice rotates on this
+            cadence so the same titles don't stay on top forever.
+            A manual <em>Refresh</em> button is always available from Home.
+          </p>
+          <select
+            className="setting-select"
+            value={discoverInterval}
+            onChange={e => setDiscoverInterval(e.target.value)}
+            style={{ maxWidth: 320 }}
+          >
+            {DISCOVER_INTERVAL_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={handleResetDiscoverNow}
+            >
+              Reshuffle now
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1689,15 +1753,28 @@ const STAT_TILES = [
 ];
 
 function StatisticsSection() {
+  const [libraries, setLibraries] = useState(null);
+  // null = All Libraries; otherwise a numeric library ID.
+  const [selectedLib, setSelectedLib] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    api.getStats()
+    api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(false);
+    api.getStats(selectedLib)
       .then(data => { setStats(data); setLoading(false); })
       .catch(() => { setError(true); setLoading(false); });
-  }, []);
+  }, [selectedLib]);
+
+  // Show the switcher only when more than one library exists — with a single
+  // library the All / Lib-A distinction is redundant.
+  const showSwitcher = libraries && libraries.length > 1;
 
   return (
     <div>
@@ -1707,6 +1784,27 @@ function StatisticsSection() {
           <p className="sp-section-desc">An overview of your manga library.</p>
         </div>
       </div>
+
+      {showSwitcher && (
+        <div className="setting-options" style={{ flexWrap: 'wrap', marginBottom: 20 }}>
+          <button
+            className={`setting-btn${selectedLib === null ? ' active' : ''}`}
+            onClick={() => setSelectedLib(null)}
+          >
+            All Libraries
+          </button>
+          {libraries.map(lib => (
+            <button
+              key={lib.id}
+              className={`setting-btn${selectedLib === lib.id ? ' active' : ''}`}
+              onClick={() => setSelectedLib(lib.id)}
+              title={lib.path}
+            >
+              {lib.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading ? (
         <div className="loading-center"><div className="spinner" /></div>
@@ -1771,6 +1869,28 @@ function StatisticsSection() {
                   <span className="stat-list-count">{g.count}</span>
                 </div>
               ))}
+            </div>
+
+            {/* Favorite Genres — weighted by chapters read */}
+            <div className="stat-list-box">
+              <div className="stat-list-header">
+                <span className="stat-list-title">Favorite Genres</span>
+                <span className="stat-list-col-label">Chapters Read</span>
+              </div>
+              {stats.favorite_genres?.length ? (
+                stats.favorite_genres.map((g, i) => (
+                  <div key={g.genre} className="stat-list-item">
+                    <span className="stat-list-rank">{i + 1}</span>
+                    <span className={`stat-list-bar${i > 0 ? ' dim' : ''}`} />
+                    <span className="stat-list-name">{g.genre}</span>
+                    <span className="stat-list-count">{g.chapters_read}</span>
+                  </div>
+                ))
+              ) : (
+                <p className="stat-list-empty">
+                  Read some chapters to rank your favourite genres.
+                </p>
+              )}
             </div>
           </div>
         </>
@@ -1882,7 +2002,7 @@ export default function Settings() {
   return (
     <div className="sp-page">
       <nav className="navbar">
-        <Link to="/" className="btn btn-ghost">← Library</Link>
+        <Link to="/library" className="btn btn-ghost">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
       </nav>
 

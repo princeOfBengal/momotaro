@@ -580,27 +580,106 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 
 ---
 
+## Home
+
+`GET /api/home` — single aggregate endpoint powering the Home landing page. Everything is scoped to libraries visible in the **All Libraries** view (`libraries.show_in_all = 1`, or `manga.library_id IS NULL`) — a library hidden from All Libraries is invisible on Home too, across every ribbon.
+
+**Query parameters** (all optional, bounded server-side):
+
+| Param | Default | Max | Purpose |
+| --- | --- | --- | --- |
+| `continue_limit` | 15 | 50 | Rows in the Continue Reading ribbon |
+| `discover_limit` | 30 | 60 | Candidate rows in the Discover pool (client slices this to ~15 visible) |
+| `gallery_limit`  | 50 | 100 | Rows in the Art Gallery ribbon |
+| `ribbon_limit`   | 15 | 30 | Rows per "Top Manga in XXX" ribbon |
+
+**Response `data` shape:**
+
+```json
+{
+  "continue_reading": [
+    {
+      "id": 5, "title": "...", "cover_url": "/thumbnails/...",
+      "track_volumes": 0,
+      "current_chapter_id": 42,
+      "current_chapter": { "id": 42, "folder_name": "...", "number": 14, "volume": null },
+      "current_page": 5,
+      "total_chapters": 120,
+      "completed_count": 13,
+      "last_read_at": 1713900000
+    }
+  ],
+  "discover_candidates": [
+    { "id": 10, "title": "...", "cover_url": "...", "score": 8.5, "match_count": 3 }
+  ],
+  "art_gallery": [
+    {
+      "id": 12, "manga_id": 5, "manga_title": "...", "track_volumes": 0,
+      "chapter_id": 42, "chapter_folder_name": "Chapter 14",
+      "chapter_number": 14, "chapter_volume": null,
+      "page_id": 412, "page_index": 6,
+      "page_image_url": "/api/pages/412/image",
+      "created_at": 1713900000
+    }
+  ],
+  "favorite_genres_ribbons": [
+    { "genre": "Action", "manga": [{ "id": 1, "title": "...", "cover_url": "...", "score": 9.4 }] }
+  ]
+}
+```
+
+**Per-ribbon semantics:**
+
+- **`continue_reading`** — rows from `progress` sorted `last_read_at DESC`, joined to manga + current chapter. `total_chapters` is the count of chapter rows for the manga; the client uses `completed_count / total_chapters` to draw the progress bar. Filtered to visible libraries.
+- **`discover_candidates`** — top favorite genres are computed exactly as in `/api/stats` (reading-history weighted, visible libraries only) and truncated to 4. Every manga in a visible library that has **no progress row** (or an empty `completed_chapters`) is scored by how many distinct favorite genres it matches; the top N are returned in `(match_count DESC, score DESC NULLS LAST, id ASC)` order. The client then picks a stable seeded-random slice for the Discover ribbon (see *Discover refresh cadence* below).
+- **`art_gallery`** — `art_gallery` rows joined to `manga` + `chapters` + `pages`, newest first, visible libraries only. The pre-built `page_image_url` spares the client from hand-composing it.
+- **`favorite_genres_ribbons`** — up to 4 entries (one per top favorite genre). Each entry's `manga` list is every manga in a visible library tagged with that genre, ordered by `score DESC NULLS LAST, id ASC`. Genres with zero matching manga are omitted, so the returned array may be shorter than 4 on small libraries.
+
+**Caching:** 30-second in-memory TTL on the entire response. The service worker additionally caches `/api/home` under its `browse-data` StaleWhileRevalidate rule (30-day expiry), so the Home page hydrates instantly from cache on every visit while a fresh fetch is issued in the background.
+
+**Efficiency:** every query hits indexed columns (`progress.manga_id` PK, `manga_genres` PK, `manga(library_id)`, `chapters(manga_id)`, `art_gallery(manga_id)`). No `json_each` over unindexed columns; the `discover_candidates` query scans at most `manga × avg_genre_count` rows and stops at the LIMIT clause. Memory footprint is bounded by the cache + whatever `better-sqlite3` prepared-statement handles are retained — the row caps above ensure a single response fits in well under 100 KB for typical libraries.
+
+**Discover refresh cadence** — the **server** always returns the same deterministic top-N candidate pool (stable for a given library state). The *visible* 15-item slice is chosen by the **client** from a seeded shuffle of those candidates; the seed is persisted in `localStorage` and rotates on a user-chosen interval (default daily), so the same candidate pool produces different visible picks day-to-day without extra server load. See [frontend.md § Home](./frontend.md#home-srcpageshomejsx).
+
+---
+
 ## Statistics
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/stats` | Library statistics (cached 5 minutes) |
+| GET | `/api/stats` | Library statistics; optional `?library_id=N` scopes every aggregate to one library (cached 5 minutes per scope) |
+
+**Query parameters:**
+
+- `library_id` *(optional)* — positive integer. When omitted, every aggregate covers all manga regardless of `show_in_all`. When provided, every count, sum, ranking, and the read-time estimate is scoped to that library only. Unknown IDs return `404`; non-integer values return `400`.
 
 **Response `data` shape:**
+
 ```json
 {
+  "library_id": null,
   "total_manga": 42,
   "total_chapters": 1200,
   "total_pages": 28000,
   "total_size_bytes": 15032385536,
   "total_genres": 18,
   "estimated_read_time_minutes": 4200,
-  "top_genres": [{ "genre": "Action", "count": 15 }],
-  "top_manga": [{ "id": 1, "title": "...", "cover_url": "...", "chapters_read": 42 }]
+  "top_genres":      [{ "genre": "Action", "count": 15 }],
+  "favorite_genres": [{ "genre": "Action", "chapters_read": 140 }],
+  "top_manga":       [{ "id": 1, "title": "...", "cover_url": "...", "chapters_read": 42 }]
 }
 ```
 
-Genre aggregation and read-time estimation are computed entirely in SQL. `total_size_bytes` is a single `SUM(manga.bytes_on_disk)` over the cached per-manga column written by the scanner; it no longer walks the filesystem. See [scanner.md](./scanner.md#cached-disk-usage-columns).
+`library_id` echoes the scope of the response — `null` for All Libraries, or the numeric ID that was passed in.
+
+**`top_genres` vs `favorite_genres`:**
+
+- `top_genres` counts how many **series** are tagged with each genre (the library's genre inventory).
+- `favorite_genres` ranks genres by **reading history**. Every chapter the user has read contributes one point to each of that manga's genres, so a reader who has finished 40 chapters of a 3-genre series adds 40 to each of those three genres. Only manga with at least one completed chapter contribute. Titles with no metadata (and therefore no genres) are naturally excluded. Top 10 returned; ties break on genre name ascending.
+
+Genre aggregation and read-time estimation are computed entirely in SQL against the normalised `manga_genres` table, not by walking JSON blobs. `total_size_bytes` is a single `SUM(manga.bytes_on_disk)` over the cached per-manga column written by the scanner; it no longer walks the filesystem. See [scanner.md](./scanner.md#cached-disk-usage-columns).
+
+**Cache:** each scope has its own 5-minute cached entry (keyed by `library_id` or `__all__`). Switching between libraries does not invalidate previously-cached scopes.
 
 ---
 

@@ -144,7 +144,7 @@ export default function Libraries() {
   return (
     <div className="lp-page">
       <nav className="navbar">
-        <Link to="/" className="btn btn-ghost">← Library</Link>
+        <Link to="/library" className="btn btn-ghost">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
       </nav>
 

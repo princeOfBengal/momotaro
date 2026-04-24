@@ -21,7 +21,8 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 - Loads manga via `GET /api/library`
 - Sidebar filter by library or reading list
 - Search bar with 300 ms debounce — matches against title, **author/artist name** (partial), or genre. Comma-separated terms filter by all listed genres simultaneously.
-- Sort by: A–Z, recently updated, year
+- Sort by: A–Z, recently updated, year, **rating** (AniList/MAL `score`, descending; unrated manga sink to the bottom ordered alphabetically)
+- **Default sort** comes from `localStorage.home_default_sort` (set via Settings → Homepage Settings; valid values `title` \| `updated` \| `year` \| `rating`, defaults to `title`). Falls back to `title` if the stored value is missing or unrecognised. Changing the sort from the top bar does not update the persisted default — use Homepage Settings for that.
 - Scan button triggers `POST /api/scan`
 - Click manga card → navigate to `/manga/:id`
 - **Filter initialisation from navigation state** — on mount, `activeLibrary` and `activeList` are seeded from `location.state.library` and `location.state.list` (React Router state). This allows the MangaDetail nav drawer to navigate back to a specific library or reading list without URL parameters.
@@ -81,8 +82,13 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - **Bulk Optimize** — converts chapters to CBZ and standardises filenames
   - **Export Metadata** — calls `POST /api/libraries/:id/export-metadata`, which writes a `metadata.json` sidecar file into every manga folder that has third-party metadata. Titles where `metadata_source === 'local'` but a third-party link exists (`anilist_id` / `mal_id` / `doujinshi_id`) are re-fetched from the linked source and the resulting JSON overwrites any existing `metadata.json`. The status line reports the total exported plus a count of `exported_local` titles that had their file overwritten with freshly-fetched third-party data. Because the endpoint may issue many upstream requests for large libraries, the client's per-request timeout is raised to 10 minutes for this call only. The exported files use field names that the local metadata scanner already understands, so a database reset followed by a rescan will re-import the metadata automatically.
   - **Edit** / **Delete** — rename or remove the library
+- **Homepage Settings tab**: preferences that affect the main library page. Each entry is stored in the browser's `localStorage`, not on the server — per-device, not synced across browsers.
+  - *Default sort order* — picker with A–Z (title) / Recently Updated / Year / Rating (AniList / MyAnimeList). Backed by `localStorage.home_default_sort`; `Library.jsx` reads it on mount.
 - **Database tab**: maintenance operations for the server's database and on-disk cache:
-  - *CBZ Cache* — displays the current cache size; **Clear Cache** deletes all extracted pages from `CBZ_CACHE_DIR` (pages are re-extracted on next access)
+  - *CBZ Cache* — displays the current cache size alongside the configured cap (e.g. `1.4 GB / 20.0 GB`). **Clear Cache** deletes every extracted chapter directory in `CBZ_CACHE_DIR` (pages are re-extracted on next access). Below the current-size row, an expanded block exposes:
+    - *Maximum cache size* — numeric input in GB. Saved value is persisted as `cbz_cache_limit_bytes` in the `settings` table and applied live via `cbzCache.setLimitBytes()` — any chapters over the new cap are evicted immediately.
+    - *Auto-clear schedule* — segmented control (Off / Daily / Weekly). **Weekly** reveals a day-of-week `<select>`; both Daily and Weekly reveal a `<input type="time">`. Times are interpreted in server local time. When enabled, a "Next auto-clear: …" status line shows the concrete next fire. Save button fires `PUT /api/admin/cbz-cache-settings` and refreshes the displayed next-run timestamp.
+  - *Configuration Backup* — **Export** triggers a browser download of `momotaro-config-<iso-timestamp>.json` (by navigating to `api.exportConfigUrl()`). **Import** opens a hidden `<input type="file" accept="application/json">`, parses the JSON client-side (so malformed files fail fast), runs a destructive-action confirm dialog, then POSTs to `/api/admin/import-config`. The result is summarised inline as per-section insert counts (`N settings, N libraries, N manga, N lists, N memberships, N progress, N gallery`), and any warnings are listed in a collapsible `<details>` block. See [api.md § Configuration Backup](./api.md#configuration-backup) for the JSON format and behaviour.
   - *Regenerate Thumbnails* — **Regenerate All** fires `POST /api/admin/regenerate-thumbnails`; the job runs in the background and the UI shows a confirmation with the total manga count. For each manga, the AniList cover is restored if available, otherwise a new thumbnail is generated from the first page of the first chapter
   - *Compact Database* — **Compact Database** runs `POST /api/admin/vacuum-db` synchronously and displays the before/after file size
 - **System Logs tab**: shows the server's in-memory log buffer (most recent 2000 entries of `console.log` / `info` / `warn` / `error`). Each row renders the ISO timestamp, level tag (colour-coded: accent for info, amber for warn, red for error), and message in a monospace viewer. Two actions:
@@ -174,12 +180,16 @@ api.setThumbnailFromFile(mangaId, filename)   // POST set-thumbnail with { saved
 Admin / database methods:
 
 ```js
-api.getCbzCacheSize()        // GET cbz-cache-size → { size_bytes }
-api.clearCbzCache()          // POST clear-cbz-cache → { size_bytes: 0 }
-api.regenerateThumbnails()   // POST regenerate-thumbnails → { message, total }
-api.vacuumDb()               // POST vacuum-db → { size_before_bytes, size_after_bytes }
-api.getSystemLogs()          // GET admin/logs → { entries: [{ ts, level, message }], max }
-api.systemLogsExportUrl()    // returns the GET admin/logs/export URL (used as an <a>/download target)
+api.getCbzCacheSize()          // GET cbz-cache-size → { size_bytes, limit_bytes }
+api.clearCbzCache()            // POST clear-cbz-cache → { size_bytes: 0 }
+api.getCbzCacheSettings()      // GET cbz-cache-settings → { limit_bytes, autoclear_mode, autoclear_day, autoclear_time, next_run_at, ... }
+api.saveCbzCacheSettings(body) // PUT cbz-cache-settings → updated settings (any subset of { limit_bytes, autoclear_mode, autoclear_day, autoclear_time })
+api.exportConfigUrl()          // returns the GET admin/export-config URL (navigate the browser to trigger a download)
+api.importConfig(payload)      // POST admin/import-config → { counts, warnings, warnings_truncated, total_warnings } — 5-minute timeout
+api.regenerateThumbnails()     // POST regenerate-thumbnails → { message, total }
+api.vacuumDb()                 // POST vacuum-db → { size_before_bytes, size_after_bytes }
+api.getSystemLogs()            // GET admin/logs → { entries: [{ ts, level, message }], max }
+api.systemLogsExportUrl()      // returns the GET admin/logs/export URL (used as an <a>/download target)
 ```
 
 ## Context

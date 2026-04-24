@@ -90,7 +90,18 @@ The same logic applies to the reading-list manga endpoint (`GET /api/reading-lis
 `GET /api/library` is opt-in paginated. Omitting both parameters returns the full result set (unchanged legacy behavior). Supplying either parameter switches the response to the paginated shape.
 
 - `?limit=N` — max rows per page. Bounded to `[1, 500]`. Default 200 when only `cursor` is set.
-- `?cursor=<opaque>` — resume token from a previous response's `next_cursor`. Supported for `sort=title` (default) and `sort=updated` only. `sort=year` returns `400` when a cursor is supplied.
+- `?cursor=<opaque>` — resume token from a previous response's `next_cursor`. Supported for `sort=title` (default) and `sort=updated` only. `sort=year` and `sort=rating` return `400` when a cursor is supplied.
+
+### Sort modes (`?sort=`)
+
+| Value | Order |
+| --- | --- |
+| `title` *(default)* | `m.title ASC`, ID tiebreaker |
+| `updated` | `m.updated_at DESC`, ID tiebreaker |
+| `year` | `m.year DESC`, title tiebreaker |
+| `rating` | `m.score DESC NULLS LAST, m.title ASC` — manga not matched to AniList or MAL (score is `NULL`) sink to the bottom and sort alphabetically within that group |
+
+`sort=rating` is also accepted by `GET /api/reading-lists/:id/manga`.
 
 Paginated response shape:
 
@@ -505,6 +516,8 @@ The file uses the same field names recognised by the local metadata scanner (`ti
 
 **PUT** also accepts `mal_client_id` to save or clear the MyAnimeList Client ID. Passing an empty string clears it.
 
+> CBZ cache size and the auto-clear schedule are *not* read or written through `/api/settings` — they live under their own route pair, `GET`/`PUT /api/admin/cbz-cache-settings` (see [Admin → CBZ Cache Settings](#cbz-cache-settings)). They are still persisted into the underlying `settings` table (keys prefixed `cbz_cache_*`), so they travel with config exports and survive server restarts.
+
 ---
 
 ## AniList Auth (OAuth)
@@ -595,8 +608,12 @@ Genre aggregation and read-time estimation are computed entirely in SQL. `total_
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/admin/cbz-cache-size` | Legacy — report size of any leftover extract-to-disk cache. `limit_bytes` is always `0` since CBZs are now streamed on demand. |
-| POST | `/api/admin/clear-cbz-cache` | Delete all entries in `CBZ_CACHE_DIR`; returns new size (always 0). Kept for operator convenience — the cache is also wiped automatically on server startup. |
+| GET | `/api/admin/cbz-cache-size` | Current size and configured cap of the CBZ extract cache |
+| POST | `/api/admin/clear-cbz-cache` | Delete every extracted chapter directory in `CBZ_CACHE_DIR`; returns new size (always 0) |
+| GET | `/api/admin/cbz-cache-settings` | Get the cache size cap and auto-clear schedule |
+| PUT | `/api/admin/cbz-cache-settings` | Update the cache cap and/or auto-clear schedule (live — no restart needed) |
+| GET | `/api/admin/export-config` | Download the server's user-facing state as a single JSON file (see [Configuration Backup](#configuration-backup)) |
+| POST | `/api/admin/import-config` | Restore state from a config JSON payload |
 | POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
 | POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
 | GET | `/api/admin/logs` | Return the in-memory system log buffer as JSON |
@@ -605,16 +622,118 @@ Genre aggregation and read-time estimation are computed entirely in SQL. `total_
 **`GET /api/admin/cbz-cache-size` response `data` shape:**
 
 ```json
-{ "size_bytes": 0, "limit_bytes": 0 }
+{ "size_bytes": 1374389534, "limit_bytes": 21474836480 }
 ```
 
-`size_bytes` will usually be `0` — the server wipes any leftover cache directory on startup (see [scanner.md](./scanner.md#legacy-cache-cleanup)). It will only be non-zero if legacy cache entries were written after the most recent startup (which can't happen with the streaming reader) or if something outside Momotaro dropped files into the directory. `limit_bytes` is always `0` to signal that no ceiling is enforced.
+`size_bytes` is the total disk usage under `CBZ_CACHE_DIR`; `limit_bytes` is the active cap — user-configurable from Settings → Database → CBZ Cache. When `size_bytes` would exceed `limit_bytes`, least-recently-read chapter directories are evicted. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
 
 **`POST /api/admin/clear-cbz-cache` response `data` shape:**
 
 ```json
 { "size_bytes": 0 }
 ```
+
+### CBZ Cache Settings
+
+**`GET /api/admin/cbz-cache-settings` response `data` shape:**
+
+```json
+{
+  "limit_bytes":         21474836480,
+  "limit_default_bytes": 21474836480,
+  "limit_min_bytes":     104857600,
+  "limit_max_bytes":     10995116277760,
+  "autoclear_mode":      "off",
+  "autoclear_day":       0,
+  "autoclear_time":      "03:00",
+  "next_run_at":         null
+}
+```
+
+- `limit_bytes` — active cap. Persisted in the `settings` table as `cbz_cache_limit_bytes`.
+- `limit_default_bytes` / `limit_min_bytes` / `limit_max_bytes` — 20 GB / 100 MB / 10 TB respectively. The UI uses these to validate user input.
+- `autoclear_mode` — `'off'`, `'daily'`, or `'weekly'`.
+- `autoclear_day` — `0..6` with `0 = Sunday`. Ignored when `autoclear_mode !== 'weekly'`.
+- `autoclear_time` — `HH:MM` 24-hour, **server local time**.
+- `next_run_at` — ISO-8601 timestamp of the next scheduled wipe, or `null` when `autoclear_mode === 'off'`.
+
+**`PUT /api/admin/cbz-cache-settings`** body — every field is optional; only provided fields are updated. Returns the same shape as GET after applying changes.
+
+```json
+{
+  "limit_bytes":    10737418240,
+  "autoclear_mode": "weekly",
+  "autoclear_day":  0,
+  "autoclear_time": "03:00"
+}
+```
+
+On a successful update the server applies the new size cap immediately (evicting LRU chapters if the new cap is below the current total) and reschedules the auto-clear timer. No restart is required. Validation errors return `400` with a human-readable message; implemented in [server/src/routes/admin.js](../server/src/routes/admin.js) and scheduling in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cbzCacheSchedule.js).
+
+### Configuration Backup
+
+Intended for portable backups: export the server's user-facing state as a JSON file, then re-import it on a fresh install to restore everything. See also the UX write-up in [frontend.md § Settings](./frontend.md#settings-srcpagessettingsjsx).
+
+**`GET /api/admin/export-config`** — returns a single JSON file download. `Content-Disposition: attachment; filename="momotaro-config-<iso-timestamp>.json"`. Body shape:
+
+```json
+{
+  "version":     1,
+  "app":         "momotaro",
+  "exported_at": "2026-04-23T12:00:00.000Z",
+  "settings":                 { "anilist_client_id": "...", "...": "..." },
+  "device_anilist_sessions":  [ /* rows from device_anilist_sessions */ ],
+  "libraries":                [ { "name": "...", "path": "...", "show_in_all": 1 } ],
+  "manga_metadata":           [ /* per-manga metadata keyed by path */ ],
+  "reading_lists":            [ { "name": "...", "is_default": 0, "manga": [{"manga_path": "...", "added_at": 0}] } ],
+  "progress":                 [ /* progress rows, with chapter folder names instead of IDs */ ],
+  "art_gallery":              [ /* per-page bookmarks keyed by (manga_path, chapter_folder, page_index) */ ]
+}
+```
+
+Every reference to a manga uses `manga.path` (the UNIQUE column) rather than the auto-increment `manga.id`, so the payload remains valid across a fresh DB where IDs are re-assigned. Chapters inside each manga are referenced by `folder_name`; pages by `page_index`.
+
+**`POST /api/admin/import-config`** — accepts the payload produced by the export endpoint as its JSON body. The route validates (`app === 'momotaro'`, `version` within supported range) and then runs the whole restore inside a single `better-sqlite3` transaction so a mid-import error leaves the DB untouched.
+
+Request-body limit is raised to **64 MB** on the server (`express.json({ limit: '64mb' })`) to accommodate large libraries. The client layer raises its per-request timeout to 5 minutes for this call.
+
+**Behaviour per section:**
+
+| Section | Behaviour |
+| --- | --- |
+| `settings` | Upsert by key. Existing keys not in the import payload are left alone. |
+| `device_anilist_sessions` | Replaced wholesale. |
+| `libraries` | Upsert by `path` — name and `show_in_all` refresh, existing path is preserved. |
+| `manga_metadata` | UPDATE-only. The import never creates manga rows — the scanner is the authority on what manga exist. If a manga at the given `path` is not in the DB yet, a warning is emitted. |
+| `reading_lists` | Non-default lists are wiped and re-inserted; `reading_list_manga` is fully replaced. Built-in lists (Favorites, Want to Read) keep their row but their memberships are re-populated. |
+| `progress` | Upsert by `manga_id`. `current_chapter_folder` / `completed_chapter_folders` are remapped to chapter IDs in the target DB. Missing chapters are dropped silently from `completed_chapters`. |
+| `art_gallery` | Wiped and re-inserted. Entries whose `(manga_path, chapter_folder, page_index)` cannot be resolved are skipped. |
+
+**Live-effect hooks** — after the transaction commits, the CBZ cache `setLimitBytes()` is called with the restored `cbz_cache_limit_bytes`, and the auto-clear scheduler is rescheduled. Any settings that affect runtime state therefore take effect without a restart.
+
+**`POST /api/admin/import-config` response `data` shape:**
+
+```json
+{
+  "counts": {
+    "settings": 8,
+    "device_sessions": 1,
+    "libraries": 2,
+    "manga_metadata": 432,
+    "reading_lists": 3,
+    "reading_list_manga": 58,
+    "progress": 120,
+    "art_gallery": 14
+  },
+  "warnings": [
+    "manga_metadata: no manga at path /library/Old Title — run a scan first"
+  ],
+  "warnings_truncated": false,
+  "total_warnings": 1
+}
+```
+
+Warnings are capped at 50 entries per response (`warnings_truncated = true` when the full list is longer). The typical operator workflow is: mount the library at the same path as the export, wait for the startup scan to complete, then import.
 
 **`POST /api/admin/regenerate-thumbnails` response `data` shape:**
 

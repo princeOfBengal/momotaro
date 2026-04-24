@@ -10,7 +10,7 @@ const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('.
 const { fetchFromMAL, searchMAL, fetchByMALId } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
-const { loadCoverSource } = require('../scanner/thumbnailGenerator');
+const cbzCache = require('../scanner/cbzCache');
 const config = require('../config');
 
 const router = express.Router();
@@ -864,11 +864,12 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
     fs.copyFileSync(srcPath, activePath);
     console.log(`[Thumbnail] Set thumbnail for manga ${manga.id} from saved file ${safeName}`);
   } else {
-    // Generate from a page and save as a uniquely-named history file.
-    // For CBZ chapters, pages.path is the entry name inside the archive — not a
-    // filesystem path — so we stream the single entry out rather than extract.
+    // Generate from a page and save as a uniquely-named history file. CBZ
+    // pages are resolved through the extraction cache so we're always reading
+    // a plain on-disk image rather than reaching back into the archive.
     const page = db.prepare(`
-      SELECT p.path AS page_path, c.type AS chapter_type, c.path AS chapter_path
+      SELECT p.path AS page_path, p.page_index, c.id AS chapter_id,
+             c.type AS chapter_type, c.path AS chapter_path
       FROM pages p
       JOIN chapters c ON c.id = p.chapter_id
       WHERE p.id = ?
@@ -884,11 +885,11 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
 
     let input;
     try {
-      input = await loadCoverSource({
-        type:        page.chapter_type,
-        chapterPath: page.chapter_path,
-        entry:       page.page_path,
-      });
+      if (page.chapter_type === 'cbz') {
+        input = await cbzCache.getCbzPageFile(page.chapter_id, page.chapter_path, page.page_index);
+      } else {
+        input = page.page_path;
+      }
     } catch (err) {
       return res.status(404).json({ error: 'Image entry not found in archive' });
     }

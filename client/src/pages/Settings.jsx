@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import './Settings.css';
@@ -812,6 +812,60 @@ function MyAnimeListSection() {
   );
 }
 
+// ── Section: Homepage Settings ────────────────────────────────────────────────
+
+const DEFAULT_SORT_OPTIONS = [
+  { value: 'title',   label: 'A–Z (title)' },
+  { value: 'updated', label: 'Recently Updated' },
+  { value: 'year',    label: 'Year' },
+  { value: 'rating',  label: 'Rating (AniList / MyAnimeList)' },
+];
+
+function HomepageSection() {
+  const [defaultSort, setDefaultSort] = useState(() => {
+    const saved = localStorage.getItem('home_default_sort');
+    return DEFAULT_SORT_OPTIONS.some(o => o.value === saved) ? saved : 'title';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('home_default_sort', defaultSort);
+  }, [defaultSort]);
+
+  return (
+    <div>
+      <div className="sp-section-head">
+        <div>
+          <h2 className="sp-section-title">Homepage Settings</h2>
+          <p className="sp-section-desc">
+            Controls for the main library page. These preferences are saved in this browser.
+          </p>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <div className="setting-group">
+          <label className="setting-group-label">Default sort order</label>
+          <p className="rs-setting-hint">
+            How manga are ordered when you open a library, All Libraries, or a reading list.
+            You can still change the sort from the top bar at any time. Rating uses the score
+            from AniList or MyAnimeList; unrated titles are pushed to the bottom.
+          </p>
+          <select
+            className="setting-select"
+            value={defaultSort}
+            onChange={e => setDefaultSort(e.target.value)}
+            style={{ maxWidth: 320 }}
+          >
+            {DEFAULT_SORT_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Section: Reading Settings ─────────────────────────────────────────────────
 
 function ToggleRow({ label, desc, value, onChange }) {
@@ -1001,9 +1055,38 @@ function ReadingSection() {
 
 // ── Section: Database Management ─────────────────────────────────────────────
 
+const GB = 1024 * 1024 * 1024;
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function formatNextRun(iso) {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString(undefined, {
+      weekday: 'short',
+      month:   'short',
+      day:     'numeric',
+      hour:    '2-digit',
+      minute:  '2-digit',
+    });
+  } catch {
+    return null;
+  }
+}
+
 function DatabaseSection() {
   const [cacheSize, setCacheSize] = useState(null);   // bytes | null = loading
   const [clearing, setClearing] = useState(false);
+
+  // Cache settings (limit + auto-clear schedule)
+  const [cacheSettings, setCacheSettings] = useState(null);
+  const [limitGbInput, setLimitGbInput]   = useState('');
+  const [autoMode, setAutoMode]           = useState('off');
+  const [autoDay, setAutoDay]             = useState(0);
+  const [autoTime, setAutoTime]           = useState('03:00');
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsMsg, setSettingsMsg]     = useState(null); // { type, text }
 
   const [thumbStatus, setThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
   const [thumbTotal, setThumbTotal] = useState(null);
@@ -1011,10 +1094,25 @@ function DatabaseSection() {
   const [vacuumStatus, setVacuumStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
   const [vacuumResult, setVacuumResult] = useState(null); // { before, after }
 
+  const [importStatus, setImportStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
+  const [importResult, setImportResult] = useState(null);   // { counts, warnings, total_warnings }
+  const [importError, setImportError]   = useState(null);
+  const importFileRef = useRef(null);
+
   useEffect(() => {
     api.getCbzCacheSize()
       .then(d => setCacheSize(d.size_bytes))
       .catch(() => setCacheSize(0));
+
+    api.getCbzCacheSettings()
+      .then(d => {
+        setCacheSettings(d);
+        setLimitGbInput((d.limit_bytes / GB).toFixed(1).replace(/\.0$/, ''));
+        setAutoMode(d.autoclear_mode);
+        setAutoDay(d.autoclear_day);
+        setAutoTime(d.autoclear_time);
+      })
+      .catch(() => {});
   }, []);
 
   async function handleClearCache() {
@@ -1026,6 +1124,41 @@ function DatabaseSection() {
       alert('Failed to clear cache: ' + err.message);
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handleSaveCacheSettings() {
+    setSettingsMsg(null);
+
+    const gb = Number(limitGbInput);
+    if (!Number.isFinite(gb) || gb < 0.1) {
+      setSettingsMsg({ type: 'error', text: 'Cache size must be at least 0.1 GB (100 MB).' });
+      return;
+    }
+
+    const limitBytes = Math.floor(gb * GB);
+
+    setSavingSettings(true);
+    try {
+      const updated = await api.saveCbzCacheSettings({
+        limit_bytes:    limitBytes,
+        autoclear_mode: autoMode,
+        autoclear_day:  autoDay,
+        autoclear_time: autoTime,
+      });
+      setCacheSettings(updated);
+      // Re-sync the input in case the server canonicalized anything.
+      setLimitGbInput((updated.limit_bytes / GB).toFixed(1).replace(/\.0$/, ''));
+      setAutoMode(updated.autoclear_mode);
+      setAutoDay(updated.autoclear_day);
+      setAutoTime(updated.autoclear_time);
+      // Current cache may have been trimmed if the new cap is lower.
+      api.getCbzCacheSize().then(d => setCacheSize(d.size_bytes)).catch(() => {});
+      setSettingsMsg({ type: 'success', text: 'Cache settings saved.' });
+    } catch (err) {
+      setSettingsMsg({ type: 'error', text: 'Failed to save: ' + err.message });
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -1060,6 +1193,73 @@ function DatabaseSection() {
     return mb < 0.1 ? '<0.1 MB' : `${mb.toFixed(1)} MB`;
   }
 
+  function handleExportConfig() {
+    // Straight browser download — the server emits a Content-Disposition
+    // header so the filename is momotaro-config-<timestamp>.json.
+    window.location.href = api.exportConfigUrl();
+  }
+
+  function triggerImportPicker() {
+    setImportError(null);
+    setImportResult(null);
+    importFileRef.current?.click();
+  }
+
+  async function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    // Clear the input so the same file can be re-selected after an error.
+    e.target.value = '';
+    if (!file) return;
+
+    let payload;
+    try {
+      const text = await file.text();
+      payload = JSON.parse(text);
+    } catch (err) {
+      setImportError('Could not parse JSON: ' + err.message);
+      setImportStatus('error');
+      return;
+    }
+
+    if (payload?.app !== 'momotaro') {
+      setImportError('File is not a Momotaro config export.');
+      setImportStatus('error');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Import this configuration?\n\n' +
+      'This will overwrite settings, API keys, reading lists, reading progress, ' +
+      'and saved art gallery entries in the current database. ' +
+      'Manga metadata (AniList/MAL links, etc.) will be reapplied where the ' +
+      'scanner has already indexed the matching manga.\n\n' +
+      'This cannot be undone.'
+    );
+    if (!confirmed) return;
+
+    setImportStatus('loading');
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const result = await api.importConfig(payload);
+      setImportResult(result);
+      setImportStatus('done');
+      // Refresh the CBZ cache stats + settings since they may have been
+      // overwritten by the import.
+      api.getCbzCacheSize().then(d => setCacheSize(d.size_bytes)).catch(() => {});
+      api.getCbzCacheSettings().then(d => {
+        setCacheSettings(d);
+        setLimitGbInput((d.limit_bytes / GB).toFixed(1).replace(/\.0$/, ''));
+        setAutoMode(d.autoclear_mode);
+        setAutoDay(d.autoclear_day);
+        setAutoTime(d.autoclear_time);
+      }).catch(() => {});
+    } catch (err) {
+      setImportError(err.message);
+      setImportStatus('error');
+    }
+  }
+
   return (
     <div>
       <div className="sp-section-head">
@@ -1083,6 +1283,9 @@ function DatabaseSection() {
             </p>
             <p className="db-op-status">
               Current size: <strong>{fmtMB(cacheSize)}</strong>
+              {cacheSettings && (
+                <> &nbsp;/&nbsp; Limit: <strong>{(cacheSettings.limit_bytes / GB).toFixed(1)} GB</strong></>
+              )}
             </p>
           </div>
           <button
@@ -1094,6 +1297,109 @@ function DatabaseSection() {
             {clearing ? 'Clearing…' : 'Clear Cache'}
           </button>
         </div>
+
+        {/* Cache limit + auto-clear schedule */}
+        {cacheSettings && (
+          <>
+            <div className="rs-divider" style={{ margin: '16px 0' }} />
+
+            <div className="setting-group">
+              <label className="setting-group-label">Maximum cache size</label>
+              <p className="rs-setting-hint">
+                When the cache exceeds this size, least-recently-read chapters are evicted first.
+                Minimum 0.1 GB. Default is 20 GB.
+              </p>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 280 }}>
+                <input
+                  type="number"
+                  className="settings-input"
+                  min="0.1"
+                  step="0.1"
+                  value={limitGbInput}
+                  onChange={e => setLimitGbInput(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>GB</span>
+              </div>
+            </div>
+
+            <div className="rs-divider" style={{ margin: '16px 0' }} />
+
+            <div className="setting-group">
+              <label className="setting-group-label">Auto-clear schedule</label>
+              <p className="rs-setting-hint">
+                Wipe the cache automatically on a schedule. Clearing removes every extracted
+                chapter — pages are re-extracted on next read.
+              </p>
+              <div className="setting-options">
+                {[
+                  { value: 'off',    label: 'Off'    },
+                  { value: 'daily',  label: 'Daily'  },
+                  { value: 'weekly', label: 'Weekly' },
+                ].map(({ value, label }) => (
+                  <button
+                    key={value}
+                    className={`setting-btn${autoMode === value ? ' active' : ''}`}
+                    onClick={() => setAutoMode(value)}
+                  >{label}</button>
+                ))}
+              </div>
+            </div>
+
+            {autoMode === 'weekly' && (
+              <div className="setting-group" style={{ marginTop: 12 }}>
+                <label className="setting-group-label">Day of week</label>
+                <select
+                  className="setting-select"
+                  value={autoDay}
+                  onChange={e => setAutoDay(parseInt(e.target.value, 10))}
+                >
+                  {DAY_NAMES.map((name, i) => (
+                    <option key={i} value={i}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {autoMode !== 'off' && (
+              <div className="setting-group" style={{ marginTop: 12 }}>
+                <label className="setting-group-label">Time of day (server local)</label>
+                <input
+                  type="time"
+                  className="settings-input"
+                  value={autoTime}
+                  onChange={e => setAutoTime(e.target.value)}
+                  style={{ maxWidth: 160 }}
+                />
+              </div>
+            )}
+
+            {autoMode !== 'off' && cacheSettings.next_run_at && (
+              <p className="db-op-status" style={{ marginTop: 12 }}>
+                Next auto-clear: <strong>{formatNextRun(cacheSettings.next_run_at) || cacheSettings.next_run_at}</strong>
+              </p>
+            )}
+
+            {settingsMsg && (
+              <p
+                className={`db-op-status ${settingsMsg.type === 'success' ? 'db-op-status-ok' : 'db-op-status-err'}`}
+                style={{ marginTop: 12 }}
+              >
+                {settingsMsg.text}
+              </p>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleSaveCacheSettings}
+                disabled={savingSettings}
+              >
+                {savingSettings ? 'Saving…' : 'Save Cache Settings'}
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Regenerate Thumbnails */}
@@ -1124,6 +1430,73 @@ function DatabaseSection() {
           >
             {thumbStatus === 'loading' ? 'Starting…' : 'Regenerate All'}
           </button>
+        </div>
+      </div>
+
+      {/* Configuration Backup */}
+      <div className="settings-card" style={{ marginBottom: 16 }}>
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">Configuration Backup</p>
+            <p className="db-op-desc">
+              Download a single JSON file containing your API keys, libraries, reading lists,
+              reading progress and history, saved art gallery entries, applied manga metadata
+              (AniList / MAL / Doujinshi links), and cache settings. Import the file on a fresh
+              install to restore your setup without needing to re-pull metadata or re-save
+              progress. For a full restore, mount the same library folder paths before importing.
+            </p>
+            {importStatus === 'done' && importResult && (
+              <p className="db-op-status db-op-status-ok">
+                Imported:{' '}
+                {importResult.counts.settings} settings,{' '}
+                {importResult.counts.libraries} libraries,{' '}
+                {importResult.counts.manga_metadata} manga,{' '}
+                {importResult.counts.reading_lists} lists,{' '}
+                {importResult.counts.reading_list_manga} memberships,{' '}
+                {importResult.counts.progress} progress,{' '}
+                {importResult.counts.art_gallery} gallery.
+                {importResult.total_warnings > 0 && (
+                  <> &nbsp;({importResult.total_warnings} warning{importResult.total_warnings === 1 ? '' : 's'})</>
+                )}
+              </p>
+            )}
+            {importStatus === 'error' && importError && (
+              <p className="db-op-status db-op-status-err">Import failed: {importError}</p>
+            )}
+            {importResult?.warnings?.length > 0 && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                  Show warnings ({importResult.warnings.length}
+                  {importResult.warnings_truncated ? ` of ${importResult.total_warnings}` : ''})
+                </summary>
+                <ul style={{ fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 0 20px' }}>
+                  {importResult.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>
+              </details>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignSelf: 'flex-start' }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={handleExportConfig}
+            >
+              Export
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={triggerImportPicker}
+              disabled={importStatus === 'loading'}
+            >
+              {importStatus === 'loading' ? 'Importing…' : 'Import'}
+            </button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              onChange={handleImportFile}
+            />
+          </div>
         </div>
       </div>
 
@@ -1450,6 +1823,15 @@ const SECTIONS = [
     ),
   },
   {
+    id: 'homepage',
+    label: 'Homepage Settings',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 20 20" fill="currentColor">
+        <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z" />
+      </svg>
+    ),
+  },
+  {
     id: 'reading',
     label: 'Reading Settings',
     icon: (
@@ -1524,6 +1906,7 @@ export default function Settings() {
           {section === 'anilist'     && <AnilistSection />}
           {section === 'myanimelist' && <MyAnimeListSection />}
           {section === 'doujinshi'   && <DoujinshiSection />}
+          {section === 'homepage'    && <HomepageSection />}
           {section === 'reading'     && <ReadingSection />}
           {section === 'libraries'   && <LibrariesSection />}
           {section === 'database'    && <DatabaseSection />}

@@ -110,7 +110,7 @@ One row per manga (UNIQUE on `manga_id`).
 | `updated_at` | INTEGER | Unix timestamp |
 
 ### `settings`
-Key-value store for server-wide configuration (not per-device state).
+Key-value store for server-wide configuration (not per-device state). Every row is included in `GET /api/admin/export-config` and restored on import.
 
 | Key | Value Description |
 |---|---|
@@ -118,6 +118,11 @@ Key-value store for server-wide configuration (not per-device state).
 | `anilist_client_secret` | AniList OAuth app client secret |
 | `doujinshi_token` | Doujinshi.info JWT access token (15-minute expiry) |
 | `doujinshi_refresh_token` | Doujinshi.info refresh token for obtaining new access tokens |
+| `mal_client_id` | MyAnimeList API Client ID (`X-MAL-CLIENT-ID` header; no OAuth) |
+| `cbz_cache_limit_bytes` | CBZ extract-cache size cap, bytes. Bounded to `[100 MB, 10 TB]`; default 20 GB when missing. Applied live via `cbzCache.setLimitBytes()` when changed through the admin API. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
+| `cbz_cache_autoclear_mode` | `off` \| `daily` \| `weekly`. Drives the auto-clear scheduler. |
+| `cbz_cache_autoclear_day` | `0..6` (0 = Sunday). Day-of-week when `cbz_cache_autoclear_mode = 'weekly'`. Ignored otherwise. |
+| `cbz_cache_autoclear_time` | `HH:MM` 24-hour, server local time. Time-of-day for the scheduled wipe. |
 
 ### `device_anilist_sessions`
 Per-device AniList login state. Keyed by a UUID generated in the browser (`localStorage` key `momotaro_device_id`) and sent as the `X-Device-ID` request header.

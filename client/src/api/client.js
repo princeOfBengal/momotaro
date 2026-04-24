@@ -207,8 +207,21 @@ export const api = {
   // Admin / Database Management
   getCbzCacheSize: () => apiFetch('/api/admin/cbz-cache-size'),
   clearCbzCache: () => apiFetch('/api/admin/clear-cbz-cache', { method: 'POST' }),
+  getCbzCacheSettings: () => apiFetch('/api/admin/cbz-cache-settings'),
+  saveCbzCacheSettings: (body) =>
+    apiFetch('/api/admin/cbz-cache-settings', { method: 'PUT', body: JSON.stringify(body) }),
   regenerateThumbnails: () => apiFetch('/api/admin/regenerate-thumbnails', { method: 'POST' }),
   vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
+
+  // Config backup (export/import)
+  exportConfigUrl: () => `${BASE}/api/admin/export-config`,
+  importConfig: (payload) =>
+    apiFetch('/api/admin/import-config', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      // Import can touch every row in the DB; allow up to 5 minutes.
+      timeoutMs: 300_000,
+    }),
 
   // System Logs
   getSystemLogs: () => apiFetch('/api/admin/logs'),

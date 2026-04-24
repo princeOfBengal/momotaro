@@ -11,7 +11,10 @@ export default function Library() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
-  const [sort, setSort] = useState('title');
+  const [sort, setSort] = useState(() => {
+    const saved = localStorage.getItem('home_default_sort');
+    return ['title', 'updated', 'year', 'rating'].includes(saved) ? saved : 'title';
+  });
   const [scanning, setScanning] = useState(false);
 
   // Libraries
@@ -155,6 +158,7 @@ export default function Library() {
           <option value="title">A–Z</option>
           <option value="updated">Recently Updated</option>
           <option value="year">Year</option>
+          <option value="rating">Rating</option>
         </select>
         <button className="btn btn-ghost lib-desktop-only" onClick={handleScan} disabled={scanning}>
           {scanning ? 'Scanning...' : 'Scan Library'}
@@ -170,6 +174,7 @@ export default function Library() {
           <option value="title">A–Z</option>
           <option value="updated">Recently Updated</option>
           <option value="year">Year</option>
+          <option value="rating">Rating</option>
         </select>
         <button className="btn btn-ghost btn-sm" onClick={handleScan} disabled={scanning}>
           {scanning ? 'Scanning…' : 'Scan'}

@@ -10,6 +10,8 @@ const config = require('./config');
 const { getDb } = require('./db/database');
 const { runFullScan } = require('./scanner/libraryScanner');
 const { migrateToSharded } = require('./scanner/thumbnailPaths');
+const cbzCache = require('./scanner/cbzCache');
+const cbzCacheSchedule = require('./scanner/cbzCacheSchedule');
 const { startWatcher } = require('./watcher');
 const { errorHandler } = require('./middleware/errorHandler');
 
@@ -22,6 +24,7 @@ const metadataRoutes = require('./routes/metadata');
 const optimizeRoutes = require('./routes/optimize');
 const adminRoutes = require('./routes/admin');
 const galleryRoutes = require('./routes/gallery');
+const configRoutes = require('./routes/config');
 
 const app = express();
 
@@ -37,7 +40,9 @@ app.use(compression({
     return compression.filter(req, res);
   },
 }));
-app.use(express.json());
+// Most endpoints send small payloads, but the config-import route accepts a
+// full state dump that can reach several MB for large libraries.
+app.use(express.json({ limit: '64mb' }));
 
 // Serve generated thumbnails
 fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
@@ -53,6 +58,7 @@ app.use('/api', metadataRoutes);
 app.use('/api', optimizeRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', galleryRoutes);
+app.use('/api', configRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
@@ -84,20 +90,22 @@ app.use(errorHandler);
 
 async function start() {
   fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
-  // Streaming reads from CBZ files replaced the extract-to-disk cache. If an
-  // old cache directory is lying around from a previous install, wipe it on
-  // startup — it can easily be multi-GB and is now dead weight.
-  try {
-    const entries = fs.readdirSync(config.CBZ_CACHE_DIR, { withFileTypes: true });
-    for (const e of entries) {
-      try {
-        fs.rmSync(path.join(config.CBZ_CACHE_DIR, e.name), { recursive: true, force: true });
-      } catch { /* ignore */ }
-    }
-    if (entries.length > 0) {
-      console.log(`[Server] Cleared ${entries.length} legacy CBZ cache ${entries.length === 1 ? 'entry' : 'entries'}.`);
-    }
-  } catch { /* dir doesn't exist — fine */ }
+
+  // Initialize database first so cache init can read the user-configured
+  // cache cap from the settings table.
+  const db = getDb();
+  const savedLimitRow = db.prepare(
+    "SELECT value FROM settings WHERE key = 'cbz_cache_limit_bytes'"
+  ).pluck().get();
+  const savedLimit = savedLimitRow ? parseInt(savedLimitRow, 10) : NaN;
+
+  // Rebuild the CBZ extraction-cache index from whatever is on disk. Warm
+  // cache from the previous run is preserved; anything over the configured
+  // cap is evicted immediately.
+  cbzCache.init(Number.isFinite(savedLimit) && savedLimit > 0 ? savedLimit : undefined);
+
+  // Start the cache auto-clear scheduler (no-op if mode is 'off').
+  cbzCacheSchedule.reschedule();
 
   // One-time migration: relocate any flat thumbnails into shard subdirs.
   // No-op once the tree is fully sharded.
@@ -116,9 +124,6 @@ async function start() {
   }
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
-
-  // Initialize database (runs migrations)
-  const db = getDb();
 
   server = app.listen(config.PORT, '0.0.0.0', () => {
     console.log(`[Server] Momotaro running on port ${config.PORT}`);

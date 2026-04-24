@@ -59,8 +59,32 @@ cd client && npm install && npm run dev
 ## Docker (Production)
 
 ```bash
-docker compose up --build
-# UI available at http://localhost:8080
+docker compose up -d --build
+# UI + API on http://localhost:3000
+```
+
+### Data persistence
+
+The compose file bind-mounts two host directories into the container:
+
+| Host path | Container path | Contents |
+| --- | --- | --- |
+| `./library` | `/app/library` (read-only) | Your manga folders / CBZ files |
+| `./data` | `/app/data` | SQLite DB, thumbnails, CBZ extract cache |
+
+Because `./data` is a host bind mount (not a Docker-managed named volume), **all server state survives** `docker compose stop`, `docker compose down`, `docker compose down -v`, `docker compose up --build`, image pulls, and host reboots. The SQLite database at `./data/momotaro.db` holds every piece of state the server cares about: configured libraries, reading lists, reading progress, metadata tagging, per-device AniList sessions, Doujinshi.info tokens, and AniList/MAL client credentials.
+
+**To back up the server**, copy the `./data` directory while the container is stopped (or while it's running — SQLite WAL is safe to copy live, but stopping first is simpler).
+
+**To migrate to another host**, copy both `./data` and `./library` to the new host alongside `docker-compose.yml`, then `docker compose up -d --build`.
+
+**If you previously used the old named-volume setup** (`momotaro_data`) and have data in it you want to keep, copy it out once before switching:
+
+```bash
+docker run --rm -v momotaro_data:/from -v "$(pwd)/data":/to alpine \
+  sh -c "cp -a /from/. /to/"
+# then, optional cleanup of the now-unused named volume:
+docker volume rm momotaro_data
 ```
 
 ## Environment Variables
@@ -71,7 +95,7 @@ docker compose up --build
 | `DATA_PATH` | `./data` | Where DB and thumbnails are stored |
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
-| `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Legacy — CBZs are now streamed from disk. Any contents of this directory are wiped on startup. |
+| `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Per-chapter extract cache for CBZ archives. Size cap and scheduled auto-clear are runtime-configurable from Settings → Database (persisted in the `settings` table). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
 | `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts |
 | `METADATA_FETCH_ENABLED` | `true` | Auto-fetch AniList metadata on scan |
 | `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |

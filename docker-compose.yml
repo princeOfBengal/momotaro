@@ -4,8 +4,16 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./library:/app/library:ro   # Point to your manga folder
-      - momotaro_data:/app/data     # Database, thumbnails, CBZ cache
+      # Your manga library (read-only). Change the left side to wherever
+      # your manga lives.
+      - ./library:/app/library:ro
+      # Persistent app state: SQLite DB (libraries, reading lists, progress,
+      # API keys, AniList/MAL/Doujinshi tokens), thumbnails, and CBZ cache.
+      # This is a host bind mount — the data lives in ./data on the host, so
+      # it survives `docker compose down`, `docker compose down -v`, image
+      # rebuilds, Docker Desktop resets, and host reboots. Back this folder
+      # up to back up the whole server.
+      - ./data:/app/data
     environment:
       - SCAN_ON_STARTUP=true
       - METADATA_FETCH_ENABLED=true
@@ -17,6 +25,3 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
-
-volumes:
-  momotaro_data:

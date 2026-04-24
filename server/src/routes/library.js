@@ -194,7 +194,15 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
     params.push(...p);
   }
 
-  const orderMap = { title: 'm.title ASC', updated: 'm.updated_at DESC', year: 'm.year DESC', added: 'rlm.added_at DESC' };
+  const orderMap = {
+    title:   'm.title ASC',
+    updated: 'm.updated_at DESC',
+    year:    'm.year DESC',
+    added:   'rlm.added_at DESC',
+    // Rating sort: manga missing a score (not matched to AniList or MAL) are
+    // pushed to the bottom; ties break on title so the order is stable.
+    rating:  'm.score DESC NULLS LAST, m.title ASC',
+  };
   query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}`;
 
   const manga = db.prepare(query).all(...params);
@@ -321,7 +329,12 @@ router.get('/library', asyncWrapper(async (req, res) => {
     // Include m.id as a tiebreaker so the cursor is deterministic across ties
     query += ` ORDER BY ${keysetSort.column} ${keysetSort.direction}, m.id ${keysetSort.direction}`;
   } else {
-    const orderMap = { year: 'm.year DESC' };
+    const orderMap = {
+      year:   'm.year DESC',
+      // Rating: highest score first, with unrated manga (no AniList/MAL match)
+      // falling to the bottom via NULLS LAST.
+      rating: 'm.score DESC NULLS LAST, m.title ASC',
+    };
     query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}, m.id ASC`;
   }
 

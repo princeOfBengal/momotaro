@@ -33,7 +33,7 @@ library/
 ## Supported Formats
 
 - **Folder chapters**: directories containing image files
-- **CBZ/ZIP archives**: read with streaming `yauzl` — never extracted to disk
+- **CBZ/ZIP archives**: scanned via streaming `yauzl` (central-directory read only); served via a bounded on-disk extraction cache with a user-configurable cap (default 20 GB) and an optional daily/weekly auto-clear schedule (see [CBZ Serve Cache](#cbz-serve-cache))
 - **Images**: `.jpg`, `.jpeg`, `.png`, `.webp`, `.avif`, `.gif`
 
 ## Incremental Scanning
@@ -170,12 +170,12 @@ Before matching, the parser:
 | `v01` | 1 | null |
 | `c01` | null | 1 |
 
-## CBZ Streaming
+## CBZ Reads
 
-CBZ files are read via `yauzl` in two modes and are **never extracted to disk**:
+CBZ files are read via `yauzl` in two modes:
 
 1. **At scan time** — `listCbzEntries(cbzPath)` opens the archive, walks the central directory, and returns one entry per image file inside. No compressed data is read, no file is written. For a 100 MB CBZ this is a handful of KB of disk I/O.
-2. **At serve time** — `openCbzEntryStream(cbzPath, entryName)` opens the archive, locates the requested entry, and resolves with a `Readable` stream that decompresses only that one entry. The stream is piped straight through to the HTTP response in [server/src/routes/pages.js](../server/src/routes/pages.js).
+2. **At serve time** — requested entries are extracted to a bounded on-disk cache on first hit (see [CBZ Serve Cache](#cbz-serve-cache) below) and sent via `res.sendFile` on subsequent hits. Dimension fetching for the reader's double-page detection still uses `openCbzEntryStream` (streams without extracting).
 
 ### Central-Directory Cache
 
@@ -199,20 +199,62 @@ For CBZ chapters, the `pages.path` column stores the **ZIP entry name** (e.g. `0
 
 Natural sort is applied to entry names during scanning, so `pages.page_index` matches the reader's expected order regardless of how the archive was authored.
 
-### Why streaming instead of extraction
+## CBZ Serve Cache
 
-The previous implementation extracted every opened CBZ to `CBZ_CACHE_DIR/<chapterId>/` and enforced a 20 GB LRU ceiling on the cache. At 8 TB library scale this has two problems:
+Opening a CBZ chapter extracts the entire archive into a dedicated folder under `CBZ_CACHE_DIR`. The reader then behaves exactly like a folder chapter — every page request is a plain `res.sendFile` from disk. Extracting the whole chapter in one pass (instead of streaming entries on demand) eliminated two classes of bug at once: concurrent `openReadStream` calls cross-contaminating between archives, and subdirectory-prefixed entry names sorting in an order that didn't match the reader's expected page order.
 
-- Most chapters the user never opens would still be fine in the cache, but the first-read latency (extract-all vs stream-one) is roughly `(total pages × page size) / (one page × compressed size)`, usually 20–100× worse.
-- The extract-to-disk path doubled the disk-write load during bulk reading — each opened chapter wrote ~30–100 MB before serving the first page.
+Implementation lives in [server/src/scanner/cbzCache.js](../server/src/scanner/cbzCache.js).
 
-Streaming serves a page with one seek-per-archive plus decompressing a single entry (the OS page cache keeps hot CBZs in RAM). There is no on-disk cache to manage.
+**Layout:**
 
-### Legacy cache cleanup
+```text
+CBZ_CACHE_DIR/
+└── <chapterId>_<mtimeFloor>/    (one folder per extracted chapter)
+    ├── 0001.jpg                 (sequential filenames — basename natural-sort
+    ├── 0002.jpg                  of the original entry names gives the order)
+    ├── ...
+    └── .ready                   (sentinel file written last)
+```
 
-Any `CBZ_CACHE_DIR` contents left over from a previous install are wiped on server startup in [server/src/index.js](../server/src/index.js). A log line reports the number of legacy entries removed. The directory itself is not recreated — subsequent runs detect it as missing and skip the cleanup.
+Folding the CBZ's floor-seconds mtime into the directory name is the staleness guard — rewriting an archive bumps its mtime, so the new version resolves to a fresh directory and the old one can never be served. Old mtime directories for the same `chapterId` are cleaned up on the next extraction, and anything left over is LRU-evicted eventually.
 
-The admin endpoints `GET /api/admin/cbz-cache-size` and `POST /api/admin/clear-cbz-cache` remain available for operator convenience; `limit_bytes` in the size response is always `0` now, signalling that no ceiling is enforced.
+Extracted files are renamed to `NNNN.<ext>` (zero-padded count of image entries) so directory listings natural-sort into exact page order regardless of the archive's internal naming. The original basename is preserved separately on the `pages.filename` column for display.
+
+**Chapter-open flow** (`GET /api/chapters/:id/pages` in [server/src/routes/pages.js](../server/src/routes/pages.js)):
+
+1. `cbzCache.ensureChapterExtracted(chapterId, cbzPath)` — cache hit returns the existing directory; cache miss extracts every image entry in one pass, deduped via an `inFlight` map so parallel requests share a single extraction.
+2. On a fresh extraction (or when existing DB rows don't match the directory contents), `pages` rows for the chapter are rebuilt: `DELETE FROM pages WHERE chapter_id = ?` followed by inserts in natural-sort order, with `pages.path` set to the cache filename and page dimensions filled in from `sharp.metadata()` on the extracted files.
+3. The response goes back to the client with correctly-ordered pages and real dimensions (which is what the Double Page reader mode needs for wide-spread detection).
+
+**Page-serve flow** (`GET /api/pages/:id/image`):
+
+1. Lookup `pages.path` + chapter meta.
+2. `cbzCache.ensureChapterExtracted(...)` — if the chapter was LRU-evicted since it was opened, re-extract. Extraction is deterministic from archive bytes, so the filenames produced match what `pages.path` already stores — no row rebuild needed on the serve path.
+3. `res.sendFile(<dir>/<pages.path>)`.
+
+**Size cap:** runtime-configurable. Defaults to 20 GB (`DEFAULT_CACHE_LIMIT_BYTES = 20 × 1024³`) and is overridden at startup from the `cbz_cache_limit_bytes` row in the `settings` table if present. `setLimitBytes(n)` changes the cap live from the admin API — any chapters over the new cap are evicted immediately. Enforced on every successful extraction.
+
+**Eviction:** whole-chapter, oldest-first. LRU order is the iteration order of an in-memory `Map` — every touch re-inserts the key at the tail. When a new extraction pushes the global total over the cap, `<chapterId>_<mtime>` directories are `rm -rf`'d one at a time until the total is back under. Evicting at page granularity would leave partially-populated chapter directories behind, forcing re-extractions mid-read; per-chapter eviction keeps the invariant that a directory is either fully present or entirely absent.
+
+**Crash-safety:** each image file is written to `<target>.tmp` and renamed into place on `finish`. The `.ready` marker is the final step of a successful extraction — directories missing it on startup are assumed to be partial extractions from a crashed run and are deleted.
+
+**Persistence across restarts:** `init(limitBytes?)` walks `CBZ_CACHE_DIR`, validates each subdirectory's `.ready` marker, and rebuilds the in-memory index from the files that remain. Warm cache survives a restart. [server/src/index.js](../server/src/index.js) reads the saved `cbz_cache_limit_bytes` row before calling `init()` so the rebuilt index is validated against the user's configured cap, not the 20 GB default. An immediate eviction pass runs if the rebuilt total exceeds the cap (e.g. the user lowered the limit since the last boot).
+
+**Cover generation paths** — `POST /api/admin/regenerate-thumbnails` and `POST /api/manga/:id/set-thumbnail` for CBZ pages resolve through `cbzCache.getCbzPageFile(chapterId, cbzPath, pageIndex)`, which extracts the chapter on demand and returns the absolute path of the Nth file in natural-sort order. Scanner-time thumbnail generation still uses the streaming fast path (`openCbzEntryStream`) so the initial walk of a large library doesn't explode into gigabytes of extracted covers.
+
+Admin endpoints `GET /api/admin/cbz-cache-size`, `POST /api/admin/clear-cbz-cache`, `GET /api/admin/cbz-cache-settings`, and `PUT /api/admin/cbz-cache-settings` expose the current size and configured cap, a manual wipe, and the size + auto-clear-schedule settings. See [api.md § Admin / Database Management](./api.md#admin--database-management).
+
+### Auto-Clear Scheduler
+
+Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cbzCacheSchedule.js). A single `setTimeout` fires the next scheduled wipe, then reschedules itself. Settings live in the same `settings` table as the size cap:
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `cbz_cache_autoclear_mode` | `off` \| `daily` \| `weekly` | Schedule type. `off` disables the timer entirely. |
+| `cbz_cache_autoclear_day` | `0..6` (0 = Sunday) | Day-of-week when mode is `weekly`. Ignored otherwise. |
+| `cbz_cache_autoclear_time` | `HH:MM` 24-hour, server local time | Time of day to fire. |
+
+`reschedule()` is idempotent — it's called on startup and again every time a setting changes through the admin API. The timer is `.unref()`'d so a pending wake-up never blocks graceful shutdown. On fire, `cbzCache.wipe()` removes every extracted chapter directory and the scheduler computes the next occurrence in server local time. When a daily/weekly window would already be in the past for today, the scheduler rolls forward to the next valid day.
 
 ## Local JSON Metadata
 

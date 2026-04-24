@@ -3,28 +3,21 @@ const path = require('path');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
-const { openCbzEntryStream } = require('../scanner/chapterParser');
+const cbzCache = require('../scanner/cbzCache');
 
 const router = express.Router();
 
-function streamToBuffer(stream) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    stream.on('data', (c) => chunks.push(c));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
-}
+const MIME_TYPES = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.gif': 'image/gif',
+};
 
-async function readCbzEntryDimensions(cbzPath, entryName) {
-  try {
-    const stream = await openCbzEntryStream(cbzPath, entryName);
-    const buf = await streamToBuffer(stream);
-    const meta = await sharp(buf).metadata();
-    return { width: meta.width || null, height: meta.height || null };
-  } catch {
-    return { width: null, height: null };
-  }
+function mimeFor(name) {
+  return MIME_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream';
 }
 
 // Run fn(item) for each item with at most `limit` calls in flight at once.
@@ -41,85 +34,111 @@ async function withLimit(limit, items, fn) {
   return results;
 }
 
-const MIME_TYPES = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-  '.avif': 'image/avif',
-  '.gif': 'image/gif',
-};
-
-/**
- * Bounded LRU: pageId → { type, chapterPath, storedPath }.
- *
- * Semantics of `storedPath` depend on `type`:
- *   - folder → absolute filesystem path (what `sendFile` wants)
- *   - cbz    → ZIP entry name inside `chapterPath` (what yauzl needs)
- *
- * Cache only goes stale when a rescan replaces rows with new IDs (in which
- * case nothing points at the old ID) or when the underlying file vanishes
- * (we evict on the resulting error below).
- */
-const PAGE_PATH_CACHE_MAX = 10_000;
-const pagePathCache = new Map();
-
-function lookupPageMeta(id) {
-  const hit = pagePathCache.get(id);
-  if (hit !== undefined) {
-    pagePathCache.delete(id);
-    pagePathCache.set(id, hit);
-    return hit;
+async function readImageDimensions(absPath) {
+  try {
+    const meta = await sharp(absPath).metadata();
+    return { width: meta.width || null, height: meta.height || null };
+  } catch {
+    return { width: null, height: null };
   }
+}
+
+// Rewrite the pages rows for a CBZ chapter to match the extracted cache
+// directory exactly. Runs once per fresh extraction (first open, or first
+// open after an archive rewrite / eviction). Page dimensions are read
+// concurrently via sharp since the files are already on disk.
+async function rebuildCbzPageRows(db, chapterId, extractedPages, chapterDir) {
+  const dims = await withLimit(
+    4,
+    extractedPages,
+    p => readImageDimensions(path.join(chapterDir, p.cacheFilename))
+  );
+  const insert = db.prepare(`
+    INSERT INTO pages (chapter_id, page_index, filename, path, width, height)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  db.transaction(() => {
+    db.prepare('DELETE FROM pages WHERE chapter_id = ?').run(chapterId);
+    extractedPages.forEach((p, i) => {
+      insert.run(
+        chapterId,
+        i,
+        p.originalName,
+        p.cacheFilename,
+        dims[i].width,
+        dims[i].height
+      );
+    });
+    db.prepare('UPDATE chapters SET page_count = ? WHERE id = ?')
+      .run(extractedPages.length, chapterId);
+  })();
+}
+
+// Resolve a page by id, returning everything the serving route needs to find
+// the image on disk. CBZ pages live under the per-chapter cache directory
+// (stored_path is the cache filename); folder pages store an absolute path.
+// Queried fresh on every request — row IDs can shift when pages are rebuilt
+// after a re-extraction, so caching by pageId is unsafe.
+function lookupPageMeta(id) {
   const row = getDb().prepare(
-    `SELECT p.path, c.type AS chapter_type, c.path AS chapter_path
+    `SELECT p.path, p.chapter_id, c.type AS chapter_type, c.path AS chapter_path
      FROM pages p
      JOIN chapters c ON c.id = p.chapter_id
      WHERE p.id = ?`
   ).get(id);
   if (!row) return null;
-  const entry = {
+  return {
+    chapterId:   row.chapter_id,
     type:        row.chapter_type,
     chapterPath: row.chapter_path,
     storedPath:  row.path,
   };
-  pagePathCache.set(id, entry);
-  if (pagePathCache.size > PAGE_PATH_CACHE_MAX) {
-    pagePathCache.delete(pagePathCache.keys().next().value);
-  }
-  return entry;
 }
 
-function mimeFor(name) {
-  return MIME_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream';
-}
-
-// GET /api/chapters/:id/pages — list all pages for a chapter
+// GET /api/chapters/:id/pages — list all pages for a chapter.
+// CBZ chapters are fully extracted to cache on first open, then the pages
+// rows are rebuilt from the resulting directory so order, dimensions, and
+// on-disk filenames stay in lockstep.
 router.get('/chapters/:id/pages', asyncWrapper(async (req, res) => {
   const db = getDb();
   const chapter = db.prepare('SELECT id, type, path FROM chapters WHERE id = ?').get(req.params.id);
   if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
 
-  let pages = db.prepare(
-    'SELECT id, page_index, filename, path, width, height FROM pages WHERE chapter_id = ? ORDER BY page_index ASC'
-  ).all(chapter.id);
-
-  // CBZ chapters skip dimension fetching at scan time (would require
-  // decompressing every entry). Lazily populate dimensions on first chapter
-  // open so the reader can detect double-page spreads. One-time cost per CBZ
-  // chapter — subsequent opens hit the persisted values.
   if (chapter.type === 'cbz') {
-    const needDims = pages.filter(p => p.width === null || p.height === null);
-    if (needDims.length > 0) {
-      const dimsList = await withLimit(4, needDims, p => readCbzEntryDimensions(chapter.path, p.path));
-      const updateStmt = db.prepare('UPDATE pages SET width = ?, height = ? WHERE id = ?');
-      const tx = db.transaction((items, dims) => {
-        items.forEach((p, i) => updateStmt.run(dims[i].width, dims[i].height, p.id));
-      });
-      tx(needDims, dimsList);
-      needDims.forEach((p, i) => { p.width = dimsList[i].width; p.height = dimsList[i].height; });
+    let extraction;
+    try {
+      extraction = await cbzCache.ensureChapterExtracted(chapter.id, chapter.path);
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'Archive file not found on disk' });
+      }
+      throw err;
+    }
+
+    if (extraction.freshlyExtracted) {
+      await rebuildCbzPageRows(db, chapter.id, extraction.pages, extraction.dir);
+    } else {
+      // Existing rows may predate this cache layout (e.g. first run after the
+      // extraction rewrite) or the cache may have been evicted and re-extracted
+      // by a parallel request that didn't invalidate our rows. If the current
+      // rows don't all point to files in the cache dir, rebuild from disk.
+      const rows = db.prepare('SELECT path FROM pages WHERE chapter_id = ?').all(chapter.id);
+      const diskFiles = require('fs').readdirSync(extraction.dir)
+        .filter(f => f !== '.ready' && !f.endsWith('.tmp'));
+      const diskSet = new Set(diskFiles);
+      const mismatch = rows.length !== diskFiles.length ||
+                       rows.some(r => !diskSet.has(r.path));
+      if (mismatch) {
+        diskFiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+        const pages = diskFiles.map(f => ({ cacheFilename: f, originalName: f }));
+        await rebuildCbzPageRows(db, chapter.id, pages, extraction.dir);
+      }
     }
   }
+
+  const pages = db.prepare(
+    'SELECT id, page_index, filename, path, width, height FROM pages WHERE chapter_id = ? ORDER BY page_index ASC'
+  ).all(chapter.id);
 
   // A page is considered "wide" only when it's a true double-page spread —
   // i.e. its width is roughly 2× the typical page width in the chapter.
@@ -145,9 +164,10 @@ router.get('/chapters/:id/pages', asyncWrapper(async (req, res) => {
 }));
 
 // GET /api/pages/:id/image — serve a page image.
-// Folder chapters: sendFile from disk.
-// CBZ chapters: open the archive and pipe the entry stream straight through.
-router.get('/pages/:id/image', (req, res, next) => {
+// Folder chapters: sendFile straight from the stored absolute path.
+// CBZ chapters: sendFile from the chapter's cache directory. If the cache has
+// been evicted since the chapter was opened, re-extract on the fly.
+router.get('/pages/:id/image', asyncWrapper(async (req, res, next) => {
   const meta = lookupPageMeta(req.params.id);
   if (!meta) return res.status(404).json({ error: 'Page not found' });
 
@@ -160,7 +180,6 @@ router.get('/pages/:id/image', (req, res, next) => {
     }, (err) => {
       if (!err || res.headersSent) return;
       if (err.code === 'ENOENT') {
-        pagePathCache.delete(req.params.id);
         res.status(404).json({ error: 'Image file not found on disk' });
       } else {
         next(err);
@@ -170,30 +189,37 @@ router.get('/pages/:id/image', (req, res, next) => {
   }
 
   if (meta.type === 'cbz') {
-    openCbzEntryStream(meta.chapterPath, meta.storedPath).then((stream) => {
-      res.setHeader('Content-Type', mimeFor(meta.storedPath));
-      // Archive contents are immutable for an unchanged CBZ; the scanner bumps
-      // page row IDs on mtime change, so caching by URL is safe.
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      stream.on('error', (err) => {
-        if (!res.headersSent) next(err);
-        else res.destroy(err);
-      });
-      stream.pipe(res);
-    }).catch((err) => {
-      pagePathCache.delete(req.params.id);
-      if (err && err.message && err.message.startsWith('Entry not found')) {
-        return res.status(404).json({ error: 'Image entry not found in archive' });
-      }
+    let extraction;
+    try {
+      extraction = await cbzCache.ensureChapterExtracted(meta.chapterId, meta.chapterPath);
+    } catch (err) {
       if (err && err.code === 'ENOENT') {
         return res.status(404).json({ error: 'Archive file not found on disk' });
       }
-      next(err);
+      return next(err);
+    }
+
+    // If this request re-extracted the chapter (cache was evicted), the
+    // pages rows on file still match because we write them once per unique
+    // (chapterId, mtime) pair and the archive itself is unchanged.
+    const abs = path.join(extraction.dir, meta.storedPath);
+    res.sendFile(abs, {
+      maxAge: 86_400_000,
+      lastModified: true,
+      etag: true,
+      headers: { 'Content-Type': mimeFor(meta.storedPath) },
+    }, (err) => {
+      if (!err || res.headersSent) return;
+      if (err.code === 'ENOENT') {
+        res.status(404).json({ error: 'Image file not found on disk' });
+      } else {
+        next(err);
+      }
     });
     return;
   }
 
   res.status(500).json({ error: `Unknown chapter type: ${meta.type}` });
-});
+}));
 
 module.exports = router;

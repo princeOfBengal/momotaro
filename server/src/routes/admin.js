@@ -1,54 +1,137 @@
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const config = require('../config');
 const logger = require('../logger');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { generateThumbnail } = require('../scanner/thumbnailGenerator');
+const cbzCache = require('../scanner/cbzCache');
+const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 
 const router = express.Router();
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Lower bound of 100 MB — smaller caps would force re-extraction mid-read of
+// any chapter larger than the cap. Upper bound of 10 TB — a soft sanity check
+// to catch fat-fingered byte counts.
+const CACHE_LIMIT_MIN_BYTES = 100 * 1024 * 1024;
+const CACHE_LIMIT_MAX_BYTES = 10 * 1024 * 1024 * 1024 * 1024;
 
-/** Synchronously walk a directory and return total size in bytes. */
-function dirSizeBytes(dir) {
-  let total = 0;
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
-  for (const e of entries) {
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      total += dirSizeBytes(p);
-    } else {
-      try { total += fs.statSync(p).size; } catch { /* ignore */ }
-    }
-  }
-  return total;
+const VALID_AUTOCLEAR_MODES = new Set(['off', 'daily', 'weekly']);
+
+function upsertSetting(db, key, value) {
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, value);
 }
 
-// ── CBZ Cache (legacy) ────────────────────────────────────────────────────────
-// Streaming reads mean the extraction cache is no longer populated. These
-// endpoints remain for the admin UI and as a way to wipe any pre-migration
-// cache directory that may still be on disk.
+function readCacheSettings(db) {
+  const rows = db.prepare(`
+    SELECT key, value FROM settings
+    WHERE key IN (
+      'cbz_cache_limit_bytes',
+      'cbz_cache_autoclear_mode',
+      'cbz_cache_autoclear_day',
+      'cbz_cache_autoclear_time'
+    )
+  `).all();
+  const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const parsedLimit = parseInt(map['cbz_cache_limit_bytes'] || '', 10);
+  const parsedDay   = parseInt(map['cbz_cache_autoclear_day']  || '0', 10);
+  return {
+    limit_bytes:   Number.isFinite(parsedLimit) && parsedLimit > 0
+                     ? parsedLimit
+                     : cbzCache.DEFAULT_CACHE_LIMIT_BYTES,
+    limit_default_bytes: cbzCache.DEFAULT_CACHE_LIMIT_BYTES,
+    limit_min_bytes:     CACHE_LIMIT_MIN_BYTES,
+    limit_max_bytes:     CACHE_LIMIT_MAX_BYTES,
+    autoclear_mode: map['cbz_cache_autoclear_mode'] || 'off',
+    autoclear_day:  Number.isInteger(parsedDay) && parsedDay >= 0 && parsedDay <= 6 ? parsedDay : 0,
+    autoclear_time: map['cbz_cache_autoclear_time'] || '03:00',
+    next_run_at:    cbzCacheSchedule.getNextRunAt(),
+  };
+}
+
+// ── CBZ Cache ─────────────────────────────────────────────────────────────────
+// CBZ pages are extracted to disk on first access and served as plain files on
+// every subsequent hit. The cache is capped at 20 GB with LRU eviction; these
+// endpoints expose the current size and a manual wipe.
 
 // GET /api/admin/cbz-cache-size
 router.get('/admin/cbz-cache-size', asyncWrapper(async (req, res) => {
-  const size_bytes = dirSizeBytes(config.CBZ_CACHE_DIR);
-  res.json({ data: { size_bytes, limit_bytes: 0 } });
+  const { size_bytes, limit_bytes } = cbzCache.stats();
+  res.json({ data: { size_bytes, limit_bytes } });
 }));
 
 // POST /api/admin/clear-cbz-cache
 router.post('/admin/clear-cbz-cache', asyncWrapper(async (req, res) => {
-  let entries = [];
-  try { entries = fs.readdirSync(config.CBZ_CACHE_DIR, { withFileTypes: true }); } catch { /* empty or missing */ }
-  for (const e of entries) {
-    const p = path.join(config.CBZ_CACHE_DIR, e.name);
-    try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
+  cbzCache.wipe();
   console.log('[Admin] CBZ cache cleared');
   res.json({ data: { size_bytes: 0 } });
+}));
+
+// GET /api/admin/cbz-cache-settings
+router.get('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  res.json({ data: readCacheSettings(db) });
+}));
+
+// PUT /api/admin/cbz-cache-settings
+// Body (all fields optional — only provided fields are updated):
+//   limit_bytes:     positive integer, bounded by MIN/MAX above
+//   autoclear_mode:  'off' | 'daily' | 'weekly'
+//   autoclear_day:   0..6  (0 = Sunday)  — only meaningful when mode=weekly
+//   autoclear_time:  'HH:MM' 24-hour, server-local time
+router.put('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const body = req.body || {};
+
+  if (body.limit_bytes !== undefined) {
+    const n = Number(body.limit_bytes);
+    if (!Number.isFinite(n) || n < CACHE_LIMIT_MIN_BYTES) {
+      return res.status(400).json({
+        error: `limit_bytes must be at least ${CACHE_LIMIT_MIN_BYTES} bytes (100 MB)`,
+      });
+    }
+    if (n > CACHE_LIMIT_MAX_BYTES) {
+      return res.status(400).json({ error: 'limit_bytes exceeds 10 TB' });
+    }
+    const intBytes = Math.floor(n);
+    upsertSetting(db, 'cbz_cache_limit_bytes', String(intBytes));
+    cbzCache.setLimitBytes(intBytes);
+  }
+
+  if (body.autoclear_mode !== undefined) {
+    if (!VALID_AUTOCLEAR_MODES.has(body.autoclear_mode)) {
+      return res.status(400).json({ error: "autoclear_mode must be 'off', 'daily', or 'weekly'" });
+    }
+    upsertSetting(db, 'cbz_cache_autoclear_mode', body.autoclear_mode);
+  }
+
+  if (body.autoclear_day !== undefined) {
+    const d = parseInt(body.autoclear_day, 10);
+    if (!Number.isInteger(d) || d < 0 || d > 6) {
+      return res.status(400).json({ error: 'autoclear_day must be an integer 0..6 (0 = Sunday)' });
+    }
+    upsertSetting(db, 'cbz_cache_autoclear_day', String(d));
+  }
+
+  if (body.autoclear_time !== undefined) {
+    const s = String(body.autoclear_time);
+    const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+    if (!m) return res.status(400).json({ error: 'autoclear_time must be HH:MM' });
+    const h  = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (h < 0 || h > 23 || mm < 0 || mm > 59) {
+      return res.status(400).json({ error: 'autoclear_time out of range' });
+    }
+    // Canonicalise to zero-padded HH:MM.
+    const canonical = `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    upsertSetting(db, 'cbz_cache_autoclear_time', canonical);
+  }
+
+  cbzCacheSchedule.reschedule();
+  res.json({ data: readCacheSettings(db) });
 }));
 
 // ── Thumbnail Regeneration ────────────────────────────────────────────────────
@@ -87,11 +170,13 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
           }
         }
 
-        // Fall back: generate from first page of first chapter. We need the
-        // chapter type + path so `generateThumbnail` can stream from a CBZ
-        // instead of treating the stored path as a filesystem location.
+        // Fall back: generate from the first page of the first chapter. For
+        // CBZ chapters we resolve the page through the cache — ensuring the
+        // archive is extracted and then reading the first cache file. Folder
+        // chapters hand the absolute path straight to sharp.
         const firstPage = db.prepare(`
-          SELECT p.path AS stored_path, c.type AS chapter_type, c.path AS chapter_path
+          SELECT p.path AS stored_path, p.page_index, c.id AS chapter_id,
+                 c.type AS chapter_type, c.path AS chapter_path
           FROM pages p
           JOIN chapters c ON c.id = p.chapter_id
           WHERE c.manga_id = ? AND p.page_index = 0
@@ -100,15 +185,24 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
         `).get(manga.id);
 
         if (firstPage) {
-          const source = firstPage.chapter_type === 'folder'
-            ? firstPage.stored_path
-            : { type: firstPage.chapter_type, chapterPath: firstPage.chapter_path, entry: firstPage.stored_path };
+          let source;
+          if (firstPage.chapter_type === 'folder') {
+            source = firstPage.stored_path;
+          } else if (firstPage.chapter_type === 'cbz') {
+            source = await cbzCache.getCbzPageFile(
+              firstPage.chapter_id,
+              firstPage.chapter_path,
+              firstPage.page_index
+            );
+          }
 
-          const generated = await generateThumbnail(source, manga.id);
-          if (generated) {
-            db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-              .run(`${manga.id}.webp`, manga.id);
-            regenerated++;
+          if (source) {
+            const generated = await generateThumbnail(source, manga.id);
+            if (generated) {
+              db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
+                .run(`${manga.id}.webp`, manga.id);
+              regenerated++;
+            }
           }
         }
       } catch (err) {

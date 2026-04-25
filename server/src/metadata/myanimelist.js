@@ -116,19 +116,26 @@ function normalizeManga(m) {
   };
 }
 
-// ── Title cleaning (mirrors the pattern used by the AniList integration) ──────
+// ── Title cleaning ────────────────────────────────────────────────────────────
+// Shared with the AniList integration so every metadata source sees the same
+// cleaned search string. See anilist.js → cleanSearchTitle for the full
+// rule set (scanner tags, volume/chapter markers, year ranges,
+// release-quality words).
 
-function cleanSearchTitle(title) {
-  return title
-    .replace(/\{[^}]*\}/g, '')   // {curly bracket content}
-    .replace(/\[[^\]]*\]/g, '')  // [square bracket content]
-    .replace(/\([^)]*\)/g, '')   // (parenthesis content)
-    .replace(/[-_]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+const { cleanSearchTitle } = require('./anilist');
 
 // ── Public API ────────────────────────────────────────────────────────────────
+
+// `nsfw=true` opts the manga-search endpoint into returning entries flagged
+// as NSFW (the API's `nsfw` rating values: gray / black). Default is false,
+// which silently filters them out — not what users of a self-hosted
+// personal library want, since the library scanner already indexed
+// whatever they put on disk and the metadata source should match.
+//
+// MAL doesn't publish its rate-limit number; community usage suggests
+// 1 req/sec is safe. The bulk loop respects `MAL_REQUEST_INTERVAL_MS`.
+const NSFW_PARAM_VALUE = 'true';
+const MAL_REQUEST_INTERVAL_MS = 1000;
 
 /**
  * Auto-fetch: returns the closest match for a title or null.
@@ -136,7 +143,12 @@ function cleanSearchTitle(title) {
  */
 async function fetchFromMAL(title, clientId) {
   const q = cleanSearchTitle(title);
-  const params = new URLSearchParams({ q, limit: 5, fields: MANGA_FIELDS });
+  const params = new URLSearchParams({
+    q,
+    limit:  5,
+    nsfw:   NSFW_PARAM_VALUE,
+    fields: MANGA_FIELDS,
+  });
   const json = await malRequest(`/manga?${params}`, clientId);
   const data = json.data;
   if (!Array.isArray(data) || data.length === 0) return null;
@@ -149,7 +161,13 @@ async function fetchFromMAL(title, clientId) {
 async function searchMAL(query, clientId, page = 1) {
   const limit = 10;
   const offset = (page - 1) * limit;
-  const params = new URLSearchParams({ q: query, limit, offset, fields: MANGA_FIELDS });
+  const params = new URLSearchParams({
+    q: query,
+    limit,
+    offset,
+    nsfw:   NSFW_PARAM_VALUE,
+    fields: MANGA_FIELDS,
+  });
   const json = await malRequest(`/manga?${params}`, clientId);
   const data = json.data;
   if (!Array.isArray(data)) return [];
@@ -158,6 +176,10 @@ async function searchMAL(query, clientId, page = 1) {
 
 /**
  * Fetch full metadata by a known MAL manga ID.
+ *
+ * The detail endpoint does not require an `nsfw` parameter — the request is
+ * keyed by ID, not by a search filter — but we still fetch every documented
+ * field so adult titles round-trip with full metadata.
  */
 async function fetchByMALId(malId, clientId) {
   const params = new URLSearchParams({ fields: MANGA_FIELDS });
@@ -166,4 +188,9 @@ async function fetchByMALId(malId, clientId) {
   return normalizeManga(json);
 }
 
-module.exports = { fetchFromMAL, searchMAL, fetchByMALId };
+module.exports = {
+  fetchFromMAL,
+  searchMAL,
+  fetchByMALId,
+  MAL_REQUEST_INTERVAL_MS,
+};

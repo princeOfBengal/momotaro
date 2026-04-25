@@ -68,11 +68,20 @@ Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `
 
 ## Rate Limiting
 
-`anilistRequest()` in `anilist.js` handles HTTP 429 responses automatically:
+`anilistRequest()` in `anilist.js` reads the rate-limit headers AniList returns on every response and adapts inter-call spacing accordingly. Bulk loops should consult `recommendedDelayMs()` instead of hardcoding a delay.
 
-- Reads the `retry-after` response header (defaults to 60 s if absent)
-- Waits up to 90 s, then retries — up to 3 attempts
-- Throws `'AniList rate limit exceeded after 3 retries'` if all retries fail
+**Headers consumed:**
+
+| Header | Used for |
+| --- | --- |
+| `X-RateLimit-Limit` | Sets steady-state spacing to `60_000 / limit + 50 ms` (e.g. 717 ms at 90 req/min, 2 050 ms at the temporarily-degraded 30 req/min). |
+| `X-RateLimit-Remaining` | When ≤ 5, the spacing is stretched so the rest of the budget lands after `X-RateLimit-Reset`. |
+| `X-RateLimit-Reset` | Unix-seconds anchor for the above. |
+| `Retry-After` (on 429) | Drives the existing retry loop. |
+
+The recommended delay is clamped to `[700, 5 000] ms`. A 429 forces it to 5 000 ms until headers from a successful response indicate the service is healthy again. The retry loop itself is unchanged: up to 3 attempts honouring `Retry-After` (capped at 90 s); throws `'AniList rate limit exceeded after 3 retries'` if all attempts fail.
+
+**Adult content:** `Media(...)` queries do not pass `isAdult`, so AniList returns adult and SFW titles together. This matches the on-disk library scanner, which indexes whatever the user dropped in.
 
 ## GraphQL Queries Used
 

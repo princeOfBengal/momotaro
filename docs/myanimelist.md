@@ -91,7 +91,11 @@ The file is resized to 300 × 430 WebP at 85 % quality (same as AniList covers).
 
 ## Rate Limiting
 
-MAL does not publish explicit rate limits. The bulk metadata loop spaces requests 700 ms apart, matching the AniList delay. If a 429 response is received, the service backs off for 60 seconds and retries once.
+MAL does not publish explicit rate limits. The bulk metadata loop spaces requests **1 000 ms apart** (`MAL_REQUEST_INTERVAL_MS`), a value chosen to match common community wrappers; this is more conservative than the previous 700 ms shared with AniList. If a 429 response is received, the service backs off for 60 seconds and retries once.
+
+## Adult Content (NSFW)
+
+`/manga` calls (both auto-fetch and manual search) send `nsfw=true` so titles graded `gray` or `black` (the API's NSFW levels — `white` is SFW) are returned alongside SFW titles. Without the parameter, MAL silently filters those out, which would mask titles the on-disk library scanner already indexed. The `/manga/{id}` detail endpoint is keyed by ID and doesn't accept `nsfw`, so refresh-by-ID rounds-trip adult titles unconditionally.
 
 ## Metadata Priority
 

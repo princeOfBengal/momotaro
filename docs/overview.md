@@ -98,4 +98,4 @@ docker volume rm momotaro_data
 | `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Per-chapter extract cache for CBZ archives. Size cap and scheduled auto-clear are runtime-configurable from Settings → Database (persisted in the `settings` table). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
 | `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts |
 | `METADATA_FETCH_ENABLED` | `true` | Auto-fetch AniList metadata on scan |
-| `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |
+| `REQUEST_DELAY_MS` | `700` | Legacy minimum delay floor; the AniList integration now reads `X-RateLimit-Limit` and adapts spacing per response (default range 700–5 000 ms). |

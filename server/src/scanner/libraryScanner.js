@@ -318,33 +318,35 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
       .run(mangaPath, libraryId ?? existing.library_id, mangaId);
   }
 
-  // Apply local JSON metadata if no external source has already populated it
-  const currentMeta = db.prepare('SELECT metadata_source FROM manga WHERE id = ?').get(mangaId);
-  if (currentMeta && currentMeta.metadata_source !== 'anilist') {
-    const localMeta = findLocalMetadata(mangaPath);
-    if (localMeta) {
-      db.prepare(`
-        UPDATE manga SET
-          title           = COALESCE(?, title),
-          description     = COALESCE(?, description),
-          genres          = ?,
-          year            = COALESCE(?, year),
-          score           = COALESCE(?, score),
-          author          = COALESCE(?, author),
-          metadata_source = 'local',
-          updated_at      = unixepoch()
-        WHERE id = ?
-      `).run(
-        localMeta.title,
-        localMeta.description,
-        JSON.stringify(localMeta.genres),
-        localMeta.year,
-        localMeta.score,
-        localMeta.author,
-        mangaId
-      );
-      console.log(`[Scanner] Applied local metadata for: ${folderName}`);
-    }
+  // Apply local JSON metadata if a sidecar exists. Local has the highest
+  // display priority, so it overrides AniList- or MAL-displayed fields when
+  // present. Existing linkage IDs (`anilist_id`, `mal_id`, `doujinshi_id`)
+  // are left untouched — adding a metadata.json never breaks an external
+  // linkage. To remove the local metadata, delete the file from disk and
+  // re-scan; or use Break Linkage in the UI.
+  const localMeta = findLocalMetadata(mangaPath);
+  if (localMeta) {
+    db.prepare(`
+      UPDATE manga SET
+        title           = COALESCE(?, title),
+        description     = COALESCE(?, description),
+        genres          = ?,
+        year            = COALESCE(?, year),
+        score           = COALESCE(?, score),
+        author          = COALESCE(?, author),
+        metadata_source = 'local',
+        updated_at      = unixepoch()
+      WHERE id = ?
+    `).run(
+      localMeta.title,
+      localMeta.description,
+      JSON.stringify(localMeta.genres),
+      localMeta.year,
+      localMeta.score,
+      localMeta.author,
+      mangaId
+    );
+    console.log(`[Scanner] Applied local metadata for: ${folderName}`);
   }
 
   let entries;

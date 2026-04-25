@@ -277,7 +277,7 @@ Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cb
 | `year` | `year`, `Year`, `published`, `date` (first 4 chars parsed as year) |
 | `score` | `score`, `Score`, `rating`, `Rating` (auto-scaled from 0–100 to 0–10 if > 10) |
 
-Local metadata is only applied when `metadata_source` is not `'anilist'` — AniList-sourced metadata is never overwritten by a local file.
+Local metadata is **always applied when a sidecar is found**, regardless of the manga's current `metadata_source`. Local has the highest display priority (see [api.md § Linkage and display priority](./api.md#linkage-and-display-priority)), so dropping a `metadata.json` into a folder switches the displayed fields to the file's contents. The scanner never touches `anilist_id`, `mal_id`, or `doujinshi_id` — adding a sidecar never breaks an external linkage; the user still sees the linkage in the Metadata modal and can swap display source via Break Linkage or by re-applying the third-party source. Removing the file and re-scanning does **not** automatically revert display: the row will still be marked `metadata_source = 'local'` until the user explicitly applies another source or runs Break Linkage.
 
 ## Stale Record Pruning
 

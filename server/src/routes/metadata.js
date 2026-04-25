@@ -5,9 +5,9 @@ const fetch = require('node-fetch');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
-const { fetchFromAniList, fetchBatchFromAniList, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry } = require('../metadata/anilist');
+const { fetchFromAniList, fetchBatchFromAniList, fetchBatchByAniListIds, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry, recommendedDelayMs: anilistRecommendedDelayMs } = require('../metadata/anilist');
 const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
-const { fetchFromMAL, searchMAL, fetchByMALId } = require('../metadata/myanimelist');
+const { fetchFromMAL, searchMAL, fetchByMALId, MAL_REQUEST_INTERVAL_MS } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const cbzCache = require('../scanner/cbzCache');
@@ -27,55 +27,107 @@ function getMalClientId(db) {
   return getSetting(db, 'mal_client_id');
 }
 
-function applyMetadataToDb(db, mangaId, result) {
-  db.prepare(`
-    UPDATE manga SET
-      title           = ?,
-      description     = ?,
-      status          = ?,
-      year            = ?,
-      genres          = ?,
-      score           = ?,
-      anilist_id      = ?,
-      mal_id          = ?,
-      doujinshi_id    = ?,
-      author          = ?,
-      metadata_source = ?,
-      updated_at      = unixepoch()
-    WHERE id = ?
-  `).run(
-    result.title,
-    result.description,
-    result.status,
-    result.year,
-    JSON.stringify(result.genres),
-    result.score,
-    result.anilist_id   ?? null,
-    result.mal_id       ?? null,
-    result.doujinshi_id ?? null,
-    result.author       ?? null,
-    result.source,
-    mangaId
-  );
+// Display priority for the metadata fields shown in the UI.
+//
+//   local > anilist > myanimelist > doujinshi > none
+//
+// A manga can be linked to any combination of AniList / MAL / Doujinshi
+// simultaneously — adding one linkage never breaks another. The displayed
+// metadata source (`metadata_source`) is whichever **currently linked**
+// source has the highest priority among the linkages plus any local JSON.
+// `metadata_source` is therefore the visible-fields source, not a flag
+// that disables other linkages.
+const DISPLAY_PRIORITY = {
+  none:        -1,
+  doujinshi:    0,
+  myanimelist:  1,
+  anilist:      2,
+  local:        3,
+};
+
+function priorityOf(source) {
+  return DISPLAY_PRIORITY[source] ?? -1;
 }
 
-// Only stores the external linkage IDs (anilist_id, mal_id, doujinshi_id) without
-// overwriting any existing metadata fields or changing metadata_source.
-// Used when local metadata is present and should remain the display source.
-function applyLinkageOnlyToDb(db, mangaId, result) {
-  db.prepare(`
-    UPDATE manga SET
-      anilist_id   = COALESCE(?, anilist_id),
-      mal_id       = COALESCE(?, mal_id),
-      doujinshi_id = COALESCE(?, doujinshi_id),
-      updated_at   = unixepoch()
-    WHERE id = ?
-  `).run(
-    result.anilist_id   ?? null,
-    result.mal_id       ?? null,
-    result.doujinshi_id ?? null,
-    mangaId
-  );
+/**
+ * True when an incoming source should take over the displayed fields.
+ * Equal-priority means "refresh in place" (e.g. re-fetching AniList for an
+ * AniList-displayed manga rewrites the same fields). Lower-priority leaves
+ * displayed fields untouched and only records the linkage.
+ */
+function shouldOverwriteDisplay(currentSource, incomingSource) {
+  return priorityOf(incomingSource) >= priorityOf(currentSource);
+}
+
+/**
+ * Apply a metadata fetch result to a manga row in a way that:
+ *
+ *   1. Always preserves any existing linkage IDs from other sources via
+ *      COALESCE — establishing a MAL link never clobbers `anilist_id`,
+ *      and vice versa. Doujinshi.info's slug is also preserved.
+ *   2. Updates only the incoming source's linkage ID with the fetched
+ *      value (so re-fetching AniList still rewrites `anilist_id`, even
+ *      though it's normally the same number).
+ *   3. Overwrites displayed fields (title, description, status, year,
+ *      genres, score, author, metadata_source) only when the incoming
+ *      source's priority is ≥ current.
+ *
+ * The cover image is NOT handled here — `fetchAndStoreCover` writes to the
+ * source-specific cover column unconditionally, and only swaps the active
+ * `cover_image` when this source is the new display source.
+ *
+ * Returns true when the displayed fields were changed.
+ */
+function applyMetadataToDb(db, manga, result, source) {
+  const overwriteDisplay = shouldOverwriteDisplay(manga.metadata_source, source);
+
+  // Only the incoming source's ID is taken from `result`; the others fall
+  // back to whatever the row already had. This is the central anti-clobber
+  // invariant for the linkage logic.
+  const anilistId   = source === 'anilist'     ? (result.anilist_id   ?? null) : null;
+  const malId       = source === 'myanimelist' ? (result.mal_id       ?? null) : null;
+  const doujinshiId = source === 'doujinshi'   ? (result.doujinshi_id ?? null) : null;
+
+  if (overwriteDisplay) {
+    db.prepare(`
+      UPDATE manga SET
+        title           = ?,
+        description     = ?,
+        status          = ?,
+        year            = ?,
+        genres          = ?,
+        score           = ?,
+        author          = ?,
+        anilist_id      = COALESCE(?, anilist_id),
+        mal_id          = COALESCE(?, mal_id),
+        doujinshi_id    = COALESCE(?, doujinshi_id),
+        metadata_source = ?,
+        updated_at      = unixepoch()
+      WHERE id = ?
+    `).run(
+      result.title,
+      result.description,
+      result.status,
+      result.year,
+      JSON.stringify(result.genres ?? []),
+      result.score,
+      result.author ?? null,
+      anilistId, malId, doujinshiId,
+      source,
+      manga.id
+    );
+  } else {
+    db.prepare(`
+      UPDATE manga SET
+        anilist_id   = COALESCE(?, anilist_id),
+        mal_id       = COALESCE(?, mal_id),
+        doujinshi_id = COALESCE(?, doujinshi_id),
+        updated_at   = unixepoch()
+      WHERE id = ?
+    `).run(anilistId, malId, doujinshiId, manga.id);
+  }
+
+  return overwriteDisplay;
 }
 
 /**
@@ -139,28 +191,22 @@ function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
 
-// Cover promotion priority: AniList > MyAnimeList > Doujinshi.
-// "Promote" = replace the active cover_image. A lower-priority source only
-// wins when no higher-priority source already has a cover saved.
-function shouldPromoteCover(manga, source) {
-  if (source === 'anilist')     return true;
-  if (source === 'myanimelist') return !manga.anilist_cover;
-  if (source === 'doujinshi')   return !manga.anilist_cover && !manga.mal_cover;
-  return false;
-}
-
-// Apply metadata and cover for a single manga.
-// For metadata_source === 'local', only the external ID is written so the user's
-// local json metadata (title/description/genres/etc.) is preserved; otherwise the
-// fetched metadata fully replaces the stored fields. The cover is downloaded and
-// resized either way, and promoted to the active thumbnail iff setActive is true.
-async function applyMetadataToManga(db, manga, result, source, { setActive }) {
-  if (manga.metadata_source === 'local') {
-    applyLinkageOnlyToDb(db, manga.id, result);
-  } else {
-    applyMetadataToDb(db, manga.id, result);
-  }
-  await fetchAndStoreCover(db, manga.id, result.cover_url, source, { setActive });
+// Apply metadata and cover for a single manga. The DB write preserves
+// linkage IDs for every other source (so e.g. applying MAL never wipes
+// `anilist_id`) and only overwrites displayed fields when the incoming
+// source has equal or higher priority than the current display source.
+//
+// The source-specific cover column (`anilist_cover`, `mal_cover`) is always
+// updated on a successful download; the active `cover_image` is only swapped
+// when this source becomes the new display source — so adding a MAL link
+// to an AniList-displayed manga downloads the MAL cover for the picker but
+// leaves the visible cover on AniList.
+async function applyMetadataToManga(db, manga, result, source) {
+  const becameDisplay = applyMetadataToDb(db, manga, result, source);
+  await fetchAndStoreCover(db, manga.id, result.cover_url, source, {
+    setActive: becameDisplay,
+  });
+  return { becameDisplay };
 }
 
 // POST /api/manga/:id/refresh-metadata — auto-fetch by title
@@ -170,14 +216,15 @@ router.post('/manga/:id/refresh-metadata', asyncWrapper(async (req, res) => {
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
   const token = getToken(db);
-  const cleanTitle = manga.title.replace(/\s*\(.*?\)\s*/g, ' ').trim();
-  const result = await fetchFromAniList(cleanTitle, token);
+  // Title cleaning is done inside fetchFromAniList via the shared helper, so
+  // we just hand the raw title through.
+  const result = await fetchFromAniList(manga.title, token);
 
   if (!result) {
     return res.json({ found: false, message: 'No match found on AniList for this title.' });
   }
 
-  await applyMetadataToManga(db, manga, result, 'anilist', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'anilist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -212,7 +259,7 @@ router.post('/manga/:id/apply-metadata', asyncWrapper(async (req, res) => {
 
   if (!result) return res.status(404).json({ error: 'Entry not found on AniList' });
 
-  await applyMetadataToManga(db, manga, result, 'anilist', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'anilist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -279,7 +326,7 @@ router.post('/manga/:id/apply-doujinshi-metadata', asyncWrapper(async (req, res)
 
   if (!result) return res.status(404).json({ error: 'Entry not found on Doujinshi.info' });
 
-  await applyMetadataToManga(db, manga, result, 'doujinshi', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'doujinshi');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -301,7 +348,7 @@ router.post('/manga/:id/refresh-doujinshi-metadata', asyncWrapper(async (req, re
     return res.json({ found: false, message: 'No match found on Doujinshi.info for this title.' });
   }
 
-  await applyMetadataToManga(db, manga, result, 'doujinshi', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'doujinshi');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -338,7 +385,7 @@ router.post('/manga/:id/apply-mal-metadata', asyncWrapper(async (req, res) => {
   const result = await fetchByMALId(Number(mal_id), clientId);
   if (!result) return res.status(404).json({ error: 'Entry not found on MyAnimeList' });
 
-  await applyMetadataToManga(db, manga, result, 'myanimelist', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'myanimelist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
@@ -360,7 +407,7 @@ router.post('/manga/:id/refresh-mal-metadata', asyncWrapper(async (req, res) => 
     return res.json({ found: false, message: 'No match found on MyAnimeList for this title.' });
   }
 
-  await applyMetadataToManga(db, manga, result, 'myanimelist', { setActive: true });
+  await applyMetadataToManga(db, manga, result, 'myanimelist');
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(manga.id);
   res.json({
@@ -371,7 +418,12 @@ router.post('/manga/:id/refresh-mal-metadata', asyncWrapper(async (req, res) => 
 
 // Skip re-fetching titles that were attempted within this window unless `force: true`.
 const BULK_RETRY_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;  // 7 days
-const ANILIST_BATCH_SIZE = 5;
+// AniList's GraphQL endpoint accepts aliased queries; each alias counts as
+// a separate Media lookup against the per-minute request budget but only
+// one HTTP request and one rate-limit slot. 10 aliases per request keeps
+// us well below the documented complexity ceiling while halving the
+// outbound HTTP count vs. the previous 5-per-batch.
+const ANILIST_BATCH_SIZE = 10;
 
 const markAttemptedStmt = (db) =>
   db.prepare('UPDATE manga SET last_metadata_fetch_attempt_at = ? WHERE id = ?');
@@ -384,20 +436,30 @@ function markAttempted(db, mangaIds, nowSeconds) {
   tx(mangaIds);
 }
 
-// POST /api/libraries/:id/bulk-metadata — auto-fetch metadata for every manga in a library
-// Body: { source: 'anilist' | 'myanimelist' | 'doujinshi', force?: boolean }
-//       source defaults to 'anilist'. force=true ignores the 7-day retry cooldown.
+// POST /api/libraries/:id/bulk-metadata — refresh / fetch metadata for every
+// manga in a library. Always runs over every title; never refuses.
 //
-// Behavior by existing metadata_source:
-//   'none'           — full fetch: all metadata fields + linkage IDs applied
-//   'local'          — link-only: only the external ID (anilist_id / mal_id / doujinshi_id)
-//                      is stored; existing local fields and cover are preserved; skipped if
-//                      the relevant ID is already set
-//   'anilist' / etc. — skipped entirely (third-party metadata already present)
+// Body: { source: 'anilist' | 'myanimelist' | 'doujinshi' }   (defaults to anilist)
 //
-// Cooldown: a title whose last fetch attempt (for any source) is within
-// BULK_RETRY_COOLDOWN_SECONDS is skipped unless force=true, so no-match titles
-// don't get re-queried on every bulk pull.
+// Per-manga behaviour:
+//
+//   • If the manga already has the source's linkage ID
+//     (anilist_id / mal_id / doujinshi_id), the existing record is **refreshed
+//     by ID** — no search, no ambiguity. Fields are overwritten with the
+//     authoritative current data from the source. For local-source manga
+//     (`metadata_source = 'local'`) only the linkage ID is rewritten; the
+//     user's own metadata fields and cover are preserved.
+//
+//   • Otherwise, the title is **searched**. The folder-derived title runs
+//     through the shared `cleanSearchTitle` helper to strip release-group
+//     brackets, volume / chapter markers, year ranges, and quality tags
+//     (e.g. "Fruits Basket Another (2018-2022) (Digital) (1r0n)" →
+//     "Fruits Basket Another"), giving the AniList / MAL / Doujinshi.info
+//     search a much better chance of matching.
+//
+// `last_metadata_fetch_attempt_at` is still stamped so the *automatic*
+// post-scan metadata fetch can honour a cooldown. The bulk endpoint itself
+// no longer respects the cooldown — the user explicitly asked for a refresh.
 router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
@@ -405,160 +467,214 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
 
   const VALID_SOURCES = new Set(['anilist', 'myanimelist', 'doujinshi']);
   const source = VALID_SOURCES.has(req.body?.source) ? req.body.source : 'anilist';
-  const force  = req.body?.force === true;
 
   const allManga = db.prepare(
     `SELECT id, title, metadata_source, anilist_id, mal_id, doujinshi_id,
-            anilist_cover, mal_cover,
-            last_metadata_fetch_attempt_at
+            anilist_cover, mal_cover
      FROM manga WHERE library_id = ?`
   ).all(library.id);
   const totalCount = allManga.length;
   const nowSeconds = Math.floor(Date.now() / 1000);
 
-  // Classify each manga into what we should do with it
-  const toProcess = [];
-  let skippedExisting       = 0; // already has third-party metadata — skip entirely
-  let skippedAlreadyLinked  = 0; // has local metadata + already linked for this source
-  let skippedRecentAttempt  = 0; // recently attempted with no result — honour cooldown
-
+  // Split into refresh (existing linkage for this source) vs search (no link).
+  function linkIdFor(m) {
+    if (source === 'anilist')     return m.anilist_id;
+    if (source === 'myanimelist') return m.mal_id;
+    if (source === 'doujinshi')   return m.doujinshi_id;
+    return null;
+  }
+  const toRefresh = [];
+  const toSearch  = [];
   for (const m of allManga) {
-    if (m.metadata_source !== 'none' && m.metadata_source !== 'local') {
-      skippedExisting++;
-      continue;
-    }
-    if (m.metadata_source === 'local') {
-      const alreadyLinked =
-        (source === 'anilist'     && m.anilist_id)    ||
-        (source === 'myanimelist' && m.mal_id)        ||
-        (source === 'doujinshi'   && m.doujinshi_id);
-      if (alreadyLinked) {
-        skippedAlreadyLinked++;
-        continue;
-      }
-    }
-    if (!force
-        && m.last_metadata_fetch_attempt_at
-        && (nowSeconds - m.last_metadata_fetch_attempt_at) < BULK_RETRY_COOLDOWN_SECONDS) {
-      skippedRecentAttempt++;
-      continue;
-    }
-    toProcess.push(m);
+    if (linkIdFor(m)) toRefresh.push(m);
+    else              toSearch.push(m);
   }
 
-  // Respond immediately — the pull runs in the background
+  // Respond immediately — the pull runs in the background.
   res.json({
-    message:                  'Bulk metadata pull started',
-    total:                    totalCount,
-    to_fetch:                 toProcess.length,
-    skipped_existing:         skippedExisting,
-    skipped_already_linked:   skippedAlreadyLinked,
-    skipped_recent_attempt:   skippedRecentAttempt,
+    message:    'Bulk metadata pull started',
+    total:      totalCount,
+    to_refresh: toRefresh.length,
+    to_search:  toSearch.length,
     source,
   });
 
-  if (toProcess.length === 0) {
-    console.log(
-      `[BulkMetadata][${source}] Nothing to do for "${library.name}" — ` +
-      `all ${totalCount} titles covered ` +
-      `(${skippedExisting} have third-party metadata, ${skippedAlreadyLinked} local already linked, ` +
-      `${skippedRecentAttempt} recently attempted).`
-    );
+  if (totalCount === 0) {
+    console.log(`[BulkMetadata][${source}] "${library.name}" is empty — nothing to do.`);
     return;
   }
 
   console.log(
     `[BulkMetadata][${source}] Starting for "${library.name}": ` +
-    `${toProcess.length} to fetch ` +
-    `(${skippedExisting} skipped — third-party metadata, ${skippedAlreadyLinked} skipped — local already linked, ` +
-    `${skippedRecentAttempt} skipped — recently attempted).`
+    `${toRefresh.length} to refresh by ID, ${toSearch.length} to search by title ` +
+    `(${totalCount} total).`
   );
 
   const anilistToken   = getToken(db);
   const doujinshiToken = getDoujinshiToken(db);
   const malClientId    = getMalClientId(db);
 
-  const counters = { applied: 0, linked: 0, noMatch: 0, errors: 0 };
-  const total = toProcess.length;
+  const counters = {
+    refreshed: 0, // had linkage; record updated from the source
+    applied:   0, // searched; full metadata applied
+    linked:    0, // searched; local-source manga, link-only write
+    noMatch:   0, // searched; no result
+    errors:    0,
+  };
+  const totalToDo = toRefresh.length + toSearch.length;
+  const progressN = () =>
+    counters.refreshed + counters.applied + counters.linked +
+    counters.noMatch  + counters.errors + 1;
 
-  async function applyOne(manga, result) {
-    const n = counters.applied + counters.linked + counters.noMatch + counters.errors + 1;
+  async function applySearchResult(manga, result) {
+    const n = progressN();
     if (!result) {
       counters.noMatch++;
-      console.log(`[BulkMetadata][${source}] (${n}/${total}) No match: "${manga.title}"`);
+      console.log(`[BulkMetadata][${source}] (${n}/${totalToDo}) No match: "${manga.title}"`);
       return;
     }
-    const setActive = shouldPromoteCover(manga, source);
-    const wasLocal  = manga.metadata_source === 'local';
-
-    await applyMetadataToManga(db, manga, result, source, { setActive });
-
-    if (wasLocal) {
-      counters.linked++;
-      console.log(
-        `[BulkMetadata][${source}] (${n}/${total}) Linked (local preserved): ` +
-        `"${manga.title}" → "${result.title}"` +
-        (setActive ? ' [cover updated]' : ' [cover preserved — higher-priority source present]')
-      );
-    } else {
+    // applyMetadataToManga preserves other linkages, switches displayed
+    // fields only when this source has higher-or-equal priority, and
+    // promotes the cover only when this source becomes the new display.
+    const { becameDisplay } = await applyMetadataToManga(db, manga, result, source);
+    if (becameDisplay) {
       counters.applied++;
       console.log(
-        `[BulkMetadata][${source}] (${n}/${total}) Applied: "${manga.title}" → "${result.title}"` +
-        (setActive ? '' : ' [cover preserved — higher-priority source present]')
+        `[BulkMetadata][${source}] (${n}/${totalToDo}) Applied (now displayed): ` +
+        `"${manga.title}" → "${result.title}"`
+      );
+    } else {
+      counters.linked++;
+      console.log(
+        `[BulkMetadata][${source}] (${n}/${totalToDo}) Linked (display preserved as ${manga.metadata_source}): ` +
+        `"${manga.title}" → "${result.title}"`
       );
     }
   }
 
-  if (source === 'anilist') {
-    // Batch: one GraphQL request per ANILIST_BATCH_SIZE titles
-    for (let i = 0; i < toProcess.length; i += ANILIST_BATCH_SIZE) {
-      const batch = toProcess.slice(i, i + ANILIST_BATCH_SIZE);
+  async function applyRefreshResult(manga, result) {
+    const n = progressN();
+    if (!result) {
+      // ID lookup miss is rare (deleted entry on the upstream); treat as a
+      // soft error so the user notices stale linkages.
+      counters.errors++;
+      console.warn(
+        `[BulkMetadata][${source}] (${n}/${totalToDo}) Refresh failed — ` +
+        `linkage exists but lookup returned nothing: "${manga.title}"`
+      );
+      return;
+    }
+    const { becameDisplay } = await applyMetadataToManga(db, manga, result, source);
+    counters.refreshed++;
+    console.log(
+      `[BulkMetadata][${source}] (${n}/${totalToDo}) Refreshed: ` +
+      `"${manga.title}" → "${result.title}"` +
+      (becameDisplay ? '' : ` [display preserved as ${manga.metadata_source}]`)
+    );
+  }
+
+  // Per-source delay between outbound HTTP requests. AniList exposes
+  // `X-RateLimit-Limit`; the helper recomputes a target spacing on every
+  // response so a degraded service (recently 30 req/min instead of 90)
+  // doesn't trigger an avoidable 429. MAL has no public limit but
+  // community usage settles around 1 req/sec — `MAL_REQUEST_INTERVAL_MS`
+  // owns that constant. Doujinshi.info stays at the previous 500 ms.
+  function delayMsFor(src) {
+    if (src === 'anilist')     return anilistRecommendedDelayMs();
+    if (src === 'myanimelist') return MAL_REQUEST_INTERVAL_MS;
+    return 500; // doujinshi
+  }
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // ── Refresh phase: fetch every linked title by its ID ────────────────────
+  if (source === 'anilist' && toRefresh.length > 0) {
+    // Batched alias query — one HTTP request per ANILIST_BATCH_SIZE titles.
+    for (let i = 0; i < toRefresh.length; i += ANILIST_BATCH_SIZE) {
+      const batch = toRefresh.slice(i, i + ANILIST_BATCH_SIZE);
       try {
-        const results = await fetchBatchFromAniList(batch.map(m => m.title), anilistToken);
+        const results = await fetchBatchByAniListIds(
+          batch.map(m => Number(m.anilist_id)), anilistToken
+        );
         for (let j = 0; j < batch.length; j++) {
-          await applyOne(batch[j], results[j]);
+          await applyRefreshResult(batch[j], results[j]);
         }
       } catch (err) {
-        for (const manga of batch) {
+        for (const m of batch) {
           counters.errors++;
-          const n = counters.applied + counters.linked + counters.noMatch + counters.errors;
+          const n = progressN();
           console.warn(
-            `[BulkMetadata][anilist] (${n}/${total}) Batch error for "${manga.title}": ${err.message}`
+            `[BulkMetadata][anilist] (${n}/${totalToDo}) Refresh batch error for "${m.title}": ${err.message}`
           );
         }
       }
-      // Always mark batch members attempted — even on a whole-batch failure
-      // the cooldown still applies, since retrying immediately won't help.
       markAttempted(db, batch.map(m => m.id), nowSeconds);
-      await new Promise(resolve => setTimeout(resolve, 700));
+      await sleep(delayMsFor('anilist'));
     }
-  } else {
-    // Non-AniList sources have no GraphQL alias trick — process sequentially
-    const perRequestDelay = source === 'doujinshi' ? 500 : 700;
-    for (const manga of toProcess) {
+  } else if (toRefresh.length > 0) {
+    for (const m of toRefresh) {
       try {
-        const result = source === 'doujinshi'
-          ? await fetchFromDoujinshi(manga.title, doujinshiToken)
-          : await fetchFromMAL(manga.title, malClientId);
-        await applyOne(manga, result);
+        const result = source === 'myanimelist'
+          ? await fetchByMALId(Number(m.mal_id), malClientId)
+          : await fetchByDoujinshiSlug(m.doujinshi_id, doujinshiToken);
+        await applyRefreshResult(m, result);
       } catch (err) {
         counters.errors++;
-        const n = counters.applied + counters.linked + counters.noMatch + counters.errors;
+        const n = progressN();
         console.warn(
-          `[BulkMetadata][${source}] (${n}/${total}) Error for "${manga.title}": ${err.message}`
+          `[BulkMetadata][${source}] (${n}/${totalToDo}) Refresh error for "${m.title}": ${err.message}`
         );
       }
-      markAttempted(db, [manga.id], nowSeconds);
-      await new Promise(resolve => setTimeout(resolve, perRequestDelay));
+      markAttempted(db, [m.id], nowSeconds);
+      await sleep(delayMsFor(source));
+    }
+  }
+
+  // ── Search phase: clean the title and look up unlinked manga ─────────────
+  if (source === 'anilist' && toSearch.length > 0) {
+    for (let i = 0; i < toSearch.length; i += ANILIST_BATCH_SIZE) {
+      const batch = toSearch.slice(i, i + ANILIST_BATCH_SIZE);
+      try {
+        // Title cleaning happens inside fetchBatchFromAniList already.
+        const results = await fetchBatchFromAniList(batch.map(m => m.title), anilistToken);
+        for (let j = 0; j < batch.length; j++) {
+          await applySearchResult(batch[j], results[j]);
+        }
+      } catch (err) {
+        for (const m of batch) {
+          counters.errors++;
+          const n = progressN();
+          console.warn(
+            `[BulkMetadata][anilist] (${n}/${totalToDo}) Search batch error for "${m.title}": ${err.message}`
+          );
+        }
+      }
+      markAttempted(db, batch.map(m => m.id), nowSeconds);
+      await sleep(delayMsFor('anilist'));
+    }
+  } else if (toSearch.length > 0) {
+    for (const m of toSearch) {
+      try {
+        const result = source === 'doujinshi'
+          ? await fetchFromDoujinshi(m.title, doujinshiToken)
+          : await fetchFromMAL(m.title, malClientId);
+        await applySearchResult(m, result);
+      } catch (err) {
+        counters.errors++;
+        const n = progressN();
+        console.warn(
+          `[BulkMetadata][${source}] (${n}/${totalToDo}) Search error for "${m.title}": ${err.message}`
+        );
+      }
+      markAttempted(db, [m.id], nowSeconds);
+      await sleep(delayMsFor(source));
     }
   }
 
   console.log(
     `[BulkMetadata][${source}] Finished for "${library.name}": ` +
-    `${counters.applied} applied, ${counters.linked} linked (local preserved), ` +
-    `${counters.noMatch} no match, ${counters.errors} errors ` +
-    `(${skippedExisting} skipped — third-party metadata, ${skippedAlreadyLinked} skipped — local already linked, ` +
-    `${skippedRecentAttempt} skipped — recently attempted).`
+    `${counters.refreshed} refreshed, ${counters.applied} applied, ` +
+    `${counters.linked} linked (local preserved), ${counters.noMatch} no match, ` +
+    `${counters.errors} errors.`
   );
 }));
 
@@ -594,35 +710,57 @@ function buildExportPayload(manga, remote) {
   };
 }
 
-// Re-fetch third-party metadata for a local-source manga that has been linked.
-// Picks the highest-priority linked source (anilist > mal > doujinshi). Returns
-// null if no linkage present or the fetch fails.
-async function fetchRemoteForLocal(manga, { anilistToken, malClientId, doujinshiToken }) {
+// Re-fetch third-party metadata for a manga that has at least one linkage.
+// AniList is preferred over MyAnimeList over Doujinshi.info, matching the
+// display priority. Returns `{ remote, source }` where `source` names the
+// upstream that answered, or null if no linkage is present / every fetch
+// failed.
+async function fetchRemoteForExport(manga, { anilistToken, malClientId, doujinshiToken }) {
   try {
     if (manga.anilist_id) {
-      return await fetchByAniListId(Number(manga.anilist_id), anilistToken);
-    }
-    if (manga.mal_id && malClientId) {
-      return await fetchByMALId(Number(manga.mal_id), malClientId);
-    }
-    if (manga.doujinshi_id) {
-      return await fetchByDoujinshiSlug(manga.doujinshi_id, doujinshiToken);
+      const remote = await fetchByAniListId(Number(manga.anilist_id), anilistToken);
+      if (remote) return { remote, source: 'anilist' };
     }
   } catch (err) {
-    console.warn(`[ExportMetadata] Remote fetch failed for "${manga.title}": ${err.message}`);
+    console.warn(`[ExportMetadata] AniList fetch failed for "${manga.title}": ${err.message}`);
+  }
+  try {
+    if (manga.mal_id && malClientId) {
+      const remote = await fetchByMALId(Number(manga.mal_id), malClientId);
+      if (remote) return { remote, source: 'myanimelist' };
+    }
+  } catch (err) {
+    console.warn(`[ExportMetadata] MAL fetch failed for "${manga.title}": ${err.message}`);
+  }
+  try {
+    if (manga.doujinshi_id) {
+      const remote = await fetchByDoujinshiSlug(manga.doujinshi_id, doujinshiToken);
+      if (remote) return { remote, source: 'doujinshi' };
+    }
+  } catch (err) {
+    console.warn(`[ExportMetadata] Doujinshi fetch failed for "${manga.title}": ${err.message}`);
   }
   return null;
 }
 
-// POST /api/libraries/:id/export-metadata — write metadata.json to each manga folder.
-// Behavior:
-//   metadata_source in ('anilist'|'myanimelist'|'doujinshi') → export DB fields directly
-//   metadata_source === 'local' with a third-party link (anilist_id / mal_id / doujinshi_id)
-//                             → re-fetch third-party metadata and write THAT (overwrites
-//                               any existing local metadata.json). DB remains untouched so
-//                               in-app display still uses the local record.
-//   metadata_source === 'local' with no link → skip (nothing third-party to export)
-//   metadata_source === 'none'               → skip
+// POST /api/libraries/:id/export-metadata — write metadata.json to each
+// manga folder.
+//
+// Per-manga behaviour:
+//   • If at least one external linkage exists (`anilist_id`, `mal_id`, or
+//     `doujinshi_id`), re-fetch from the highest-priority linked source
+//     (AniList > MAL > Doujinshi.info) and write THAT to `metadata.json`,
+//     overwriting any existing file regardless of the manga's current
+//     `metadata_source`. This is the "replace local JSON with third-party
+//     data" path the user asked for.
+//   • Otherwise, if `metadata_source` is one of the third-party tags
+//     ('anilist', 'myanimelist', 'doujinshi'), write the DB-stored fields.
+//     This handles legacy rows where the linkage ID was somehow lost but
+//     the metadata is still present.
+//   • Otherwise (no link AND `metadata_source` is 'none' or 'local' with
+//     no link), skip — there's nothing third-party to export.
+//
+// The DB row itself is never touched; only the on-disk sidecar is written.
 router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
@@ -635,33 +773,61 @@ router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
   const doujinshiToken = getDoujinshiToken(db);
   const malClientId    = getMalClientId(db);
 
-  let exported      = 0;
-  let exportedLocal = 0; // local-source manga exported with fetched third-party data
-  let skipped       = 0;
-  let writeErrors   = 0;
+  let exported               = 0;
+  let exportedLocal          = 0; // local-displayed manga had its sidecar replaced
+  let skipped                = 0;
+  let writeErrors            = 0;
 
   for (const manga of allManga) {
-    const source = manga.metadata_source;
     const hasThirdPartyLink = !!(manga.anilist_id || manga.mal_id || manga.doujinshi_id);
 
-    if (source === 'none')                             { skipped++; continue; }
-    if (source === 'local' && !hasThirdPartyLink)      { skipped++; continue; }
+    // Skip when there is genuinely nothing external to export — neither a
+    // linkage nor third-party-sourced fields in the DB.
+    if (!hasThirdPartyLink &&
+        (manga.metadata_source === 'none' || manga.metadata_source === 'local')) {
+      skipped++;
+      continue;
+    }
 
     try {
       let payload;
-      if (source === 'local') {
-        const remote = await fetchRemoteForLocal(manga, { anilistToken, malClientId, doujinshiToken });
-        if (!remote) { skipped++; continue; }
-        payload = buildExportPayload(manga, remote);
-        exportedLocal++;
-        // AniList is the common path — be polite on the rate limit
-        if (manga.anilist_id) await new Promise(r => setTimeout(r, 700));
-      } else {
+      let usedRemote = false;
+      const wasLocalDisplayed = manga.metadata_source === 'local';
+
+      if (hasThirdPartyLink) {
+        const fetched = await fetchRemoteForExport(manga, {
+          anilistToken, malClientId, doujinshiToken,
+        });
+        if (fetched) {
+          payload = buildExportPayload(manga, fetched.remote);
+          usedRemote = true;
+          // Pace per the source that just answered. AniList exposes a
+          // live X-RateLimit-Limit header; MAL/Doujinshi use fixed delays.
+          if (fetched.source === 'anilist') {
+            await new Promise(r => setTimeout(r, anilistRecommendedDelayMs()));
+          } else if (fetched.source === 'myanimelist') {
+            await new Promise(r => setTimeout(r, MAL_REQUEST_INTERVAL_MS));
+          } else if (fetched.source === 'doujinshi') {
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+      }
+
+      if (!payload) {
+        // Fallback: write whatever the DB has. Only happens for rows that
+        // have third-party fields but no linkage — rare, but legitimate.
+        if (!hasThirdPartyLink &&
+            !['anilist', 'myanimelist', 'doujinshi'].includes(manga.metadata_source)) {
+          skipped++;
+          continue;
+        }
         payload = buildExportPayload(manga, null);
       }
+
       const outPath = path.join(manga.path, 'metadata.json');
       fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
       exported++;
+      if (wasLocalDisplayed && usedRemote) exportedLocal++;
     } catch (err) {
       writeErrors++;
       console.warn(`[ExportMetadata] Failed for "${manga.title}": ${err.message}`);
@@ -670,7 +836,7 @@ router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
 
   console.log(
     `[ExportMetadata] "${library.name}": exported ${exported} ` +
-    `(${exportedLocal} local-source overwritten with third-party data), ` +
+    `(${exportedLocal} local-displayed manga had their sidecar replaced with third-party data), ` +
     `skipped ${skipped}, ${writeErrors} write errors.`
   );
 
@@ -679,29 +845,30 @@ router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
   });
 }));
 
-// POST /api/manga/:id/export-metadata — write metadata.json to this manga's folder on disk.
-// Local-source manga with a third-party link are re-fetched from that source so the exported
-// JSON reflects third-party data (overwriting any existing local metadata.json).
+// POST /api/manga/:id/export-metadata — write metadata.json for a single
+// manga. Same priority rule as the bulk export: linkage takes precedence
+// over `metadata_source`, AniList beats MAL beats Doujinshi.info.
 router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  const source = manga.metadata_source;
   const hasThirdPartyLink = !!(manga.anilist_id || manga.mal_id || manga.doujinshi_id);
+  const hasThirdPartyFields = ['anilist', 'myanimelist', 'doujinshi'].includes(manga.metadata_source);
 
-  if (!source || source === 'none' || (source === 'local' && !hasThirdPartyLink)) {
+  if (!hasThirdPartyLink && !hasThirdPartyFields) {
     return res.status(400).json({ error: 'This manga has no linked metadata to export.' });
   }
 
   let remote = null;
-  if (source === 'local') {
-    remote = await fetchRemoteForLocal(manga, {
+  if (hasThirdPartyLink) {
+    const fetched = await fetchRemoteForExport(manga, {
       anilistToken:   getToken(db),
       malClientId:    getMalClientId(db),
       doujinshiToken: getDoujinshiToken(db),
     });
-    if (!remote) {
+    if (fetched) remote = fetched.remote;
+    if (!remote && !hasThirdPartyFields) {
       return res.status(502).json({ error: 'Could not fetch metadata from the linked source.' });
     }
   }
@@ -712,7 +879,7 @@ router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
 
   console.log(
     `[ExportMetadata] Wrote metadata.json for "${manga.title}" ` +
-    `(source=${source}${remote ? ' → re-fetched third-party' : ''})`
+    `(source=${manga.metadata_source}${remote ? ' → re-fetched third-party' : ''})`
   );
   res.json({ data: { path: outPath } });
 }));

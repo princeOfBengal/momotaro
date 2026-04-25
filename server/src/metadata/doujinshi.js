@@ -176,9 +176,15 @@ async function searchDoujinshi(query, token, page = 1) {
 /**
  * Auto-fetch best match for a title. Returns a normalized result or null.
  * Fetches full book details for the top result so tags/author are included.
+ *
+ * Pre-cleans the title with the shared cleaner so folder-name cruft
+ * (release-group brackets, volume markers, year ranges, etc.) doesn't
+ * sabotage the search.
  */
 async function fetchFromDoujinshi(title, token) {
-  const results = await searchDoujinshi(title, token);
+  const { cleanSearchTitle } = require('./anilist');
+  const cleaned = cleanSearchTitle(title) || title;
+  const results = await searchDoujinshi(cleaned, token);
   if (!results.length) return null;
   const slug = results[0].doujinshi_id;
   if (!slug) return results[0];

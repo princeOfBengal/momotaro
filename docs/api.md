@@ -289,6 +289,35 @@ Used by the chapter-level *Mark as Read* / *Mark as Unread* toggle on MangaDetai
 
 ## Metadata
 
+### Linkage and display priority
+
+A manga can be linked to **AniList, MyAnimeList, and Doujinshi.info simultaneously**. Establishing a new linkage never breaks an existing one — the only way to remove a linkage is the explicit Break Linkage action (`POST /api/manga/:id/reset-metadata`). Adding a `metadata.json` to a manga's folder doesn't break linkages either; it just changes which fields are displayed.
+
+**Display priority** decides which source's fields populate `manga.title`, `manga.description`, `manga.status`, `manga.year`, `manga.genres`, `manga.score`, `manga.author`, and the active `cover_image`:
+
+| Priority | Source | Identified by |
+| --- | --- | --- |
+| 3 (highest) | local | `metadata_source = 'local'` (set by the scanner when `metadata.json` is present in the manga folder) |
+| 2 | AniList | `metadata_source = 'anilist'` |
+| 1 | MyAnimeList | `metadata_source = 'myanimelist'` |
+| 0 | Doujinshi.info | `metadata_source = 'doujinshi'` |
+| -1 | none | `metadata_source = 'none'` |
+
+When a metadata fetch result is applied to a row, the server compares the incoming source's priority to `metadata_source`:
+
+- **incoming ≥ current** — the displayed fields are rewritten with the new source's data, `metadata_source` is updated to the new source, and the active `cover_image` is swapped to that source's cover.
+- **incoming < current** — only the linkage ID (and the source-specific cover column, e.g. `mal_cover`) are written. Displayed fields stay where they are; the active cover is unchanged. The other source's data is still recorded so the user can see it from the Thumbnail Picker / Metadata modal.
+
+In every case, **all three linkage IDs are written through `COALESCE`**. A NULL incoming value never overwrites an existing ID — that's the central invariant. Concretely:
+
+- Apply MAL to an empty manga → `metadata_source = 'myanimelist'`, `mal_id` set, MAL cover becomes active.
+- Apply AniList to a MAL-displayed manga → `metadata_source = 'anilist'` (priority 2 > 1), `anilist_id` set, AniList cover becomes active, **`mal_id` preserved**.
+- Apply MAL to an AniList-displayed manga → `metadata_source` stays `'anilist'` (1 < 2), `mal_id` set, MAL cover saved to `mal_cover` but **active cover stays AniList**.
+- Drop a `metadata.json` on a manga linked to AniList and MAL → scanner switches `metadata_source` to `'local'`; `anilist_id` and `mal_id` are untouched. Apply AniList again afterwards → display stays local (3 > 2), AniList linkage refreshed.
+- Break only AniList → `anilist_id` cleared, `mal_id` and local fields preserved.
+
+This priority drives both the bulk pull and every single-manga refresh / apply route.
+
 ### AniList
 
 | Method | Path | Description |
@@ -331,11 +360,9 @@ Author is extracted from the `authors` field of the MAL response, preferring ent
 | ------ | -------------------------------- | ---------------------------------------------------- |
 | POST   | `/api/manga/:id/export-metadata` | Write `metadata.json` to this manga's folder on disk |
 
-Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. Requires either `metadata_source != 'none'` or a `metadata_source = 'local'` manga with a third-party link (`anilist_id` / `mal_id` / `doujinshi_id`); returns 400 otherwise.
+Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. Mirrors the bulk-export rule: linkage is the primary signal. If any of `anilist_id` / `mal_id` / `doujinshi_id` is set, the server re-fetches from the highest-priority linked source (AniList > MyAnimeList > Doujinshi.info) and writes that data, **overwriting any existing local sidecar**. Falls back to DB fields if no linkage is present but `metadata_source` is a third-party tag. Returns 400 if there's nothing to export and 502 if every linked-source fetch failed and there's no third-party DB data to fall back on.
 
-**Local-source with third-party link** — when `metadata_source === 'local'` and at least one ID is present, the server re-fetches the linked third-party source (priority AniList > MyAnimeList > Doujinshi.info) and writes *that* data into the JSON, overwriting any existing file. The database row is not modified, so in-app display continues to use the local record. If the remote fetch fails, the endpoint returns 502.
-
-For all other linked sources, the file is written directly from the DB fields. Includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
+The DB row is never modified by export. Includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
 
 **Response shape:**
 
@@ -355,11 +382,13 @@ For all other linked sources, the file is written directly from the DB fields. I
 { "source": "anilist" | "myanimelist" | "doujinshi" }
 ```
 
+**The Break Linkage button is the only way a linkage is ever cleared** — applying metadata, importing config, dropping a `metadata.json`, or running bulk pulls all preserve linkages. See [Linkage and display priority](#linkage-and-display-priority) for the full apply-side guarantee.
+
 Behavior depends on whether `source` is supplied:
 
 - **`source` omitted** — full reset. Clears `anilist_id`, `mal_id`, `doujinshi_id`, all sourced metadata fields (`description`, `status`, `year`, `genres`, `score`, `author`), sets `metadata_source = 'none'`, and clears `last_metadata_fetch_attempt_at`.
 - **`source` supplied, matches `metadata_source`** — full reset as above, but only the specified source's ID (`anilist_id` / `mal_id` / `doujinshi_id`) and cover column (`anilist_cover` / `mal_cover`) are cleared. Doujinshi.info has no dedicated cover column.
-- **`source` supplied, does *not* match `metadata_source`** (e.g. source is `'anilist'` but the manga displays `'local'` or `'myanimelist'`) — **link-only break**. Only the specified source's `*_id` and cover column are nulled. All metadata fields, `metadata_source`, and any other linkage IDs are preserved. This is how the UI detaches an auxiliary link while keeping the user's chosen display source intact.
+- **`source` supplied, does *not* match `metadata_source`** (e.g. source is `'anilist'` but the manga displays `'local'` or `'myanimelist'`) — **link-only break**. Only the specified source's `*_id` and cover column are nulled. All metadata fields, `metadata_source`, and any other linkage IDs are preserved. This is the common case now that linkages persist independently of the display source.
 
 Per-field summary:
 
@@ -379,76 +408,82 @@ Returns the updated manga row. Use the full-reset form when the wrong title was 
 `POST /api/libraries/:id/bulk-metadata` accepts an optional body:
 
 ```json
-{ "source": "anilist", "force": false }
+{ "source": "anilist" }
 ```
 
-`source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. `force` defaults to `false`; set it to `true` to bypass the 7-day retry cooldown described below. The endpoint responds immediately; the actual fetch loop runs in the background.
+`source` can be `"anilist"` (default), `"myanimelist"`, or `"doujinshi"`. The endpoint responds immediately; the actual fetch loop runs in the background.
 
-**Skip logic** — processed vs. skipped depends on the title's current `metadata_source`:
+**The bulk pull always runs over every title in the library — it never refuses.** Each manga is sorted into one of two phases up-front:
 
-| `metadata_source` | Behavior |
-| --- | --- |
-| `'none'` | Full fetch — all metadata fields and the linkage ID are applied; the source's cover is downloaded and promoted to active (subject to the priority rule below). |
-| `'local'` | **Link-only** — only the external ID (`anilist_id` / `mal_id` / `doujinshi_id`) is written; the user's local-JSON metadata fields (title, description, genres, etc.) are preserved. The source's cover is still downloaded and, if priority allows, promoted to active. Already-linked titles for the current source are skipped. |
-| `'anilist'`, `'myanimelist'`, `'doujinshi'` | Skipped — title already has third-party metadata. |
+| Phase | Selected when | What happens |
+| --- | --- | --- |
+| **Refresh by ID** | The manga has the source's linkage ID set (`anilist_id` for AniList, `mal_id` for MyAnimeList, `doujinshi_id` for Doujinshi.info) | The endpoint fetches the canonical record by ID — no search, no ambiguity. The result is then applied with the priority-aware writer described under [Linkage and display priority](#linkage-and-display-priority): linkages from other sources are preserved unconditionally, displayed fields are overwritten only when this source's priority is ≥ current. |
+| **Search by title** | No linkage ID for the chosen source | The folder-derived title runs through the shared `cleanSearchTitle` helper before the search, stripping release-group brackets, volume / chapter markers, year ranges, and quality tags (e.g. `"Fruits Basket Another (2018-2022) (Digital) (1r0n)"` → `"Fruits Basket Another"`). Results are then applied with the same priority-aware writer. |
 
-**Retry cooldown** — every processed title has its `last_metadata_fetch_attempt_at` stamped regardless of outcome. On subsequent bulk pulls, any title whose last attempt is within 7 days is skipped unless `force: true` is passed. Titles that already succeeded are skipped automatically by the source check above, so the cooldown only affects titles that previously produced no match. `POST /api/manga/:id/reset-metadata` clears the timestamp so a reset title is eligible again immediately.
+**Title cleaning rules** (applied to both new searches and the single-manga `refresh-metadata`-family endpoints):
 
-**AniList batching** — when `source = 'anilist'`, titles are sent 5 per GraphQL request using query aliases, cutting outbound HTTP count ~5×. Each batch is still spaced 700 ms apart to stay within AniList's request-per-minute limit. MyAnimeList and Doujinshi.info remain sequential (no alias equivalent in their REST APIs).
+- Bracketed groups: `{...}`, `[...]`, `(...)` — repeatedly, so nested brackets collapse.
+- Volume markers: `Vol.01`, `Volume 3`, `v01`, `v01-05`, `v.1`.
+- Chapter markers: `Ch.01`, `Chapter 03`, `c05`, `c.05`.
+- 4-digit year ranges: `1997-2003`, `2018–2022`.
+- Release-quality / status words: `Digital`, `HD`, `HQ`, `LQ`, `Raw`, `Complete`, `Ongoing`, `Omnibus`, `Uncensored`, `WebRip`, `Fix`, etc.
+- Hyphens / underscores collapse to spaces; whitespace is normalised.
 
-**Cover promotion priority** — during a bulk pull, an already-saved cover from a higher-priority source is never replaced. The promotion rule for the source being pulled:
+The shared cleaner lives in [server/src/metadata/anilist.js](../server/src/metadata/anilist.js) → `cleanSearchTitle` and is consumed by AniList, MyAnimeList, and Doujinshi.info via re-export.
 
-| Source being pulled | Promoted to active cover when… |
-| --- | --- |
-| `anilist` | Always (top priority). |
-| `myanimelist` | No `anilist_cover` file exists yet. |
-| `doujinshi` | Neither `anilist_cover` nor `mal_cover` exists yet. |
+**Cooldown:** the bulk endpoint stamps `last_metadata_fetch_attempt_at` after each title is processed, but it no longer respects the cooldown when deciding what to do — bulk is a manual, user-initiated action and is expected to refetch on demand. (The post-scan automatic metadata fetch still honours the cooldown via the same column.) `POST /api/manga/:id/reset-metadata` continues to clear the timestamp.
 
-A lower-priority source's cover file is still downloaded and saved to its column (`mal_cover` / `doujinshi_cover`) — it just doesn't overwrite `cover_image`. The user can switch covers manually via the Thumbnail Picker. The same priority applies to both third-party-metadata (`metadata_source = 'none'`) and local-metadata (`metadata_source = 'local'`) titles.
+**AniList batching** — both phases use one GraphQL request per `ANILIST_BATCH_SIZE = 10` titles, via aliased `Media(id: …)` (refresh) or `Media(search: …)` (search) blocks. 10 aliases per request keeps query complexity well below AniList's ceiling while halving outbound HTTP count vs. the previous 5-per-batch. MyAnimeList and Doujinshi.info have no alias equivalent and run sequentially with per-source delays (1000 ms / 500 ms).
 
-**Single-manga endpoints** (`refresh-metadata`, `apply-metadata`, `refresh-mal-metadata`, `apply-mal-metadata`, `refresh-doujinshi-metadata`, `apply-doujinshi-metadata`) behave slightly differently:
+**Adaptive AniList pacing** — every successful AniList response is read for `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. The bulk loop pulls its inter-request sleep from `recommendedDelayMs()` between calls, so:
 
-- For `metadata_source = 'local'`, they also use link-only writes (local JSON metadata preserved).
-- For other sources, they fully overwrite since the user explicitly picked a new entry.
-- The cover is **always** promoted to active — user intent overrides the bulk priority rule, so e.g. clicking *Fetch* on the MAL tab will replace an existing AniList cover with the MAL one.
+- When AniList signals the standard 90 req/min limit, the loop spaces requests at ~717 ms.
+- When AniList temporarily degrades the limit to 30 req/min (a documented condition that has occurred in production), the loop automatically shifts to ~2050 ms spacing — no 429s, no manual intervention.
+- When `X-RateLimit-Remaining` drops to ≤ 5 within a window, the loop stretches per-call delay so the remaining budget lands after `X-RateLimit-Reset`.
+- A 429 still triggers the existing `Retry-After`-respecting back-off and pins the next call to the slowest setting (5 000 ms) until headers indicate health restored.
+
+This adaptive pacing also drives the per-manga `POST /api/libraries/:id/export-metadata` route's AniList re-fetch step.
+
+**Adult content** — AniList queries no longer pass `isAdult: false`, so adult titles are returned alongside SFW results (matching what the on-disk library scanner already saw). MyAnimeList's `/manga` endpoint now sends `nsfw=true`, opting into the gray and black NSFW grades (default would silently filter them out).
+
+**Cover promotion** — driven by the same display priority. A source's cover is always downloaded into its dedicated column (`anilist_cover`, `mal_cover`) on a successful fetch, so the Thumbnail Picker can offer it later. The active `cover_image` is only swapped when the incoming source becomes the new display source, which means: AniList replaces MAL/none/doujinshi covers, MAL replaces only doujinshi/none, MAL never overwrites an AniList cover or a local-displayed manga's cover.
+
+**Single-manga endpoints** (`refresh-metadata`, `apply-metadata`, `refresh-mal-metadata`, `apply-mal-metadata`, `refresh-doujinshi-metadata`, `apply-doujinshi-metadata`) all use the same priority-aware writer as bulk. They never force-promote — clicking *Apply MAL* on an AniList-displayed manga records the MAL linkage and saves the MAL cover to `mal_cover` but leaves the visible cover and displayed fields untouched. To swap display source, the user can either pick the higher-priority source's *Apply* (e.g. AniList) or use Break Linkage to drop the current source first.
 
 **Response shape:**
 ```json
 {
-  "message": "Bulk metadata pull started",
-  "total": 50,
-  "to_fetch": 10,
-  "skipped_existing": 30,
-  "skipped_already_linked": 8,
-  "skipped_recent_attempt": 2,
-  "source": "anilist"
+  "message":    "Bulk metadata pull started",
+  "total":      50,
+  "to_refresh": 38,
+  "to_search":  12,
+  "source":     "anilist"
 }
 ```
 
-- `total` — total manga in the library
-- `to_fetch` — manga that will be processed (`'none'` or `'local'`, not on cooldown, not already linked for this source)
-- `skipped_existing` — third-party metadata already present (anilist / myanimelist / doujinshi)
-- `skipped_already_linked` — `'local'` metadata and the relevant ID for this source is already stored
-- `skipped_recent_attempt` — last fetch attempt within the 7-day cooldown and `force` was not set
+- `total` — every manga in the library
+- `to_refresh` — manga that will be refreshed by their existing linkage ID for the chosen source
+- `to_search` — manga that will be searched by cleaned title
 
-**Rate limiting** — AniList requests are spaced 700 ms apart to stay within the ~90 req/min limit. Doujinshi.info requests are spaced 500 ms apart; each title requires two upstream calls (search + fetch-by-slug).
+**Rate limiting** — AniList request spacing is **adaptive** (see *Adaptive AniList pacing* above). MyAnimeList is fixed at 1 000 ms per request (`MAL_REQUEST_INTERVAL_MS`). Doujinshi.info is fixed at 500 ms; each title requires two upstream calls (search + fetch-by-slug).
 
-**Server logs** — progress is logged per-title as `(X/Y) Applied / No match / Error`, with a final summary line reporting applied, no-match, error, and skipped counts.
+**Server logs** — progress is logged per-title as `(X/Y) Refreshed / Applied / Linked / No match / Error`, with a final summary line reporting each counter.
 
 ### Export Metadata
 
 `POST /api/libraries/:id/export-metadata` writes a `metadata.json` sidecar file into each manga's folder. No request body is required.
 
-Export behaviour per title:
+Export behaviour per title (linkage is the primary signal — `metadata_source` only matters when no linkage is present):
 
-| `metadata_source`                           | Link present                                    | Action |
-| ------------------------------------------- | ----------------------------------------------- | ------ |
-| `'anilist'` / `'myanimelist'` / `'doujinshi'` | —                                             | Write DB fields to `metadata.json`. |
-| `'local'`                                   | `anilist_id` / `mal_id` / `doujinshi_id` set    | **Re-fetch** the linked source (priority AniList > MAL > Doujinshi.info) and write *that* data to `metadata.json`, overwriting any existing file. DB is not modified. |
-| `'local'`                                   | no link                                         | Skip. |
-| `'none'`                                    | —                                               | Skip. |
+| Has any linkage (`anilist_id` / `mal_id` / `doujinshi_id`) | `metadata_source` | Action |
+| --- | --- | --- |
+| Yes | any | **Re-fetch** from the highest-priority linked source (AniList > MyAnimeList > Doujinshi.info) and write that data to `metadata.json`, **overwriting any existing file** including a hand-edited local one. DB is not modified, so in-app display continues to use whatever `metadata_source` already pointed at. Falls back to DB-stored fields if every fetch attempt fails and `metadata_source` is a third-party tag. |
+| No | `'anilist'` / `'myanimelist'` / `'doujinshi'` | Write DB fields to `metadata.json`. (Edge case: third-party-sourced fields with no linkage ID, e.g. legacy data.) |
+| No | `'local'` or `'none'` | Skip — there is nothing third-party to export. |
 
-The endpoint is not fully synchronous any more — it may issue upstream HTTP requests for each local-source manga with a link. AniList fetches are spaced 700 ms apart for rate limiting. The client allows up to 10 minutes per request (`timeoutMs: 600_000`) for large libraries.
+This is the path the user uses to **replace a hand-curated `metadata.json` with fresh AniList or MAL data**: trigger Bulk Export and the sidecar will be rewritten from whichever third-party source the manga is linked to, AniList preferred. The `metadata_source` of the row never changes — if `metadata_source = 'local'`, the in-app display stays on the local fields after the rewrite. To move display to the third-party source, the user can run a Bulk Metadata Pull afterwards (or click Apply on the linked source's tab in the Metadata modal).
+
+The endpoint is not fully synchronous — it issues upstream HTTP requests per linked manga. AniList fetches use the adaptive spacing driven by the `X-RateLimit-Limit` header; MyAnimeList uses `MAL_REQUEST_INTERVAL_MS`; Doujinshi.info uses 500 ms. The client allows up to 10 minutes per request (`timeoutMs: 600_000`) for large libraries.
 
 **Response shape:**
 ```json
@@ -465,8 +500,8 @@ The endpoint is not fully synchronous any more — it may issue upstream HTTP re
 
 - `total` — total manga in the library
 - `exported` — total number of `metadata.json` files written (includes `exported_local`)
-- `exported_local` — subset of `exported` where a local-source manga had its file overwritten with freshly-fetched third-party data
-- `skipped` — manga with `metadata_source = 'none'`, or `'local'` with no third-party link, or a linked `'local'` manga whose remote fetch returned nothing
+- `exported_local` — subset of `exported` where a manga whose displayed source is `'local'` had its sidecar overwritten with freshly-fetched third-party data
+- `skipped` — manga with no linkage AND no third-party-sourced fields in the DB (i.e. nothing third-party to export)
 - `errors` — manga whose folder could not be written to (permissions, path missing, etc.); these are logged server-side
 
 **Written file** — each `metadata.json` is pretty-printed JSON written to `{manga.path}/metadata.json`. It includes only non-null fields. Example:

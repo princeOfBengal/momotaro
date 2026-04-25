@@ -150,14 +150,23 @@ function LibrariesSection() {
     setBulkStatus(null);
     try {
       const result = await api.bulkMetadata(lib.id, source);
-      const { to_fetch, skipped_existing, total } = result;
+      const { to_refresh = 0, to_search = 0, total = 0 } = result;
+      const plural = (n, s, p = s + 's') => `${n} ${n === 1 ? s : p}`;
       let message;
-      if (to_fetch === 0) {
-        message = `All ${total} titles already have metadata — nothing to pull.`;
-      } else if (skipped_existing > 0) {
-        message = `Pulling metadata for ${to_fetch} title${to_fetch !== 1 ? 's' : ''} in the background. ${skipped_existing} skipped (already have metadata).`;
+      if (total === 0) {
+        message = 'No manga in this library yet — nothing to pull.';
       } else {
-        message = `Pulling metadata for ${to_fetch} title${to_fetch !== 1 ? 's' : ''} in the background.`;
+        const parts = [];
+        if (to_refresh > 0) {
+          parts.push(`refreshing ${plural(to_refresh, 'already-linked title')}`);
+        }
+        if (to_search > 0) {
+          parts.push(`searching for ${plural(to_search, 'unlinked title')}`);
+        }
+        message =
+          parts.length > 0
+            ? `Started: ${parts.join(' and ')} in the background.`
+            : `Started for ${plural(total, 'title')} in the background.`;
       }
       setBulkStatus({ libId: lib.id, message });
     } catch (err) {

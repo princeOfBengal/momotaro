@@ -21,9 +21,13 @@ const MEDIA_FIELDS = `
   }
 `;
 
+// `isAdult` is intentionally omitted — when no adult filter is provided
+// AniList returns both adult and non-adult results, which is what users of
+// a self-hosted personal library expect (the library scanner indexes
+// whatever the user dropped in; the metadata source should match it).
 const AUTO_SEARCH_QUERY = `
 query ($search: String) {
-  Media(search: $search, type: MANGA, isAdult: false) {
+  Media(search: $search, type: MANGA) {
     ${MEDIA_FIELDS}
   }
 }
@@ -32,7 +36,7 @@ query ($search: String) {
 const MANUAL_SEARCH_QUERY = `
 query ($search: String, $page: Int) {
   Page(page: $page, perPage: 10) {
-    media(search: $search, type: MANGA, isAdult: false) {
+    media(search: $search, type: MANGA) {
       ${MEDIA_FIELDS}
     }
   }
@@ -53,6 +57,60 @@ function buildHeaders(token) {
   return headers;
 }
 
+// Adaptive rate-limit state. AniList's published limit is 90 req/min, but
+// they sometimes temporarily degrade it to 30 req/min and signal that via
+// `X-RateLimit-Limit`. We read the header on every successful response and
+// recompute a target inter-request delay so callers (the bulk loop) pace
+// themselves to the actual cap instead of a hardcoded 700 ms that would
+// 429 under degraded service.
+//
+//   - SAFE_DELAY  — what callers should sleep between requests
+//   - lastReset   — Unix seconds when the current window resets, used to
+//                   serialise spacing when only a few requests remain
+const ANILIST_DEFAULT_LIMIT      = 90;          // documented standard
+const ANILIST_SAFETY_MARGIN_MS   = 50;          // padding above the math floor
+const ANILIST_MIN_DELAY_MS       = 700;         // never go faster than this
+const ANILIST_MAX_DELAY_MS       = 5_000;       // bound the slow path
+
+let _adaptiveDelayMs = ANILIST_MIN_DELAY_MS;
+let _rateLimitState = {
+  limit:     ANILIST_DEFAULT_LIMIT,
+  remaining: ANILIST_DEFAULT_LIMIT,
+  resetAt:   0,
+};
+
+function recommendedDelayMs() {
+  return _adaptiveDelayMs;
+}
+
+function updateAdaptiveDelay() {
+  const { limit, remaining, resetAt } = _rateLimitState;
+  // Target steady-state: spread `limit` requests evenly over the 60 s
+  // window plus a small safety margin.
+  const steadyMs = Math.ceil(60_000 / Math.max(1, limit)) + ANILIST_SAFETY_MARGIN_MS;
+
+  // If we're nearly out of quota in the current window, slow down so the
+  // remaining calls land after the window resets.
+  if (resetAt && remaining > 0 && remaining <= 5) {
+    const msUntilReset = Math.max(0, resetAt * 1000 - Date.now());
+    const perCall = Math.ceil(msUntilReset / Math.max(1, remaining)) + ANILIST_SAFETY_MARGIN_MS;
+    _adaptiveDelayMs = Math.max(ANILIST_MIN_DELAY_MS, Math.min(ANILIST_MAX_DELAY_MS, Math.max(steadyMs, perCall)));
+    return;
+  }
+
+  _adaptiveDelayMs = Math.max(ANILIST_MIN_DELAY_MS, Math.min(ANILIST_MAX_DELAY_MS, steadyMs));
+}
+
+function readRateHeaders(resp) {
+  const limit     = parseInt(resp.headers.get('x-ratelimit-limit')     || '', 10);
+  const remaining = parseInt(resp.headers.get('x-ratelimit-remaining') || '', 10);
+  const resetAt   = parseInt(resp.headers.get('x-ratelimit-reset')     || '', 10);
+  if (Number.isFinite(limit))     _rateLimitState.limit     = limit;
+  if (Number.isFinite(remaining)) _rateLimitState.remaining = remaining;
+  if (Number.isFinite(resetAt))   _rateLimitState.resetAt   = resetAt;
+  updateAdaptiveDelay();
+}
+
 async function anilistRequest(query, variables, token, attempt = 0) {
   const resp = await fetch(ANILIST_URL, {
     method: 'POST',
@@ -60,8 +118,12 @@ async function anilistRequest(query, variables, token, attempt = 0) {
     body: JSON.stringify({ query, variables }),
   });
 
-  // Rate limited — back off and retry up to 3 times
+  // Rate limited — back off and retry up to 3 times. Pin the adaptive delay
+  // to the slowest setting so subsequent callers don't immediately try
+  // again at the previous (now-too-fast) cadence.
   if (resp.status === 429) {
+    readRateHeaders(resp);
+    _adaptiveDelayMs = ANILIST_MAX_DELAY_MS;
     if (attempt < 3) {
       const retryAfter = parseInt(resp.headers.get('retry-after') || '60', 10);
       const delay = Math.min(retryAfter * 1000, 90_000);
@@ -71,6 +133,8 @@ async function anilistRequest(query, variables, token, attempt = 0) {
     }
     throw new Error('AniList rate limit exceeded after 3 retries');
   }
+
+  readRateHeaders(resp);
 
   const json = await resp.json();
 
@@ -145,14 +209,68 @@ function normalizeMedia(m) {
   };
 }
 
+// Strip release-group / scanner / archive cruft from a folder-derived title
+// before sending it to a metadata source. Conservative in two directions:
+//
+//   1. We only remove tokens we recognise as non-title — we never touch
+//      alphabetic words that could be part of the actual series name.
+//   2. We run the same cleaner for every source (AniList / MAL / Doujinshi)
+//      so there's a single search string shape to reason about.
+//
+// Example: "Fruits Basket Another (2018-2022) (Digital) (1r0n)"
+//       → "Fruits Basket Another"
 function cleanSearchTitle(title) {
-  return title
-    .replace(/\{[^}]*\}/g, '')   // {curly bracket content}
-    .replace(/\[[^\]]*\]/g, '')  // [square bracket content]
-    .replace(/\([^)]*\)/g, '')   // (parenthesis content)
-    .replace(/[-_]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let s = String(title || '');
+
+  // ── Bracketed scanner / release-group tags ────────────────────────────────
+  // Applied repeatedly so nested brackets collapse: "[[HQ]] Title" → "Title".
+  let prev;
+  do {
+    prev = s;
+    s = s
+      .replace(/\{[^{}]*\}/g, ' ')
+      .replace(/\[[^\[\]]*\]/g, ' ')
+      .replace(/\([^()]*\)/g, ' ');
+  } while (s !== prev);
+
+  // ── Volume / chapter references ───────────────────────────────────────────
+  // "Vol.01", "Volume 3", "v01", "v01-05", "v.1" — all out.
+  s = s.replace(/\b(?:vol(?:ume)?|v)\.?\s*\d+(?:[-–.]\d+)?\b/gi, ' ');
+  // "Ch.01", "Chapter 03", "c05", "c.05".
+  s = s.replace(/\b(?:ch(?:apter)?|c)\.?\s*\d+(?:[-–.]\d+)?\b/gi, ' ');
+
+  // ── Standalone year / year-range outside any bracket ─────────────────────
+  // Matches "1997-2003" and bare "2021"; keeps numeric years that are part
+  // of the actual title (e.g. "2001 Nights") off-limits unless presented
+  // as a range, because a standalone 4-digit year in a folder name is
+  // almost always a release marker.
+  s = s.replace(/\b(?:19|20)\d{2}\s*[-–]\s*(?:19|20)\d{2}\b/g, ' ');
+
+  // ── Release-quality / status tags ─────────────────────────────────────────
+  const TAG_WORDS = [
+    'Digital', 'Physical', 'Scan', 'Scans', 'Scanned',
+    'HQ', 'HD', 'SD', 'Hi[- ]?Res', 'Hi[- ]?Quality', 'High[- ]?Quality',
+    'LQ', 'Low[- ]?Quality',
+    'Raw', 'Raws',
+    'Official', 'Unofficial', 'Fan[- ]?made',
+    'Complete', 'Completed', 'Ongoing', 'Finished',
+    'Omnibus', 'Collected', 'Collection', 'Compilation', 'Box[- ]?set',
+    'Uncensored', 'Censored',
+    'WebRip', 'Web[- ]?Rip', 'Web[- ]?dl',
+    'Fix', 'Fixed', 'Repack', 'Reupload', 'Re[- ]?scan',
+    'eng', 'English', 'ESP', 'Spanish', 'JPN', 'Japanese',
+  ];
+  const tagRe = new RegExp(`\\b(?:${TAG_WORDS.join('|')})\\b`, 'gi');
+  s = s.replace(tagRe, ' ');
+
+  // ── Normalise separators ──────────────────────────────────────────────────
+  s = s.replace(/[-_]+/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // Trim trailing / leading punctuation that cleaning may have exposed.
+  s = s.replace(/^[\s.,;:!?\-]+|[\s.,;:!?\-]+$/g, '').trim();
+
+  return s;
 }
 
 /** Auto-fetch: returns best single result or null. */
@@ -213,6 +331,41 @@ async function fetchByAniListId(anilistId, token) {
   const json = await anilistRequest(FETCH_BY_ID_QUERY, { id: anilistId }, token);
   if (json.errors || !json.data?.Media) return null;
   return normalizeMedia(json.data.Media);
+}
+
+/**
+ * Batched fetch-by-ID. Same alias pattern as fetchBatchFromAniList, but
+ * resolves already-linked titles straight to their canonical record instead
+ * of doing a search. Used by bulk-refresh flows to refetch manga whose
+ * `anilist_id` is already set.
+ *
+ * Returns results in the same order as `ids`; a null slot means the ID
+ * resolved to no media (deleted / inaccessible).
+ */
+async function fetchBatchByAniListIds(ids, token) {
+  if (!ids.length) return [];
+  const varDefs     = ids.map((_, i) => `$id${i}: Int`).join(', ');
+  const aliasBlocks = ids
+    .map((_, i) => `q${i}: Media(id: $id${i}, type: MANGA) { ...MediaFields }`)
+    .join('\n  ');
+
+  const query = `
+    query (${varDefs}) {
+      ${aliasBlocks}
+    }
+    fragment MediaFields on Media {
+      ${MEDIA_FIELDS}
+    }
+  `;
+  const variables = Object.fromEntries(ids.map((id, i) => [`id${i}`, id]));
+
+  const json = await anilistRequest(query, variables, token);
+  if (!json.data) return ids.map(() => null);
+
+  return ids.map((_, i) => {
+    const media = json.data[`q${i}`];
+    return media ? normalizeMedia(media) : null;
+  });
 }
 
 const MEDIA_LIST_ENTRY_QUERY = `
@@ -322,4 +475,4 @@ async function saveMediaListEntry(token, mediaId, status, { chapters = null, vol
   return json.data.SaveMediaListEntry;
 }
 
-module.exports = { fetchFromAniList, fetchBatchFromAniList, searchAniList, fetchByAniListId, getViewer, saveMediaListEntry, getMediaListEntry };
+module.exports = { fetchFromAniList, fetchBatchFromAniList, searchAniList, fetchByAniListId, fetchBatchByAniListIds, cleanSearchTitle, recommendedDelayMs, getViewer, saveMediaListEntry, getMediaListEntry };

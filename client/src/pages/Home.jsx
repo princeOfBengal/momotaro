@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import Ribbon from '../components/Ribbon';
 import ArtGalleryRibbon from '../components/ArtGalleryRibbon';
 import AppSidebar from '../components/AppSidebar';
+import MangaCard from '../components/MangaCard';
 import './Library.css';
 import './Home.css';
 
@@ -169,6 +170,15 @@ export default function Home() {
   const [readingLists, setReadingLists] = useState([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // Search — when non-empty, the ribbons collapse and a flat results grid
+  // is shown instead. Scoped to All Libraries: `api.getLibrary({ search })`
+  // omits `library_id`, which the server resolves to "every manga in a
+  // library where show_in_all = 1, plus orphan rows".
+  const [search, setSearch] = useState('');
+  const [searchResults, setSearchResults] = useState(null); // null = idle
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
+
   const loadLibraries    = useCallback(() => {
     api.getLibraries().then(d => setLibraries(d)).catch(() => {});
   }, []);
@@ -195,6 +205,38 @@ export default function Home() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Debounced search. 300 ms matches the Library page so cross-page muscle
+  // memory is consistent. Empty query → reset state and let the ribbons show.
+  useEffect(() => {
+    const q = search.trim();
+    if (!q) {
+      setSearchResults(null);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await api.getLibrary({ search: q });
+        if (cancelled) return;
+        setSearchResults(data);
+        setSearchError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setSearchError(err.message);
+        setSearchResults([]);
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search]);
 
   // Slice discover candidates to a stable visible window. Memoized on the
   // seed so React does not re-shuffle on every unrelated render.
@@ -224,6 +266,15 @@ export default function Home() {
         <Link to="/" className="navbar-brand">
           <img src="/logo.png" alt="Momotaro" className="navbar-logo" />
         </Link>
+        <div className="library-search-wrap">
+          <input
+            className="library-search"
+            type="search"
+            placeholder="Search across All Libraries"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
         <div className="navbar-spacer" />
         <Link to="/library" className="btn btn-ghost home-nav-btn">
           Library
@@ -254,6 +305,49 @@ export default function Home() {
         />
 
         <main className="home-main">
+        {/* Search mode — when the user types, ribbons collapse and a flat
+            grid replaces them. Empty input restores the ribbon layout. */}
+        {search.trim() ? (
+          <>
+            {searchLoading && searchResults === null && (
+              <div className="loading-center"><div className="spinner" /></div>
+            )}
+            {searchError && (
+              <div className="error-message">
+                <h2>Search failed</h2>
+                <p>{searchError}</p>
+              </div>
+            )}
+            {searchResults !== null && !searchError && (
+              searchResults.length === 0 ? (
+                <div className="library-empty">
+                  <div className="library-empty-icon">🔍</div>
+                  <h2>No results for "{search.trim()}"</h2>
+                  <p>
+                    {search.includes(',')
+                      ? 'Try fewer genres or check spelling.'
+                      : 'Try a different keyword, or browse the full library.'}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="library-count">
+                    {searchResults.length} {searchResults.length === 1 ? 'result' : 'results'}
+                    {' '}across All Libraries
+                  </p>
+                  <div className="manga-grid">
+                    {searchResults.map(m => (
+                      <Link key={m.id} to={`/manga/${m.id}`}>
+                        <MangaCard manga={m} />
+                      </Link>
+                    ))}
+                  </div>
+                </>
+              )
+            )}
+          </>
+        ) : (
+        <>
         {loading && !data && (
           <div className="loading-center"><div className="spinner" /></div>
         )}
@@ -335,6 +429,8 @@ export default function Home() {
               </>
             )}
           </>
+        )}
+        </>
         )}
         </main>
       </div>

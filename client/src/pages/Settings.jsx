@@ -1379,8 +1379,10 @@ function DatabaseSection() {
             <div className="setting-group">
               <label className="setting-group-label">Maximum cache size</label>
               <p className="rs-setting-hint">
-                When the cache exceeds this size, least-recently-read chapters are evicted first.
-                Minimum 0.1 GB. Default is 20 GB.
+                When the cache reaches this size it auto-clears — every cached chapter is wiped
+                except the one that just triggered the overflow, so in-flight reads and batch
+                operations (like Regenerate Thumbnails) keep making progress. Minimum 0.1 GB.
+                Default is 20 GB.
               </p>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 280 }}>
                 <input

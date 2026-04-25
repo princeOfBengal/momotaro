@@ -739,7 +739,7 @@ Genre aggregation and read-time estimation are computed entirely in SQL against 
 { "size_bytes": 1374389534, "limit_bytes": 21474836480 }
 ```
 
-`size_bytes` is the total disk usage under `CBZ_CACHE_DIR`; `limit_bytes` is the active cap — user-configurable from Settings → Database → CBZ Cache. When `size_bytes` would exceed `limit_bytes`, least-recently-read chapter directories are evicted. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
+`size_bytes` is the total disk usage under `CBZ_CACHE_DIR`; `limit_bytes` is the active cap — user-configurable from Settings → Database → CBZ Cache. When an extraction pushes `size_bytes` over `limit_bytes`, the cache auto-clears: every cached chapter directory is wiped except the one that triggered the overflow, so the in-flight read (or batch operation like `POST /api/admin/regenerate-thumbnails`) keeps making progress. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
 
 **`POST /api/admin/clear-cbz-cache` response `data` shape:**
 

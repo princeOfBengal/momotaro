@@ -54,8 +54,10 @@ function readCacheSettings(db) {
 
 // ── CBZ Cache ─────────────────────────────────────────────────────────────────
 // CBZ pages are extracted to disk on first access and served as plain files on
-// every subsequent hit. The cache is capped at 20 GB with LRU eviction; these
-// endpoints expose the current size and a manual wipe.
+// every subsequent hit. The cache is capped (default 20 GB) and auto-clears
+// when an extraction pushes it over the cap — every cached chapter is wiped
+// except the one that triggered the overflow, so the caller still gets a
+// working file. These endpoints expose the current size and a manual wipe.
 
 // GET /api/admin/cbz-cache-size
 router.get('/admin/cbz-cache-size', asyncWrapper(async (req, res) => {
@@ -185,24 +187,41 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
         `).get(manga.id);
 
         if (firstPage) {
-          let source;
-          if (firstPage.chapter_type === 'folder') {
-            source = firstPage.stored_path;
-          } else if (firstPage.chapter_type === 'cbz') {
-            source = await cbzCache.getCbzPageFile(
-              firstPage.chapter_id,
-              firstPage.chapter_path,
-              firstPage.page_index
-            );
+          // The CBZ cache auto-clears on overflow. The just-extracted chapter
+          // is normally protected from that wipe, but a parallel reader (or
+          // the auto-clear scheduler) could still wipe it between
+          // getCbzPageFile() and sharp reading the file. Re-resolve and verify
+          // the file is on disk; on a vanished source, re-extract once.
+          let generated = null;
+          for (let attempt = 0; attempt < 2 && !generated; attempt++) {
+            let source;
+            if (firstPage.chapter_type === 'folder') {
+              source = firstPage.stored_path;
+            } else if (firstPage.chapter_type === 'cbz') {
+              source = await cbzCache.getCbzPageFile(
+                firstPage.chapter_id,
+                firstPage.chapter_path,
+                firstPage.page_index
+              );
+              if (source && !fs.existsSync(source)) {
+                if (attempt === 0) continue; // wiped mid-flight — retry
+                source = null;
+              }
+            }
+            if (!source) break;
+            generated = await generateThumbnail(source, manga.id);
+            if (!generated && firstPage.chapter_type === 'cbz' && attempt === 0
+                && !fs.existsSync(source)) {
+              // sharp failed because the cached file was wiped between resolve
+              // and read — retry once with a fresh extraction.
+              continue;
+            }
           }
 
-          if (source) {
-            const generated = await generateThumbnail(source, manga.id);
-            if (generated) {
-              db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-                .run(`${manga.id}.webp`, manga.id);
-              regenerated++;
-            }
+          if (generated) {
+            db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
+              .run(`${manga.id}.webp`, manga.id);
+            regenerated++;
           }
         }
       } catch (err) {

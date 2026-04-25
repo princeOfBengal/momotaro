@@ -22,10 +22,13 @@ const config = require('../config');
 // stale files from ever being served after the CBZ is rewritten — a new mtime
 // resolves to a new directory.
 //
-// Eviction is whole-chapter: when the global total exceeds the configured cap,
-// least-recently-used chapter directories are removed until the total is under
-// the cap. Working at page granularity inside a chapter would leave partial
-// directories behind and force re-extraction mid-read.
+// Eviction is auto-clear: when the global total exceeds the configured cap,
+// every cached chapter directory is wiped in one pass — except for the chapter
+// that just triggered the overflow (passed via `protectedDir`), which is kept
+// so the caller that drove the overflow gets a working file and forward
+// progress is preserved (e.g. the thumbnail-regeneration loop). Working at
+// page granularity inside a chapter would leave partial directories behind
+// and force re-extraction mid-read.
 
 const DEFAULT_CACHE_LIMIT_BYTES = 20 * 1024 * 1024 * 1024; // 20 GB default cap
 // Mutable at runtime via setLimitBytes() so the user can reconfigure from
@@ -69,7 +72,7 @@ function addToIndex(chapterDir, size) {
   }
   index.set(chapterDir, { size });
   totalBytes += size;
-  evictIfNeeded();
+  evictIfNeeded(chapterDir);
 }
 
 function removeFromIndex(chapterDir) {
@@ -84,17 +87,29 @@ function evictChapterDir(chapterDir) {
   fs.rm(chapterDir, { recursive: true, force: true }, () => {});
 }
 
-function evictIfNeeded() {
+// Auto-clear: when the cache hits its size cap, wipe every cached chapter
+// directory in one pass. The optional `protectedDir` keeps a single chapter on
+// disk — the one that just triggered the overflow — so the caller that drove
+// the addition (e.g. the regenerate-thumbnails loop, a reader opening the
+// chapter) still gets a working file. With no protected dir (cap lowered via
+// settings, init walked an over-cap on-disk state), the wipe is total.
+function evictIfNeeded(protectedDir = null) {
   if (totalBytes <= cacheLimitBytes) return;
   let evicted = 0;
-  for (const [chapterDir] of index) {
-    if (totalBytes <= cacheLimitBytes) break;
+  let evictedBytes = 0;
+  for (const [chapterDir, meta] of Array.from(index)) {
+    if (chapterDir === protectedDir) continue;
     evictChapterDir(chapterDir);
     evicted++;
+    evictedBytes += meta.size;
   }
   if (evicted > 0) {
-    const gb = (totalBytes / 1024 / 1024 / 1024).toFixed(2);
-    console.log(`[CBZ Cache] Evicted ${evicted} chapter${evicted === 1 ? '' : 's'} (now ${gb} GB)`);
+    const freedGb = (evictedBytes / 1024 / 1024 / 1024).toFixed(2);
+    const limGb   = (cacheLimitBytes / 1024 / 1024 / 1024).toFixed(2);
+    console.log(
+      `[CBZ Cache] Cap reached (${limGb} GB) — auto-cleared ${evicted} chapter` +
+      `${evicted === 1 ? '' : 's'} (${freedGb} GB freed)`
+    );
   }
 }
 

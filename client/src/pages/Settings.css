@@ -392,6 +392,28 @@
   margin-bottom: 6px;
 }
 
+/* Genre ribbon rating threshold — slider + live value + reset button. */
+.genre-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  max-width: 480px;
+}
+.genre-threshold-slider {
+  flex: 1 1 220px;
+  min-width: 180px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.genre-threshold-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 76px;
+  text-align: right;
+}
+
 /* Override setting-group-label color to be more readable on light card bg */
 .settings-card .setting-group-label {
   font-size: 12px;

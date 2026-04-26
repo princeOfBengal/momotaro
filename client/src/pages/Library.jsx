@@ -11,7 +11,7 @@ export default function Library() {
   const [manga, setManga] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(location.state?.search ?? '');
   const [sort, setSort] = useState(() => {
     const saved = localStorage.getItem('home_default_sort');
     return ['title', 'updated', 'year', 'rating'].includes(saved) ? saved : 'title';

@@ -842,6 +842,18 @@ const DISCOVER_INTERVAL_OPTIONS = [
 ];
 const DEFAULT_DISCOVER_INTERVAL = String(24 * 60 * 60 * 1000);
 
+// Score threshold for the per-genre "Top Manga in <Genre>" ribbons. The home
+// endpoint clamps to [0, 10] server-side; matching the same range here.
+const DEFAULT_GENRE_MIN_SCORE = 7;
+const GENRE_MIN_SCORE_MIN     = 0;
+const GENRE_MIN_SCORE_MAX     = 10;
+const GENRE_MIN_SCORE_STEP    = 0.5;
+
+function clampGenreMinScore(n) {
+  if (!Number.isFinite(n)) return DEFAULT_GENRE_MIN_SCORE;
+  return Math.max(GENRE_MIN_SCORE_MIN, Math.min(GENRE_MIN_SCORE_MAX, n));
+}
+
 function HomepageSection() {
   const [defaultSort, setDefaultSort] = useState(() => {
     const saved = localStorage.getItem('home_default_sort');
@@ -852,6 +864,12 @@ function HomepageSection() {
     return DISCOVER_INTERVAL_OPTIONS.some(o => o.value === saved)
       ? saved
       : DEFAULT_DISCOVER_INTERVAL;
+  });
+  const [genreMinScore, setGenreMinScore] = useState(() => {
+    const saved = localStorage.getItem('home_genre_score_threshold');
+    if (saved === null) return DEFAULT_GENRE_MIN_SCORE;
+    const parsed = parseFloat(saved);
+    return Number.isFinite(parsed) ? clampGenreMinScore(parsed) : DEFAULT_GENRE_MIN_SCORE;
   });
 
   useEffect(() => {
@@ -865,6 +883,10 @@ function HomepageSection() {
     // (longer) window before seeing a change.
     localStorage.setItem('home_discover_last_refresh', String(Date.now()));
   }, [discoverInterval]);
+
+  useEffect(() => {
+    localStorage.setItem('home_genre_score_threshold', String(genreMinScore));
+  }, [genreMinScore]);
 
   function handleResetDiscoverNow() {
     localStorage.removeItem('home_discover_last_refresh');
@@ -931,6 +953,45 @@ function HomepageSection() {
               onClick={handleResetDiscoverNow}
             >
               Reshuffle now
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-card" style={{ marginTop: 16 }}>
+        <div className="setting-group">
+          <label className="setting-group-label" htmlFor="genre-min-score">
+            Genre ribbon rating threshold
+          </label>
+          <p className="rs-setting-hint">
+            Minimum AniList / MyAnimeList score a manga must have to appear in the
+            <strong> Top Manga in &lt;Genre&gt;</strong> ribbons on Home. The visible picks are
+            randomised from every title in the genre that meets this threshold and
+            rotate on the same cadence as <em>Discover New Series</em> above. Titles with
+            no rating are never included.
+          </p>
+          <div className="genre-threshold-row">
+            <input
+              id="genre-min-score"
+              type="range"
+              min={GENRE_MIN_SCORE_MIN}
+              max={GENRE_MIN_SCORE_MAX}
+              step={GENRE_MIN_SCORE_STEP}
+              value={genreMinScore}
+              onChange={e => setGenreMinScore(clampGenreMinScore(parseFloat(e.target.value)))}
+              className="genre-threshold-slider"
+            />
+            <span className="genre-threshold-value" aria-live="polite">
+              {genreMinScore <= 0 ? 'Any rating' : `≥ ${genreMinScore.toFixed(1)}`}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setGenreMinScore(DEFAULT_GENRE_MIN_SCORE)}
+              disabled={genreMinScore === DEFAULT_GENRE_MIN_SCORE}
+              title={`Reset to default (${DEFAULT_GENRE_MIN_SCORE.toFixed(1)})`}
+            >
+              Reset
             </button>
           </div>
         </div>

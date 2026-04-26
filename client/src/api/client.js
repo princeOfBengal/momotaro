@@ -153,8 +153,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(source ? { source } : {}),
     }),
-  exportMangaMetadata: (mangaId) =>
-    apiFetch(`/api/manga/${mangaId}/export-metadata`, { method: 'POST' }),
+  // Per-manga export. Pass `source` ('anilist' | 'myanimelist' | 'doujinshi')
+  // to fetch from that specific source's linkage and write a metadata.json
+  // tagged with that source — overwrites any existing file unconditionally.
+  // Omit `source` for the legacy auto-priority behaviour (highest-priority
+  // linked source wins).
+  exportMangaMetadata: (mangaId, source) =>
+    apiFetch(`/api/manga/${mangaId}/export-metadata`, {
+      method: 'POST',
+      body: JSON.stringify(source ? { source } : {}),
+    }),
   refreshMalMetadata: (mangaId) =>
     apiFetch(`/api/manga/${mangaId}/refresh-mal-metadata`, { method: 'POST' }),
   searchMal: (q, page = 1) =>
@@ -236,9 +244,18 @@ export const api = {
   systemLogsExportUrl: () => `${BASE}/api/admin/logs/export`,
 
   // Home page — single aggregate fetch for every ribbon (continue reading,
-  // discover, art gallery, top-manga-per-genre). Scoped server-side to
-  // visible libraries; cached for 30 s in-process.
-  getHome: () => apiFetch('/api/home'),
+  // discover, recently added, art gallery, top-manga-per-genre). Scoped
+  // server-side to visible libraries; cached for 30 s in-process keyed by
+  // `min_score`. Pass `{ minScore }` to filter the per-genre ribbons by a
+  // rating threshold (default 7); the value is clamped to [0, 10] server-side.
+  getHome: ({ minScore } = {}) => {
+    const params = new URLSearchParams();
+    if (minScore !== undefined && minScore !== null) {
+      params.set('min_score', String(minScore));
+    }
+    const qs = params.toString();
+    return apiFetch(`/api/home${qs ? '?' + qs : ''}`);
+  },
 
   // Statistics. Pass a library ID to scope every aggregate to that library;
   // omit or pass null for the All Libraries view.

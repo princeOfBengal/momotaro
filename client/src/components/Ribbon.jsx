@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import './Ribbon.css';
 
 // A horizontal-scrolling ribbon. Native scroll drives everything (touch
@@ -9,10 +10,13 @@ import './Ribbon.css';
 // Props:
 //   title        — heading rendered above the ribbon
 //   actions      — optional node rendered at the right of the heading
+//   viewAllTo    — optional react-router target. When set, a "See all" link
+//                  is rendered to the left of `actions`, navigating to /library
+//                  with the matching filter pre-applied via location.state
 //   emptyMessage — string shown when `children` is empty; ribbon hidden
 //                  entirely when both are missing
 //   children     — the ribbon items (caller decides the tile markup + width)
-export default function Ribbon({ title, actions, emptyMessage, children, className = '' }) {
+export default function Ribbon({ title, actions, viewAllTo, emptyMessage, children, className = '' }) {
   const trackRef = useRef(null);
   const [canScrollLeft,  setCanScrollLeft]  = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -56,6 +60,15 @@ export default function Ribbon({ title, actions, emptyMessage, children, classNa
       <header className="ribbon-head">
         <h2 className="ribbon-title">{title}</h2>
         <div className="ribbon-head-right">
+          {viewAllTo && hasItems && (
+            <Link
+              to={typeof viewAllTo === 'string' ? viewAllTo : viewAllTo.pathname}
+              state={typeof viewAllTo === 'object' ? viewAllTo.state : undefined}
+              className="ribbon-view-all"
+            >
+              See all
+            </Link>
+          )}
           {actions}
           {hasItems && (
             <div className="ribbon-arrows" aria-hidden="true">

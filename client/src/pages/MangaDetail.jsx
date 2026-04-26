@@ -1047,12 +1047,35 @@ export default function MangaDetail() {
     setMetaMessage({ type: 'success', text: 'Metadata applied from MyAnimeList.' });
   }
 
-  async function handleExportMangaMetadata() {
+  async function handleExportMangaMetadata(source) {
     setExportingMangaMeta(true);
     setMetaMessage(null);
     try {
-      await api.exportMangaMetadata(id);
-      setMetaMessage({ type: 'success', text: 'Metadata exported — metadata.json saved to the manga\'s folder.' });
+      await api.exportMangaMetadata(id, source);
+      const friendly = source === 'anilist'
+        ? 'AniList'
+        : source === 'myanimelist'
+          ? 'MyAnimeList'
+          : source === 'doujinshi'
+            ? 'Doujinshi.info'
+            : null;
+      setMetaMessage({
+        type: 'success',
+        text: friendly
+          ? `Exported ${friendly} metadata — metadata.json saved to the manga's folder (any existing file was overwritten).`
+          : 'Metadata exported — metadata.json saved to the manga\'s folder (any existing file was overwritten).',
+      });
+      // Refresh the page state so any field that the export's upstream fetch
+      // surfaced (or any out-of-band change since this page mounted) is
+      // reflected immediately. Cover gets a cache-bust too so a freshly-saved
+      // source-specific cover (e.g. mal_cover) is reloaded by the picker.
+      try {
+        const data = await api.getManga(id);
+        setManga(data);
+        setCoverBust(Date.now());
+      } catch (refreshErr) {
+        console.warn('[Export] Refresh after export failed:', refreshErr);
+      }
     } catch (err) {
       setMetaMessage({ type: 'error', text: 'Export failed: ' + err.message });
     } finally {
@@ -1642,17 +1665,18 @@ export default function MangaDetail() {
                       Search
                     </button>
                   </div>
-                  {manga.metadata_source === 'anilist' && (
+                  {manga.anilist_id && (
                     <div className="meta-modal-action-row">
                       <div className="meta-modal-action-info">
                         <span className="meta-modal-action-label">Export as JSON</span>
                         <span className="meta-modal-action-desc">
-                          Save the current AniList metadata as <code>metadata.json</code> in this manga's folder.
+                          Re-fetch this manga's AniList entry and save it as <code>metadata.json</code> in
+                          the manga's folder. Any existing <code>metadata.json</code> will be overwritten.
                         </span>
                       </div>
                       <button
                         className="btn btn-ghost btn-sm"
-                        onClick={handleExportMangaMetadata}
+                        onClick={() => handleExportMangaMetadata('anilist')}
                         disabled={exportingMangaMeta}
                       >
                         {exportingMangaMeta ? 'Exporting…' : 'Export'}
@@ -1691,17 +1715,18 @@ export default function MangaDetail() {
                       Search
                     </button>
                   </div>
-                  {manga.metadata_source === 'myanimelist' && (
+                  {manga.mal_id && (
                     <div className="meta-modal-action-row">
                       <div className="meta-modal-action-info">
                         <span className="meta-modal-action-label">Export as JSON</span>
                         <span className="meta-modal-action-desc">
-                          Save the current MyAnimeList metadata as <code>metadata.json</code> in this manga's folder.
+                          Re-fetch this manga's MyAnimeList entry and save it as <code>metadata.json</code> in
+                          the manga's folder. Any existing <code>metadata.json</code> will be overwritten.
                         </span>
                       </div>
                       <button
                         className="btn btn-ghost btn-sm"
-                        onClick={handleExportMangaMetadata}
+                        onClick={() => handleExportMangaMetadata('myanimelist')}
                         disabled={exportingMangaMeta}
                       >
                         {exportingMangaMeta ? 'Exporting…' : 'Export'}
@@ -1740,17 +1765,18 @@ export default function MangaDetail() {
                       Search
                     </button>
                   </div>
-                  {manga.metadata_source === 'doujinshi' && (
+                  {manga.doujinshi_id && (
                     <div className="meta-modal-action-row">
                       <div className="meta-modal-action-info">
                         <span className="meta-modal-action-label">Export as JSON</span>
                         <span className="meta-modal-action-desc">
-                          Save the current Doujinshi.info metadata as <code>metadata.json</code> in this manga's folder.
+                          Re-fetch this manga's Doujinshi.info entry and save it as <code>metadata.json</code> in
+                          the manga's folder. Any existing <code>metadata.json</code> will be overwritten.
                         </span>
                       </div>
                       <button
                         className="btn btn-ghost btn-sm"
-                        onClick={handleExportMangaMetadata}
+                        onClick={() => handleExportMangaMetadata('doujinshi')}
                         disabled={exportingMangaMeta}
                       >
                         {exportingMangaMeta ? 'Exporting…' : 'Export'}

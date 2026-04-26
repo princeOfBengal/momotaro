@@ -655,8 +655,10 @@ router.get('/stats', asyncWrapper(async (req, res) => {
 // there to keep per-request cost ~0, not because any single query is slow.
 
 const HOME_TTL_MS = 30 * 1000;
-let _homeCache = null;
-let _homeCacheTime = 0;
+// Cache keyed by `min_score` since the per-genre ribbons are filtered by it
+// and a single global cache would otherwise serve one device's threshold to
+// another. 21 possible quantised score values × 30 s TTL keeps memory tiny.
+const _homeCache = new Map(); // key (minScore string) -> { payload, ts }
 
 // Caller-tunable limits, bounded to protect the server from pathological
 // clients. The client only ever sends defaults right now; these exist so the
@@ -665,8 +667,17 @@ const HOME_LIMITS = {
   continue:     { default: 15, max: 50 },
   discover:     { default: 30, max: 60 },
   gallery:      { default: 50, max: 100 },
-  genreRibbons: { default: 15, max: 30 }, // items per genre ribbon
+  // Per-genre "Top Manga in X" ribbons return a candidate pool now (the
+  // client picks a stable seeded-random ~15-item visible slice on the same
+  // cadence as Discover), so the default size is bigger than the old 15.
+  genreRibbons: { default: 50, max: 100 },
+  recent:       { default: 15, max: 30 }, // recently added titles
 };
+
+// Default minimum AniList/MAL score for the per-genre ribbons. The user can
+// override this from Settings → Homepage Settings; the value is sent in
+// `min_score` and clamped to [0, 10] server-side.
+const HOME_DEFAULT_MIN_SCORE = 7;
 
 function clampLimit(q, cfg) {
   const n = parseInt(q, 10);
@@ -674,11 +685,25 @@ function clampLimit(q, cfg) {
   return Math.min(n, cfg.max);
 }
 
+function clampMinScore(q) {
+  if (q === undefined || q === null || q === '') return HOME_DEFAULT_MIN_SCORE;
+  const n = parseFloat(q);
+  if (!Number.isFinite(n)) return HOME_DEFAULT_MIN_SCORE;
+  return Math.max(0, Math.min(10, n));
+}
+
 // GET /api/home
 router.get('/home', asyncWrapper(async (req, res) => {
+  // Browser HTTP cache backs up the service worker's StaleWhileRevalidate.
+  // Helps non-PWA tabs and incognito windows where the SW isn't active.
+  res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=300');
+
+  const minScore = clampMinScore(req.query.min_score);
+  const cacheKey = String(minScore);
   const now = Date.now();
-  if (_homeCache && (now - _homeCacheTime) < HOME_TTL_MS) {
-    return res.json({ data: _homeCache });
+  const cached = _homeCache.get(cacheKey);
+  if (cached && (now - cached.ts) < HOME_TTL_MS) {
+    return res.json({ data: cached.payload });
   }
 
   const db = getDb();
@@ -687,6 +712,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   const limDiscover = clampLimit(req.query.discover_limit, HOME_LIMITS.discover);
   const limGallery  = clampLimit(req.query.gallery_limit,  HOME_LIMITS.gallery);
   const limRibbon   = clampLimit(req.query.ribbon_limit,   HOME_LIMITS.genreRibbons);
+  const limRecent   = clampLimit(req.query.recent_limit,   HOME_LIMITS.recent);
 
   // ── Continue Reading ─────────────────────────────────────────────────────
   // Manga the user has opened, most-recent first. Joined to chapters so the
@@ -805,9 +831,12 @@ router.get('/home', asyncWrapper(async (req, res) => {
   }));
 
   // ── Top Manga per Favorite Genre (up to 4 ribbons) ───────────────────────
-  // One indexed query per ribbon. 4 queries × ~15 rows = cheap even at 10k
-  // manga; switching to a single window-function query buys nothing at this
-  // scale and makes the code harder to read.
+  // Returns a *candidate pool* per genre. The client shuffles each pool with
+  // the same seed that drives the Discover ribbon (XORed with a per-genre
+  // hash so each ribbon rotates independently) and slices to the visible
+  // window. This is why the query is filtered by score >= min_score and
+  // ordered by id rather than score — randomisation happens client-side, so
+  // the server only needs a deterministic, threshold-filtered candidate set.
   const topByGenreStmt = db.prepare(`
     SELECT m.id, m.title, m.cover_image, m.score
     FROM manga m
@@ -815,13 +844,15 @@ router.get('/home', asyncWrapper(async (req, res) => {
     LEFT JOIN libraries l ON l.id = m.library_id
     WHERE (m.library_id IS NULL OR l.show_in_all = 1)
       AND g.genre = ? COLLATE NOCASE
-    ORDER BY m.score DESC NULLS LAST, m.id ASC
+      AND m.score IS NOT NULL
+      AND m.score >= ?
+    ORDER BY m.id ASC
     LIMIT ?
   `);
 
   const favorite_genres_ribbons = favoriteGenres.map(genre => ({
     genre,
-    manga: topByGenreStmt.all(genre, limRibbon).map(r => ({
+    manga: topByGenreStmt.all(genre, minScore, limRibbon).map(r => ({
       id:        r.id,
       title:     r.title,
       cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
@@ -829,15 +860,34 @@ router.get('/home', asyncWrapper(async (req, res) => {
     })),
   })).filter(r => r.manga.length > 0);
 
+  // ── Recently Added ───────────────────────────────────────────────────────
+  // Newest manga rows by created_at, scoped to visible libraries. Surfaces
+  // titles produced by the most recent scan without forcing a Library re-sort.
+  const recentlyAddedRows = db.prepare(`
+    SELECT m.id, m.title, m.cover_image, m.score, m.created_at
+    FROM manga m
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+    ORDER BY m.created_at DESC, m.id DESC
+    LIMIT ?
+  `).all(limRecent);
+  const recently_added = recentlyAddedRows.map(r => ({
+    id:         r.id,
+    title:      r.title,
+    cover_url:  r.cover_image ? thumbnailUrl(r.cover_image) : null,
+    score:      r.score,
+    created_at: r.created_at,
+  }));
+
   const payload = {
     continue_reading,
     discover_candidates,
+    recently_added,
     art_gallery,
     favorite_genres_ribbons,
   };
 
-  _homeCache = payload;
-  _homeCacheTime = Date.now();
+  _homeCache.set(cacheKey, { payload, ts: Date.now() });
 
   res.json({ data: payload });
 }));

@@ -846,13 +846,83 @@ router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/manga/:id/export-metadata — write metadata.json for a single
-// manga. Same priority rule as the bulk export: linkage takes precedence
-// over `metadata_source`, AniList beats MAL beats Doujinshi.info.
+// manga.
+//
+// Body: { source?: 'anilist' | 'myanimelist' | 'doujinshi' }
+//
+// • Per-source mode (`source` provided) — fetch from THAT specific source's
+//   linkage, regardless of which source the manga currently displays. Each
+//   tab in the Metadata modal can independently export its own JSON, so the
+//   user can save AniList JSON for a manga whose displayed source is local,
+//   MAL JSON for an AniList-displayed manga, etc. Requires `<source>_id`
+//   to be set; otherwise 400.
+// • Auto mode (no `source`) — re-fetch from the highest-priority linked
+//   source (AniList > MAL > Doujinshi.info), matching the bulk-export rule.
+//   Falls back to DB-stored fields if the manga has third-party `metadata_source`
+//   but no linkage at all.
+//
+// In every mode the on-disk `metadata.json` is **always overwritten** —
+// `fs.writeFileSync` is unconditional by design. Calling export with the
+// file already present replaces it with the freshly-built payload.
 router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
+  const { source } = req.body || {};
+  const SOURCE_LINK_FIELD = {
+    anilist:     'anilist_id',
+    myanimelist: 'mal_id',
+    doujinshi:   'doujinshi_id',
+  };
+
+  // ── Per-source export ────────────────────────────────────────────────────
+  if (source !== undefined) {
+    if (!SOURCE_LINK_FIELD[source]) {
+      return res.status(400).json({ error: 'Invalid source' });
+    }
+    const linkId = manga[SOURCE_LINK_FIELD[source]];
+    if (!linkId) {
+      return res.status(400).json({
+        error: `This manga has no ${source} linkage. Fetch from ${source} first, then export.`,
+      });
+    }
+
+    let remote = null;
+    try {
+      if (source === 'anilist') {
+        remote = await fetchByAniListId(Number(linkId), getToken(db));
+      } else if (source === 'myanimelist') {
+        const clientId = getMalClientId(db);
+        if (!clientId) {
+          return res.status(400).json({ error: 'MyAnimeList Client ID is not configured in Settings.' });
+        }
+        remote = await fetchByMALId(Number(linkId), clientId);
+      } else {
+        remote = await fetchByDoujinshiSlug(linkId, getDoujinshiToken(db));
+      }
+    } catch (err) {
+      console.warn(`[ExportMetadata] ${source} fetch failed for "${manga.title}": ${err.message}`);
+    }
+    if (!remote) {
+      return res.status(502).json({ error: `Could not fetch metadata from ${source}.` });
+    }
+
+    // Spread `source` into `remote` so buildExportPayload's `remote.source`
+    // branch fires — the exported `metadata_source` then reflects the source
+    // we actually fetched from, not the manga's currently displayed source.
+    const payload = buildExportPayload(manga, { ...remote, source });
+    const outPath = path.join(manga.path, 'metadata.json');
+    fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+
+    console.log(
+      `[ExportMetadata] Wrote metadata.json for "${manga.title}" ` +
+      `(per-source export from ${source}; overwrote any existing file)`
+    );
+    return res.json({ data: { path: outPath, source } });
+  }
+
+  // ── Auto / priority-ordered export (legacy default) ──────────────────────
   const hasThirdPartyLink = !!(manga.anilist_id || manga.mal_id || manga.doujinshi_id);
   const hasThirdPartyFields = ['anilist', 'myanimelist', 'doujinshi'].includes(manga.metadata_source);
 
@@ -879,7 +949,7 @@ router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
 
   console.log(
     `[ExportMetadata] Wrote metadata.json for "${manga.title}" ` +
-    `(source=${manga.metadata_source}${remote ? ' → re-fetched third-party' : ''})`
+    `(source=${manga.metadata_source}${remote ? ' → re-fetched third-party' : ''}; overwrote any existing file)`
   );
   res.json({ data: { path: outPath } });
 }));

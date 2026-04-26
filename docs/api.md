@@ -375,15 +375,28 @@ Author is extracted from the `authors` field of the MAL response, preferring ent
 | ------ | -------------------------------- | ---------------------------------------------------- |
 | POST   | `/api/manga/:id/export-metadata` | Write `metadata.json` to this manga's folder on disk |
 
-Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. Mirrors the bulk-export rule: linkage is the primary signal. If any of `anilist_id` / `mal_id` / `doujinshi_id` is set, the server re-fetches from the highest-priority linked source (AniList > MyAnimeList > Doujinshi.info) and writes that data, **overwriting any existing local sidecar**. Falls back to DB fields if no linkage is present but `metadata_source` is a third-party tag. Returns 400 if there's nothing to export and 502 if every linked-source fetch failed and there's no third-party DB data to fall back on.
+Writes a `metadata.json` sidecar file to `{manga.path}/metadata.json`. The **on-disk file is always overwritten** when this endpoint succeeds — `fs.writeFileSync` is unconditional, so calling export with the file already present replaces it with the freshly-built payload.
+
+**Request body** (optional):
+
+```json
+{ "source": "anilist" | "myanimelist" | "doujinshi" }
+```
+
+Two modes:
+
+- **Per-source export** (`source` provided) — re-fetches from THAT specific source's linkage, regardless of which source the manga currently displays. Lets each source tab in the Metadata modal independently export its own JSON (AniList JSON for an AniList-linked manga whose displayed source is local, MAL JSON for an AniList-displayed manga, etc.). Requires `<source>_id` to be set on the manga; otherwise returns 400. The exported `metadata_source` field reflects the source the export was issued for, not the manga's row-level `metadata_source`. Returns 502 if the upstream fetch fails. For `myanimelist`, returns 400 if no MAL Client ID is configured in Settings.
+- **Auto / priority-ordered** (no `source`) — mirrors the bulk-export rule. If any linkage is set, the server re-fetches from the highest-priority linked source (AniList > MyAnimeList > Doujinshi.info) and writes that data. Falls back to DB-stored fields if no linkage is present but `metadata_source` is a third-party tag. Returns 400 if there's nothing to export and 502 if every linked-source fetch failed and there's no third-party DB data to fall back on.
 
 The DB row is never modified by export. Includes all non-null metadata fields plus `metadata_source` and `exported_at`. See the [library-level Export Metadata](#export-metadata) section for the full file format.
 
 **Response shape:**
 
 ```json
-{ "data": { "path": "/library/My Manga/metadata.json" } }
+{ "data": { "path": "/library/My Manga/metadata.json", "source": "anilist" } }
 ```
+
+The `source` field is only present in the per-source mode response.
 
 ### Reset Metadata
 
@@ -641,7 +654,9 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 | `continue_limit` | 15 | 50 | Rows in the Continue Reading ribbon |
 | `discover_limit` | 30 | 60 | Candidate rows in the Discover pool (client slices this to ~15 visible) |
 | `gallery_limit`  | 50 | 100 | Rows in the Art Gallery ribbon |
-| `ribbon_limit`   | 15 | 30 | Rows per "Top Manga in XXX" ribbon |
+| `ribbon_limit`   | 50 | 100 | Candidate pool size per "Top Manga in XXX" ribbon (client picks a stable seeded-random ~15 visible slice) |
+| `recent_limit`   | 15 | 30 | Rows in the Recently Added ribbon |
+| `min_score`      | 7 | n/a | Minimum AniList/MAL score (clamped to `[0, 10]`) for the per-genre ribbons. Titles with `score < min_score` or `score IS NULL` are excluded from `favorite_genres_ribbons[].manga`. |
 
 **Response `data` shape:**
 
@@ -662,6 +677,9 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
   "discover_candidates": [
     { "id": 10, "title": "...", "cover_url": "...", "score": 8.5, "match_count": 3 }
   ],
+  "recently_added": [
+    { "id": 22, "title": "...", "cover_url": "...", "score": null, "created_at": 1713900000 }
+  ],
   "art_gallery": [
     {
       "id": 12, "manga_id": 5, "manga_title": "...", "track_volumes": 0,
@@ -681,11 +699,12 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 **Per-ribbon semantics:**
 
 - **`continue_reading`** — rows from `progress` sorted `last_read_at DESC`, joined to manga + current chapter. `total_chapters` is the count of chapter rows for the manga; the client uses `completed_count / total_chapters` to draw the progress bar. Filtered to visible libraries.
-- **`discover_candidates`** — top favorite genres are computed exactly as in `/api/stats` (reading-history weighted, visible libraries only) and truncated to 4. Every manga in a visible library that has **no progress row** (or an empty `completed_chapters`) is scored by how many distinct favorite genres it matches; the top N are returned in `(match_count DESC, score DESC NULLS LAST, id ASC)` order. The client then picks a stable seeded-random slice for the Discover ribbon (see *Discover refresh cadence* below).
+- **`discover_candidates`** — top favorite genres are computed exactly as in `/api/stats` (reading-history weighted, visible libraries only) and truncated to 4. Every manga in a visible library that has **no progress row** (or an empty `completed_chapters`) is scored by how many distinct favorite genres it matches; the top N are returned in `(match_count DESC, score DESC NULLS LAST, id ASC)` order. The client then picks a stable seeded-random slice for the Discover ribbon (see *Discover refresh cadence* below). The same pool feeds the Discover ribbon's **Surprise me** button, which navigates to a randomly chosen entry's detail page.
+- **`recently_added`** — newest manga rows by `created_at DESC, id DESC`, scoped to visible libraries. Surfaces titles produced by the most recent scan without forcing a Library re-sort.
 - **`art_gallery`** — `art_gallery` rows joined to `manga` + `chapters` + `pages`, newest first, visible libraries only. The pre-built `page_image_url` spares the client from hand-composing it.
-- **`favorite_genres_ribbons`** — up to 4 entries (one per top favorite genre). Each entry's `manga` list is every manga in a visible library tagged with that genre, ordered by `score DESC NULLS LAST, id ASC`. Genres with zero matching manga are omitted, so the returned array may be shorter than 4 on small libraries.
+- **`favorite_genres_ribbons`** — up to 4 entries (one per top favorite genre). Each entry's `manga` list is a **candidate pool**: every manga in a visible library tagged with that genre whose AniList/MAL score is non-NULL and `>= min_score`, ordered by `id ASC` (deterministic). Randomisation happens client-side — the client shuffles the pool with `discoverSeed XOR hash(genre)` and slices to ~15 visible, so each genre rotates independently from the others while sharing the same Discover refresh cadence. Genres with zero matching manga at the current threshold are omitted, so the returned array may be shorter than 4. Raise / lower `min_score` (default 7, exposed in Settings → Homepage Settings) to broaden or narrow the pool.
 
-**Caching:** 30-second in-memory TTL on the entire response. The service worker additionally caches `/api/home` under its `browse-data` StaleWhileRevalidate rule (30-day expiry), so the Home page hydrates instantly from cache on every visit while a fresh fetch is issued in the background.
+**Caching:** 30-second in-memory TTL keyed by `min_score` (so different per-device thresholds don't fight a single global cache slot). The endpoint also sets `Cache-Control: private, max-age=30, stale-while-revalidate=300` so the browser HTTP cache backs up the service worker for non-PWA tabs and incognito windows. The service worker additionally caches `/api/home` under its `browse-data` StaleWhileRevalidate rule (30-day expiry); the cache key includes the query string, so each unique `min_score` gets its own SW entry.
 
 **Efficiency:** every query hits indexed columns (`progress.manga_id` PK, `manga_genres` PK, `manga(library_id)`, `chapters(manga_id)`, `art_gallery(manga_id)`). No `json_each` over unindexed columns; the `discover_candidates` query scans at most `manga × avg_genre_count` rows and stops at the LIMIT clause. Memory footprint is bounded by the cache + whatever `better-sqlite3` prepared-statement handles are retained — the row caps above ensure a single response fits in well under 100 KB for typical libraries.
 

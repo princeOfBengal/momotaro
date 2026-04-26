@@ -1,20 +1,40 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, lazy, Suspense, memo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import Ribbon from '../components/Ribbon';
-import ArtGalleryRibbon from '../components/ArtGalleryRibbon';
 import AppSidebar from '../components/AppSidebar';
+// MangaCard is also statically imported by Library, so it lives in the main
+// chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
 import './Library.css';
 import './Home.css';
+
+// Only used below the fold (after every other ribbon). Lazy split keeps the
+// initial Home bundle smaller; ArtGalleryRibbon's CSS animation is also
+// expensive enough to be worth deferring.
+const ArtGalleryRibbon = lazy(() => import('../components/ArtGalleryRibbon'));
 
 // localStorage keys driving the Discover ribbon's daily refresh behaviour.
 const LS_INTERVAL_MS    = 'home_discover_refresh_ms';
 const LS_LAST_REFRESH   = 'home_discover_last_refresh';
 const LS_SEED           = 'home_discover_seed';
+// Per-device minimum AniList/MAL score for the per-genre ribbons. The same
+// `discoverSeed` rotates these ribbons too (see GENRE_VISIBLE_COUNT below),
+// so the score threshold and shuffle cadence are decoupled — change the
+// number to broaden / narrow the candidate pool, change the Discover
+// interval to rotate the visible slice faster / slower.
+const LS_GENRE_MIN_SCORE = 'home_genre_score_threshold';
 
 const DEFAULT_DISCOVER_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const DISCOVER_VISIBLE_COUNT       = 15;
+const GENRE_VISIBLE_COUNT          = 15;
+const DEFAULT_GENRE_MIN_SCORE      = 7;
+
+// Cover dimensions reserved at layout time so the browser doesn't reflow as
+// images stream in. Matches the actual rendered size on desktop and is a
+// single hint — CSS responsive rules still control the painted width.
+const COVER_W = 140;
+const COVER_H = 210;
 
 // Deterministic PRNG seeded with a 32-bit integer. Used so the Discover
 // shuffle is stable for an entire refresh window — reloading the page
@@ -28,6 +48,26 @@ function mulberry32(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// FNV-1a 32-bit string hash. Used to derive a stable per-genre offset for the
+// Top Manga ribbons so each genre rotates independently from `discoverSeed`
+// (same cadence — different ordering, so the genres don't all happen to
+// promote the same indexed positions in their respective candidate pools).
+function hashStr32(s) {
+  let h = 2166136261 | 0;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  }
+  return h >>> 0;
+}
+
+function readGenreMinScore() {
+  const raw = localStorage.getItem(LS_GENRE_MIN_SCORE);
+  if (raw === null) return DEFAULT_GENRE_MIN_SCORE;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n)) return DEFAULT_GENRE_MIN_SCORE;
+  return Math.max(0, Math.min(10, n));
 }
 
 function shuffleWithSeed(items, seed) {
@@ -84,16 +124,40 @@ function forceDiscoverSeed() {
   return seed;
 }
 
+// Schedule a low-priority callback. Sidebar fetches use this so they don't
+// compete with `/api/home` for the initial network slot.
+function whenIdle(cb) {
+  if (typeof window === 'undefined') return cb();
+  if ('requestIdleCallback' in window) {
+    return window.requestIdleCallback(cb, { timeout: 1500 });
+  }
+  return setTimeout(cb, 250);
+}
+
 // ── Tile components ───────────────────────────────────────────────────────
 
-function CoverImg({ src, alt }) {
+// `eager` is set on the first tile in each ribbon so the LCP cover doesn't
+// wait on lazy-loading. The browser otherwise can't tell how far inside a
+// horizontally-scrolling list any tile is.
+function CoverImg({ src, alt, eager = false }) {
   if (!src) {
     return <div className="ribbon-tile-cover-fallback" aria-hidden="true">📕</div>;
   }
-  return <img src={src} alt={alt} loading="lazy" decoding="async" draggable={false} />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={COVER_W}
+      height={COVER_H}
+      loading={eager ? 'eager' : 'lazy'}
+      fetchpriority={eager ? 'high' : 'low'}
+      decoding="async"
+      draggable={false}
+    />
+  );
 }
 
-function ContinueReadingTile({ manga }) {
+const ContinueReadingTile = memo(function ContinueReadingTile({ manga, eager }) {
   const track = manga.track_volumes ? 'Volume' : 'Chapter';
   const label = manga.current_chapter
     ? (manga.current_chapter.number != null
@@ -113,7 +177,7 @@ function ContinueReadingTile({ manga }) {
       aria-label={`${manga.title} — continue at ${label}`}
     >
       <div className="ribbon-tile-cover">
-        <CoverImg src={manga.cover_url} alt="" />
+        <CoverImg src={manga.cover_url} alt="" eager={eager} />
         {pct > 0 && (
           <span
             className="ribbon-tile-progress"
@@ -128,9 +192,9 @@ function ContinueReadingTile({ manga }) {
       </div>
     </Link>
   );
-}
+});
 
-function MangaTile({ manga, sub }) {
+const MangaTile = memo(function MangaTile({ manga, sub, eager }) {
   return (
     <Link
       to={`/manga/${manga.id}`}
@@ -139,7 +203,7 @@ function MangaTile({ manga, sub }) {
       aria-label={manga.title}
     >
       <div className="ribbon-tile-cover">
-        <CoverImg src={manga.cover_url} alt="" />
+        <CoverImg src={manga.cover_url} alt="" eager={eager} />
         {manga.score != null && (
           <span className="ribbon-tile-score" aria-label={`Score ${manga.score}`}>
             ★ {Number(manga.score).toFixed(1)}
@@ -152,6 +216,89 @@ function MangaTile({ manga, sub }) {
       </div>
     </Link>
   );
+});
+
+// Resume hero — single big card surfaced above all ribbons, pointing the user
+// at the most recently read manga's current chapter and page. Highest-intent
+// action on a return visit; replaces the small first tile of Continue Reading.
+function ResumeHero({ manga }) {
+  if (!manga || !manga.current_chapter_id) return null;
+  const track = manga.track_volumes ? 'Volume' : 'Chapter';
+  const label = manga.current_chapter?.number != null
+    ? `${track} ${manga.current_chapter.number}`
+    : (manga.current_chapter?.volume != null
+        ? `Volume ${manga.current_chapter.volume}`
+        : manga.current_chapter?.folder_name || '—');
+  const pct = manga.total_chapters > 0
+    ? Math.min(100, Math.round((manga.completed_count / manga.total_chapters) * 100))
+    : 0;
+  const page = manga.current_page ? Number(manga.current_page) : 0;
+  const resumeHref = `/read/${manga.current_chapter_id}?mangaId=${manga.id}${page ? `&page=${page}` : ''}`;
+  return (
+    <section className="home-hero" aria-label="Resume reading">
+      <Link to={resumeHref} className="home-hero-cover" aria-hidden="true" tabIndex={-1}>
+        {manga.cover_url
+          ? <img src={manga.cover_url} alt="" width={140} height={210}
+              fetchpriority="high" decoding="async" draggable={false} />
+          : <div className="home-hero-cover-fallback">📕</div>}
+      </Link>
+      <div className="home-hero-body">
+        <p className="home-hero-eyebrow">Pick up where you left off</p>
+        <Link to={`/manga/${manga.id}`} className="home-hero-title">{manga.title}</Link>
+        <p className="home-hero-sub">
+          {label}
+          {page > 0 && <> · page {page + 1}</>}
+        </p>
+        {pct > 0 && (
+          <div className="home-hero-progress" aria-label={`${pct} percent complete`}>
+            <span style={{ width: `${pct}%` }} />
+          </div>
+        )}
+        <div className="home-hero-actions">
+          <Link to={resumeHref} className="btn btn-primary">Resume reading</Link>
+          <Link to={`/manga/${manga.id}`} className="btn btn-ghost">Open detail</Link>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Skeleton scaffold rendered before /api/home resolves. Reserves the same
+// vertical real-estate as the hydrated page so the layout doesn't jump when
+// data arrives.
+function HomeSkeleton() {
+  const tiles = Array.from({ length: 7 });
+  return (
+    <div aria-hidden="true">
+      <div className="home-hero home-hero-skeleton">
+        <div className="home-hero-cover skeleton-block" />
+        <div className="home-hero-body">
+          <div className="skeleton-line skeleton-line-sm" />
+          <div className="skeleton-line skeleton-line-lg" />
+          <div className="skeleton-line skeleton-line-md" />
+          <div className="skeleton-line skeleton-line-progress" />
+        </div>
+      </div>
+      {[0, 1, 2].map(i => (
+        <section className="ribbon" key={i}>
+          <header className="ribbon-head">
+            <div className="skeleton-line skeleton-title" />
+          </header>
+          <div className="ribbon-track">
+            {tiles.map((_, j) => (
+              <div className="ribbon-tile skeleton-tile" key={j}>
+                <div className="ribbon-tile-cover skeleton-block" />
+                <div className="ribbon-tile-meta">
+                  <div className="skeleton-line skeleton-line-sm" />
+                  <div className="skeleton-line skeleton-line-xs" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────
@@ -162,6 +309,11 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
   const [discoverSeed, setDiscoverSeed] = useState(() => resolveDiscoverSeed());
+  // Score threshold for the "Top Manga in <Genre>" ribbons. Read from
+  // localStorage on mount; the Settings page's Homepage section is the
+  // canonical writer. Changing this in Settings causes Home to remount and
+  // re-fetch with the new value.
+  const [genreMinScore] = useState(() => readGenreMinScore());
 
   // Sidebar data + drawer state. The sidebar is shared with the Library
   // page; here every selection navigates the user over to /library with
@@ -186,15 +338,26 @@ export default function Home() {
     api.getReadingLists().then(d => setReadingLists(d)).catch(() => {});
   }, []);
 
+  // Sidebar data isn't on the critical path to first paint — defer it so
+  // /api/home gets the first network slot. Drawer-only on mobile; on desktop
+  // the rail still appears within a frame or two.
   useEffect(() => {
-    loadLibraries();
-    loadReadingLists();
+    const handle = whenIdle(() => {
+      loadLibraries();
+      loadReadingLists();
+    });
+    return () => {
+      if (typeof handle === 'number') clearTimeout(handle);
+      else if (typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
+        window.cancelIdleCallback(handle);
+      }
+    };
   }, [loadLibraries, loadReadingLists]);
 
   const load = useCallback(async () => {
     try {
       setLoading(true);
-      const fetched = await api.getHome();
+      const fetched = await api.getHome({ minScore: genreMinScore });
       setData(fetched);
       setError(null);
     } catch (err) {
@@ -202,7 +365,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [genreMinScore]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -246,8 +409,39 @@ export default function Home() {
     return shuffled.slice(0, DISCOVER_VISIBLE_COUNT);
   }, [data, discoverSeed]);
 
+  // Continue Reading minus the first row — that one becomes the Resume hero.
+  const continueRest = useMemo(() => {
+    if (!data?.continue_reading?.length) return [];
+    return data.continue_reading.slice(1);
+  }, [data]);
+
+  // Genre ribbon visible slices. Each genre's pool is shuffled with a seed
+  // derived from `discoverSeed` XOR a per-genre hash, so all genre ribbons
+  // and Discover rotate on the *same* cadence (driven by Home's
+  // home_discover_refresh_ms in Settings) but each shows a different
+  // ordering. Sliced to GENRE_VISIBLE_COUNT for display.
+  const genreRibbonsVisible = useMemo(() => {
+    if (!data?.favorite_genres_ribbons?.length) return [];
+    return data.favorite_genres_ribbons.map(r => {
+      const seed = (discoverSeed ^ hashStr32(r.genre)) >>> 0;
+      return {
+        genre: r.genre,
+        manga: shuffleWithSeed(r.manga, seed).slice(0, GENRE_VISIBLE_COUNT),
+      };
+    });
+  }, [data, discoverSeed]);
+
   function handleManualDiscoverRefresh() {
     setDiscoverSeed(forceDiscoverSeed());
+  }
+
+  // Pick a single random unread title and navigate to its detail page. Uses
+  // the discover candidate pool so it respects the user's favorite genres.
+  function handleSurpriseMe() {
+    const pool = data?.discover_candidates;
+    if (!pool || pool.length === 0) return;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    navigate(`/manga/${pick.id}`);
   }
 
   return (
@@ -348,9 +542,7 @@ export default function Home() {
           </>
         ) : (
         <>
-        {loading && !data && (
-          <div className="loading-center"><div className="spinner" /></div>
-        )}
+        {loading && !data && <HomeSkeleton />}
 
         {error && !data && (
           <div className="error-message">
@@ -366,6 +558,7 @@ export default function Home() {
           <>
             {data.continue_reading.length === 0
               && data.discover_candidates.length === 0
+              && (data.recently_added?.length ?? 0) === 0
               && data.art_gallery.length === 0
               && data.favorite_genres_ribbons.length === 0 ? (
               <div className="home-empty">
@@ -378,23 +571,47 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <Ribbon title="Continue Reading">
-                  {data.continue_reading.map(m => (
-                    <ContinueReadingTile key={m.id} manga={m} />
-                  ))}
-                </Ribbon>
+                <ResumeHero manga={data.continue_reading[0]} />
+
+                {continueRest.length > 0 && (
+                  <Ribbon title="Continue Reading">
+                    {continueRest.map((m, i) => (
+                      <ContinueReadingTile key={m.id} manga={m} eager={i === 0} />
+                    ))}
+                  </Ribbon>
+                )}
+
+                {data.recently_added && data.recently_added.length > 0 && (
+                  <Ribbon
+                    title="Recently Added"
+                    viewAllTo={{ pathname: '/library', state: { search: '' } }}
+                  >
+                    {data.recently_added.map((m, i) => (
+                      <MangaTile key={m.id} manga={m} eager={i === 0} />
+                    ))}
+                  </Ribbon>
+                )}
 
                 <Ribbon
                   title="Discover New Series"
                   actions={
                     discoverVisible.length > 0 && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={handleManualDiscoverRefresh}
-                        title="Shuffle new picks"
-                      >
-                        Refresh
-                      </button>
+                      <>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={handleSurpriseMe}
+                          title="Open a random unread series"
+                        >
+                          Surprise me
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={handleManualDiscoverRefresh}
+                          title="Shuffle new picks"
+                        >
+                          Refresh
+                        </button>
+                      </>
                     )
                   }
                   emptyMessage={
@@ -403,10 +620,11 @@ export default function Home() {
                       : null
                   }
                 >
-                  {discoverVisible.map(m => (
+                  {discoverVisible.map((m, i) => (
                     <MangaTile
                       key={m.id}
                       manga={m}
+                      eager={i === 0}
                       sub={m.match_count > 1
                         ? `${m.match_count} matching genres`
                         : '1 matching genre'}
@@ -414,15 +632,18 @@ export default function Home() {
                   ))}
                 </Ribbon>
 
-                <ArtGalleryRibbon items={data.art_gallery} />
+                <Suspense fallback={null}>
+                  <ArtGalleryRibbon items={data.art_gallery} />
+                </Suspense>
 
-                {data.favorite_genres_ribbons.map(r => (
+                {genreRibbonsVisible.map(r => (
                   <Ribbon
                     key={r.genre}
                     title={`Top Manga in ${r.genre}`}
+                    viewAllTo={{ pathname: '/library', state: { search: r.genre } }}
                   >
-                    {r.manga.map(m => (
-                      <MangaTile key={m.id} manga={m} />
+                    {r.manga.map((m, i) => (
+                      <MangaTile key={m.id} manga={m} eager={i === 0} />
                     ))}
                   </Ribbon>
                 ))}

@@ -31,6 +31,8 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
   const [options, setOptions] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [applying, setApplying] = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateMsg, setGenerateMsg] = useState(null);
 
   useEffect(() => {
     api.getThumbnailOptions(mangaId)
@@ -60,6 +62,29 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
     }
   }
 
+  async function generateCovers() {
+    setGenerating(true);
+    setGenerateMsg(null);
+    try {
+      const result = await api.generateChapterCovers(mangaId);
+      const parts = [];
+      if (result.generated) parts.push(`${result.generated} new`);
+      if (result.skipped)   parts.push(`${result.skipped} reused`);
+      if (result.errors)    parts.push(`${result.errors} error${result.errors === 1 ? '' : 's'}`);
+      setGenerateMsg(
+        parts.length > 0
+          ? `Generated chapter covers — ${parts.join(', ')}.`
+          : 'No chapters available to generate from.'
+      );
+      const refreshed = await api.getThumbnailOptions(mangaId);
+      setOptions(refreshed);
+    } catch (err) {
+      setGenerateMsg('Failed: ' + err.message);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-box thumb-picker-modal-box" onClick={e => e.stopPropagation()}>
@@ -68,6 +93,22 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <div className="thumb-picker-body">
+          <div className="thumb-picker-actions">
+            <button
+              className="thumb-picker-generate-btn"
+              onClick={generateCovers}
+              disabled={generating || !options}
+              title="Render a thumbnail from the first page of every chapter"
+            >
+              {generating ? 'Generating…' : 'Generate Covers'}
+            </button>
+            {generateMsg && (
+              <span
+                className={`thumb-picker-generate-msg${generateMsg.startsWith('Failed') ? ' is-error' : ''}`}
+              >{generateMsg}</span>
+            )}
+          </div>
+
           {!options && !loadError && (
             <div className="loading-center" style={{ minHeight: 120 }}>
               <div className="spinner" />
@@ -125,19 +166,32 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">Chapter Covers</h3>
                   <div className="thumb-picker-grid">
                     {options.chapter_first_pages.map(ch => (
-                      <ThumbOption
-                        key={ch.chapter_id}
-                        src={api.pageImageUrl(ch.page_id)}
-                        label={ch.label}
-                        applying={applying === ch.page_id}
-                        onUse={() => applyPage(ch.page_id)}
-                      />
+                      ch.generated_filename
+                        ? (
+                          <ThumbOption
+                            key={ch.chapter_id}
+                            src={api.thumbnailUrl(ch.generated_filename)}
+                            label={ch.label}
+                            applying={applying === ch.generated_filename}
+                            onUse={() => applyFile(ch.generated_filename)}
+                          />
+                        )
+                        : (
+                          <ThumbOption
+                            key={ch.chapter_id}
+                            src={api.pageImageUrl(ch.page_id)}
+                            label={ch.label}
+                            applying={applying === ch.page_id}
+                            onUse={() => applyPage(ch.page_id)}
+                          />
+                        )
                     ))}
                   </div>
                 </div>
               )}
 
-              {!options.anilist_cover && !options.original_cover && options.history.length === 0 && options.chapter_first_pages.length === 0 && (
+              {!options.anilist_cover && !options.original_cover && options.history.length === 0
+                  && options.chapter_first_pages.length === 0 && (
                 <p className="thumb-picker-empty">No thumbnail options available yet. Read a chapter first to generate options.</p>
               )}
             </>

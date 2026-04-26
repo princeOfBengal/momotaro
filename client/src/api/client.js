@@ -197,6 +197,14 @@ export const api = {
       body: JSON.stringify({ saved_filename: savedFilename }),
     }),
   getThumbnailOptions: (mangaId) => apiFetch(`/api/manga/${mangaId}/thumbnail-options`),
+  generateChapterCovers: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/generate-chapter-covers`, {
+      method: 'POST',
+      // Generates one 300×430 webp per chapter (one CBZ extract each on a cold
+      // cache); long-tail manga can have hundreds of chapters, so allow up to
+      // 10 minutes before the client gives up.
+      timeoutMs: 600_000,
+    }),
 
   // Optimize
   optimizeManga: (id) => apiFetch(`/api/manga/${id}/optimize`, { method: 'POST' }),

@@ -70,8 +70,9 @@ Response shape:
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
 | PATCH | `/api/manga/:id` | Update manga settings `{ track_volumes? }` |
-| GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages |
+| GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages (each annotated with its pre-generated cover when available) |
 | POST | `/api/manga/:id/set-thumbnail` | Set thumbnail from a page `{ page_id }` or saved file `{ saved_filename }` |
+| POST | `/api/manga/:id/generate-chapter-covers` | Render a 300×430 WebP from the first page of every chapter and save each into `thumbnail_history` (idempotent per chapter); does not change the active cover |
 | DELETE | `/api/manga/:id` | Remove manga from DB and delete files on disk |
 
 ### Search (`?search=`)
@@ -143,15 +144,16 @@ Under the hood, the server fetches `limit + 1` rows and uses `WHERE (title, id) 
       { "id": 3, "filename": "5_1713200000000.webp", "created_at": 1713200000 }
     ],
     "chapter_first_pages": [
-      { "chapter_id": 12, "chapter_name": "Chapter 1", "page_id": 100 }
+      { "chapter_id": 12, "page_id": 100, "label": "Vol.1 Ch.1", "generated_filename": "5_ch12.webp" },
+      { "chapter_id": 13, "page_id": 117, "label": "Vol.1 Ch.2", "generated_filename": null }
     ]
   }
 }
 ```
 
 - `anilist_cover` / `original_cover` — `null` if not yet generated.
-- `history` — up to 20 entries, most recent first. Populated by `POST /api/manga/:id/set-thumbnail` with `{ page_id }`.
-- `chapter_first_pages` — one entry per chapter (the page at `page_index = 0`), ordered by chapter number.
+- `history` — up to 20 entries, most recent first. Populated by `POST /api/manga/:id/set-thumbnail` with `{ page_id }`. Excludes generated chapter covers — those are folded into `chapter_first_pages` below.
+- `chapter_first_pages` — one entry per chapter (the page at `page_index = 0`), ordered by chapter number. `generated_filename` is the deterministic `<mangaId>_ch<chapterId>.webp` produced by `POST /api/manga/:id/generate-chapter-covers` when present, or `null` when that chapter hasn't been generated yet. The Choose Thumbnail modal renders the pre-sized thumbnail when `generated_filename` is set (applied via `set-thumbnail` `{ saved_filename }`) and falls back to streaming the raw page image otherwise (applied via `set-thumbnail` `{ page_id }`).
 
 ### `POST /api/manga/:id/set-thumbnail`
 
@@ -173,6 +175,19 @@ Generates a 300 × 430 WebP from the page image, saves it as `{mangaId}_{timesta
 ```
 
 Copies an existing saved file to the active `{mangaId}.webp`. The filename must start with `{mangaId}_` and end with `.webp` (path traversal prevention).
+
+### `POST /api/manga/:id/generate-chapter-covers`
+
+Renders a 300×430 WebP thumbnail from the first page (`page_index = 0`) of every chapter and inserts each into `thumbnail_history`. Triggered from the **Generate Covers** button on the Choose Thumbnail modal.
+
+```json
+{ "data": { "generated": 18, "skipped": 2, "errors": 0, "total": 20 } }
+```
+
+- Filenames follow the deterministic pattern `<mangaId>_ch<chapterId>.webp`, so re-running the endpoint is **idempotent** — chapters whose thumbnail file already exists are skipped (their history row is re-inserted via `INSERT OR IGNORE` to recover from any DB-only loss).
+- The active cover is **not** changed; this only populates the pool of options the user can pick from in the modal. Apply one with `POST /api/manga/:id/set-thumbnail` `{ "saved_filename": "<mangaId>_ch<chapterId>.webp" }`.
+- CBZ chapters are resolved through `cbzCache.getCbzPageFile`, which extracts the chapter on demand. Because the cache auto-clears on overflow (see [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache)), the loop verifies the resolved file still exists immediately before reading it and re-extracts once if a parallel reader or the auto-clear scheduler wiped it.
+- Runs synchronously on the request thread. Long-tail manga with many chapters can take a while — the client allows up to 10 minutes before timing out.
 
 ---
 

@@ -957,16 +957,44 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
   res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
 }));
 
+// Filename helpers — generated chapter covers use a deterministic name so
+// re-running Generate Covers is idempotent, and we can split them out from
+// manually-saved history entries (which use a timestamp suffix) at read time.
+function generatedCoverFilename(mangaId, chapterId) {
+  return `${mangaId}_ch${chapterId}.webp`;
+}
+function isGeneratedCoverFilename(mangaId, filename) {
+  return new RegExp(`^${mangaId}_ch\\d+\\.webp$`).test(filename);
+}
+
+function chapterLabel(ch) {
+  if (ch.volume !== null && ch.number !== null) return `Vol.${ch.volume} Ch.${ch.number}`;
+  if (ch.volume !== null) return `Vol.${ch.volume}`;
+  if (ch.number !== null) return `Ch.${ch.number}`;
+  return ch.folder_name;
+}
+
 // GET /api/manga/:id/thumbnail-options — list all available thumbnail choices
 router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT id, anilist_cover, original_cover, cover_image FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  // Previously-used page thumbnails (most recent first, cap at 20)
-  const history = db.prepare(
-    'SELECT id, filename, created_at FROM thumbnail_history WHERE manga_id = ? ORDER BY created_at DESC LIMIT 20'
+  // Pull every history row for the manga. Generated chapter covers (deterministic
+  // filenames `<mangaId>_ch<chapterId>.webp`) are folded into chapter_first_pages
+  // below — they aren't returned as a separate section. Manual saves (timestamped
+  // filenames) feed the Previously Used section, capped at 20 most recent.
+  const allHistory = db.prepare(
+    'SELECT id, filename, created_at FROM thumbnail_history WHERE manga_id = ? ORDER BY created_at DESC'
   ).all(manga.id);
+  const generatedByChapter = new Map(); // chapter_id -> filename
+  for (const h of allHistory) {
+    const m = new RegExp(`^${manga.id}_ch(\\d+)\\.webp$`).exec(h.filename);
+    if (m) generatedByChapter.set(parseInt(m[1], 10), h.filename);
+  }
+  const history = allHistory
+    .filter(h => !isGeneratedCoverFilename(manga.id, h.filename))
+    .slice(0, 20);
 
   // First page of every chapter, ordered chapter-number ascending
   const chapterPages = db.prepare(`
@@ -984,21 +1012,105 @@ router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
       anilist_cover:       manga.anilist_cover  || null,
       original_cover:      manga.original_cover || null,
       history,
+      // Each chapter gets one tile. If a generated cover exists for that chapter
+      // (produced by POST /generate-chapter-covers), the entry includes its
+      // `generated_filename` so the client can render the pre-sized thumbnail
+      // and apply it via setThumbnailFromFile. Otherwise the client falls back
+      // to streaming the raw page image and generating on apply.
       chapter_first_pages: chapterPages
         .filter(ch => ch.page_id !== null)
         .map(ch => ({
-          chapter_id: ch.chapter_id,
-          page_id:    ch.page_id,
-          label: ch.volume !== null && ch.number !== null
-            ? `Vol.${ch.volume} Ch.${ch.number}`
-            : ch.volume !== null
-              ? `Vol.${ch.volume}`
-              : ch.number !== null
-                ? `Ch.${ch.number}`
-                : ch.folder_name,
+          chapter_id:        ch.chapter_id,
+          page_id:           ch.page_id,
+          label:             chapterLabel(ch),
+          generated_filename: generatedByChapter.get(ch.chapter_id) || null,
         })),
     },
   });
+}));
+
+// POST /api/manga/:id/generate-chapter-covers — render a 300×430 WebP thumbnail
+// from the first page of every chapter and add each to thumbnail_history.
+//
+// Filenames are deterministic per (manga, chapter) so repeated runs are
+// idempotent: existing files are reused and only missing chapters are
+// regenerated. The active cover is left untouched — this only populates the
+// pool of available thumbnails the user can pick from in the modal.
+router.post('/manga/:id/generate-chapter-covers', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT id FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const chapters = db.prepare(`
+    SELECT c.id   AS chapter_id, c.type AS chapter_type, c.path AS chapter_path,
+           p.id   AS page_id,    p.path AS page_path,    p.page_index
+    FROM chapters c
+    LEFT JOIN pages p ON p.chapter_id = c.id AND p.page_index = 0
+    WHERE c.manga_id = ?
+    ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
+  `).all(manga.id);
+
+  let generated = 0;
+  let skipped   = 0;
+  let errors    = 0;
+
+  for (const ch of chapters) {
+    if (!ch.page_id) { skipped++; continue; }
+
+    const filename = generatedCoverFilename(manga.id, ch.chapter_id);
+    ensureShardDir(filename);
+    const outputPath = thumbnailPath(filename);
+
+    // Idempotency: if the file is already on disk, just make sure the history
+    // row exists (handles cases where the row was lost but the file remains)
+    // and skip the regen.
+    if (fs.existsSync(outputPath)) {
+      db.prepare('INSERT OR IGNORE INTO thumbnail_history (manga_id, filename) VALUES (?, ?)')
+        .run(manga.id, filename);
+      skipped++;
+      continue;
+    }
+
+    try {
+      // Resolve the source image. For CBZ chapters we route through the cache;
+      // the cache may auto-clear mid-loop (overflow protection keeps the just-
+      // extracted dir, but parallel reads or the schedule can still wipe ours),
+      // so verify the file exists and re-extract once if it vanished.
+      let input;
+      if (ch.chapter_type === 'cbz') {
+        if (!fs.existsSync(ch.chapter_path)) { errors++; continue; }
+        input = await cbzCache.getCbzPageFile(ch.chapter_id, ch.chapter_path, ch.page_index);
+        if (input && !fs.existsSync(input)) {
+          input = await cbzCache.getCbzPageFile(ch.chapter_id, ch.chapter_path, ch.page_index);
+        }
+      } else {
+        if (!fs.existsSync(ch.page_path)) { errors++; continue; }
+        input = ch.page_path;
+      }
+      if (!input) { errors++; continue; }
+
+      await sharp(input)
+        .resize(300, 430, { fit: 'cover', position: 'top' })
+        .webp({ quality: 85 })
+        .toFile(outputPath);
+
+      db.prepare('INSERT OR IGNORE INTO thumbnail_history (manga_id, filename) VALUES (?, ?)')
+        .run(manga.id, filename);
+      generated++;
+    } catch (err) {
+      errors++;
+      console.warn(
+        `[Thumbnail] Generate-chapter-covers: manga ${manga.id} chapter ${ch.chapter_id} failed: ${err.message}`
+      );
+    }
+  }
+
+  console.log(
+    `[Thumbnail] Generated chapter covers for manga ${manga.id}: ` +
+    `${generated} new, ${skipped} reused, ${errors} errors (${chapters.length} chapters)`
+  );
+
+  res.json({ data: { generated, skipped, errors, total: chapters.length } });
 }));
 
 // POST /api/manga/:id/set-thumbnail — set thumbnail from a page or an existing saved file

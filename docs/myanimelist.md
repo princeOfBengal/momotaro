@@ -89,9 +89,33 @@ When metadata is applied, the cover image is downloaded and saved as:
 
 The file is resized to 300 × 430 WebP at 85 % quality (same as AniList covers). The `mal_cover` column in the `manga` table records the filename. The active cover (`{mangaId}.webp`) is updated to point to this file.
 
-## Rate Limiting
+## Rate Limiting & Bulk Throughput
 
-MAL does not publish explicit rate limits. The bulk metadata loop spaces requests **1 000 ms apart** (`MAL_REQUEST_INTERVAL_MS`), a value chosen to match common community wrappers; this is more conservative than the previous 700 ms shared with AniList. If a 429 response is received, the service backs off for 60 seconds and retries once.
+MAL does not publish explicit rate limits and offers no batch / aliased endpoint — the only way to fetch N manga is N HTTP requests. Bulk pulls therefore use **bounded concurrency** instead of strict sequential pacing:
+
+| Constant | Value | Purpose |
+| --- | --- | --- |
+| `MAL_BATCH_CONCURRENCY` | 3 | Maximum in-flight requests at once |
+| `MAL_BATCH_INTERVAL_MS` | 350 | Minimum time between successive request *starts* across all workers |
+| `MAL_REQUEST_INTERVAL_MS` | 1 000 | Legacy single-request floor; only used now by code paths that haven't been moved onto the batch helper |
+
+The two batch parameters are shared by `fetchBatchByMALIds` and `fetchBatchFromMAL` — a global "next start at" timestamp is used so spinning up a fourth worker still stalls until the third worker's start window has elapsed. Steady-state throughput lands around **~3 req/sec** (concurrency ÷ stagger), a ~3× speedup over the previous strict 1 req/sec sequential mode while staying well under the levels community wrappers report as 429-prone.
+
+The bulk metadata route slices `toRefresh` and `toSearch` into chunks of `MAL_CHUNK_SIZE = 30` manga; after each chunk completes the `last_metadata_fetch_attempt_at` column is stamped, so a long-running bulk pull's progress is durable even if the server restarts.
+
+### 429 handling — shared cooldown
+
+All MAL HTTP calls go through a single `malRequest` helper that maintains a process-wide cooldown timestamp. When any request hits a 429:
+
+1. The `Retry-After` header is honoured (capped to `[1 s, 120 s]`); 60 s is the default if the header is absent.
+2. The cooldown timestamp is set to `now + retry-after` so every other in-flight worker sleeps until the cooldown clears before issuing its next request.
+3. The original request retries once after the cooldown.
+
+This avoids the failure mode where three concurrent workers all keep hammering MAL after a 429 and stretch the back-off into a multi-minute outage.
+
+### Per-item failure semantics
+
+`fetchBatchByMALIds` and `fetchBatchFromMAL` resolve a per-item lookup failure to `null` rather than throwing — one bad MAL ID or a flaky single response never poisons the rest of the chunk. The bulk route also wraps each per-item DB write in its own `try` so an individual `applyMetadataToManga` failure increments the error counter and continues.
 
 ## Adult Content (NSFW)
 

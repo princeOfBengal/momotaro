@@ -24,15 +24,32 @@ function buildHeaders(clientId) {
   return headers;
 }
 
+// Shared 429 cooldown — when one request is rate-limited, every other
+// concurrent request waits until the cooldown passes. Without this, three
+// parallel workers would all keep firing into a 429 wall and stretch the
+// back-off into a multi-minute outage.
+let _malCooldownUntil = 0;
+
+async function _waitForCooldown() {
+  const wait = _malCooldownUntil - Date.now();
+  if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+}
+
 async function malRequest(path, clientId) {
+  await _waitForCooldown();
   const resp = await fetch(`${MAL_API_BASE}${path}`, {
     headers: buildHeaders(clientId),
   });
 
   if (resp.status === 429) {
-    // MAL doesn't document rate limits; back off 60 s and retry once
-    console.warn('[MAL] Rate limited — retrying in 60 s');
-    await new Promise(resolve => setTimeout(resolve, 60_000));
+    // MAL doesn't document rate limits; respect Retry-After if present,
+    // otherwise default to 60 s. Pin the shared cooldown so peer workers
+    // pause too. Retry once after the cooldown.
+    const retryAfter = parseInt(resp.headers.get('retry-after') || '60', 10);
+    const waitMs = Math.max(1000, Math.min(120_000, retryAfter * 1000));
+    _malCooldownUntil = Date.now() + waitMs;
+    console.warn(`[MAL] Rate limited — backing off ${waitMs / 1000}s (shared)`);
+    await _waitForCooldown();
     const retry = await fetch(`${MAL_API_BASE}${path}`, {
       headers: buildHeaders(clientId),
     });
@@ -133,9 +150,15 @@ const { cleanSearchTitle } = require('./anilist');
 // whatever they put on disk and the metadata source should match.
 //
 // MAL doesn't publish its rate-limit number; community usage suggests
-// 1 req/sec is safe. The bulk loop respects `MAL_REQUEST_INTERVAL_MS`.
+// 1 req/sec is safe in pure-sequential mode. The bulk loop uses
+// `fetchBatch*` helpers below, which run a small concurrency pool with a
+// per-start interval of `MAL_BATCH_INTERVAL_MS` — the effective steady-state
+// throughput is ~3 req/sec (concurrency × stagger), which is a ~3× speedup
+// over strict sequential without crossing into 429 territory in practice.
 const NSFW_PARAM_VALUE = 'true';
 const MAL_REQUEST_INTERVAL_MS = 1000;
+const MAL_BATCH_CONCURRENCY = 3;
+const MAL_BATCH_INTERVAL_MS = 350;
 
 /**
  * Auto-fetch: returns the closest match for a title or null.
@@ -188,9 +211,75 @@ async function fetchByMALId(malId, clientId) {
   return normalizeManga(json);
 }
 
+/**
+ * Run `fn` over each item with a small concurrency pool, returning results in
+ * the same order. Acts as MAL's stand-in for AniList's aliased GraphQL — MAL
+ * has no batch endpoint, so the only way to speed up bulk pulls is to issue
+ * several HTTP requests in parallel. A per-start `MAL_BATCH_INTERVAL_MS`
+ * stagger caps total throughput at roughly 3 req/sec; the shared 429 cooldown
+ * inside `malRequest` makes peer workers pause together when MAL pushes back.
+ *
+ * Per-item failures resolve to `null` rather than throwing, so a single bad
+ * lookup doesn't poison the rest of the batch.
+ */
+async function malBatch(items, fn) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let nextSlotAt = 0;
+
+  async function worker() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+
+      // Stagger request *starts* across all workers — the slot variable is
+      // shared, so worker N waits until everybody before it has cleared its
+      // window. With 3 workers and a 350 ms interval that's ~3 req/sec total.
+      const now      = Date.now();
+      const startAt  = Math.max(now, nextSlotAt);
+      nextSlotAt     = startAt + MAL_BATCH_INTERVAL_MS;
+      const wait     = startAt - now;
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+
+      try {
+        results[i] = await fn(items[i]);
+      } catch (err) {
+        // Fall through with null; the caller logs/aggregates errors.
+        results[i] = null;
+      }
+    }
+  }
+
+  const concurrency = Math.min(MAL_BATCH_CONCURRENCY, items.length);
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return results;
+}
+
+/**
+ * Batched fetch-by-ID. Mirrors `fetchBatchByAniListIds` so the bulk loop has
+ * a uniform interface across both metadata sources. Returns results in the
+ * same order as `ids`; null slots mean the lookup returned no record.
+ */
+async function fetchBatchByMALIds(malIds, clientId) {
+  return malBatch(malIds, id => fetchByMALId(Number(id), clientId));
+}
+
+/**
+ * Batched search-by-title. Each title runs through `cleanSearchTitle` inside
+ * `fetchFromMAL`; null entries mean "no match found".
+ */
+async function fetchBatchFromMAL(titles, clientId) {
+  return malBatch(titles, t => fetchFromMAL(t, clientId));
+}
+
 module.exports = {
   fetchFromMAL,
   searchMAL,
   fetchByMALId,
+  fetchBatchByMALIds,
+  fetchBatchFromMAL,
   MAL_REQUEST_INTERVAL_MS,
+  MAL_BATCH_CONCURRENCY,
+  MAL_BATCH_INTERVAL_MS,
 };

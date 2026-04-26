@@ -7,7 +7,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { fetchFromAniList, fetchBatchFromAniList, fetchBatchByAniListIds, searchAniList, fetchByAniListId, getMediaListEntry, saveMediaListEntry, recommendedDelayMs: anilistRecommendedDelayMs } = require('../metadata/anilist');
 const { searchDoujinshi, fetchFromDoujinshi, fetchByDoujinshiSlug } = require('../metadata/doujinshi');
-const { fetchFromMAL, searchMAL, fetchByMALId, MAL_REQUEST_INTERVAL_MS } = require('../metadata/myanimelist');
+const { fetchFromMAL, searchMAL, fetchByMALId, fetchBatchByMALIds, fetchBatchFromMAL, MAL_REQUEST_INTERVAL_MS } = require('../metadata/myanimelist');
 const { getSetting, getDeviceSession } = require('./settings');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const cbzCache = require('../scanner/cbzCache');
@@ -425,6 +425,14 @@ const BULK_RETRY_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;  // 7 days
 // outbound HTTP count vs. the previous 5-per-batch.
 const ANILIST_BATCH_SIZE = 10;
 
+// MAL is REST and has no aliased / batch endpoint, so the bulk loop hands a
+// chunk of titles to `fetchBatchFromMAL` / `fetchBatchByMALIds` which run a
+// small concurrency pool internally (see myanimelist.js). The chunk size is a
+// scheduling unit — DB writes flush after each chunk so progress is durable
+// even on a long-running bulk pull. 30 keeps each chunk to ~10 s of work at
+// the ~3 req/sec sustained throughput.
+const MAL_CHUNK_SIZE = 30;
+
 const markAttemptedStmt = (db) =>
   db.prepare('UPDATE manga SET last_metadata_fetch_attempt_at = ? WHERE id = ?');
 
@@ -610,12 +618,35 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
       markAttempted(db, batch.map(m => m.id), nowSeconds);
       await sleep(delayMsFor('anilist'));
     }
+  } else if (source === 'myanimelist' && toRefresh.length > 0) {
+    // MAL has no batch endpoint; `fetchBatchByMALIds` runs a concurrency
+    // pool internally and paces itself via the shared 429 cooldown. Per-item
+    // lookup failures resolve to null in `results` (handled inside
+    // applyRefreshResult). Per-item DB errors are caught here so one bad row
+    // doesn't abort the rest of the chunk.
+    for (let i = 0; i < toRefresh.length; i += MAL_CHUNK_SIZE) {
+      const chunk = toRefresh.slice(i, i + MAL_CHUNK_SIZE);
+      const results = await fetchBatchByMALIds(
+        chunk.map(m => m.mal_id), malClientId
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        try {
+          await applyRefreshResult(chunk[j], results[j]);
+        } catch (err) {
+          counters.errors++;
+          const n = progressN();
+          console.warn(
+            `[BulkMetadata][myanimelist] (${n}/${totalToDo}) Apply error for "${chunk[j].title}": ${err.message}`
+          );
+        }
+      }
+      markAttempted(db, chunk.map(m => m.id), nowSeconds);
+    }
   } else if (toRefresh.length > 0) {
+    // Doujinshi.info — sequential by design (server is the bottleneck).
     for (const m of toRefresh) {
       try {
-        const result = source === 'myanimelist'
-          ? await fetchByMALId(Number(m.mal_id), malClientId)
-          : await fetchByDoujinshiSlug(m.doujinshi_id, doujinshiToken);
+        const result = await fetchByDoujinshiSlug(m.doujinshi_id, doujinshiToken);
         await applyRefreshResult(m, result);
       } catch (err) {
         counters.errors++;
@@ -651,12 +682,29 @@ router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
       markAttempted(db, batch.map(m => m.id), nowSeconds);
       await sleep(delayMsFor('anilist'));
     }
+  } else if (source === 'myanimelist' && toSearch.length > 0) {
+    for (let i = 0; i < toSearch.length; i += MAL_CHUNK_SIZE) {
+      const chunk = toSearch.slice(i, i + MAL_CHUNK_SIZE);
+      const results = await fetchBatchFromMAL(
+        chunk.map(m => m.title), malClientId
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        try {
+          await applySearchResult(chunk[j], results[j]);
+        } catch (err) {
+          counters.errors++;
+          const n = progressN();
+          console.warn(
+            `[BulkMetadata][myanimelist] (${n}/${totalToDo}) Apply error for "${chunk[j].title}": ${err.message}`
+          );
+        }
+      }
+      markAttempted(db, chunk.map(m => m.id), nowSeconds);
+    }
   } else if (toSearch.length > 0) {
     for (const m of toSearch) {
       try {
-        const result = source === 'doujinshi'
-          ? await fetchFromDoujinshi(m.title, doujinshiToken)
-          : await fetchFromMAL(m.title, malClientId);
+        const result = await fetchFromDoujinshi(m.title, doujinshiToken);
         await applySearchResult(m, result);
       } catch (err) {
         counters.errors++;
@@ -1047,7 +1095,7 @@ function chapterLabel(ch) {
 // GET /api/manga/:id/thumbnail-options — list all available thumbnail choices
 router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const manga = db.prepare('SELECT id, anilist_cover, original_cover, cover_image FROM manga WHERE id = ?').get(req.params.id);
+  const manga = db.prepare('SELECT id, anilist_cover, mal_cover, original_cover, cover_image FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
   // Pull every history row for the manga. Generated chapter covers (deterministic
@@ -1080,6 +1128,7 @@ router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
     data: {
       active_cover:        manga.cover_image,
       anilist_cover:       manga.anilist_cover  || null,
+      mal_cover:           manga.mal_cover      || null,
       original_cover:      manga.original_cover || null,
       history,
       // Each chapter gets one tile. If a generated cover exists for that chapter

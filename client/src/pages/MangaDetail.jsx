@@ -131,6 +131,20 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                 </div>
               )}
 
+              {options.mal_cover && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">MyAnimeList</h3>
+                  <div className="thumb-picker-grid">
+                    <ThumbOption
+                      src={api.thumbnailUrl(options.mal_cover)}
+                      label="MAL Cover"
+                      applying={applying === options.mal_cover}
+                      onUse={() => applyFile(options.mal_cover)}
+                    />
+                  </div>
+                </div>
+              )}
+
               {options.original_cover && (
                 <div className="thumb-picker-section">
                   <h3 className="thumb-picker-section-title">Original</h3>
@@ -190,7 +204,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                 </div>
               )}
 
-              {!options.anilist_cover && !options.original_cover && options.history.length === 0
+              {!options.anilist_cover && !options.mal_cover && !options.original_cover && options.history.length === 0
                   && options.chapter_first_pages.length === 0 && (
                 <p className="thumb-picker-empty">No thumbnail options available yet. Read a chapter first to generate options.</p>
               )}
@@ -1265,6 +1279,17 @@ export default function MangaDetail() {
         >
           <svg viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
+          </svg>
+        </button>
+        <button
+          className="detail-edit-btn"
+          onClick={() => navigate(`/manga/${manga.id}/edit`)}
+          title="Edit manga"
+          aria-label="Edit manga"
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor">
+            <path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" />
+            <path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" />
           </svg>
         </button>
         <button

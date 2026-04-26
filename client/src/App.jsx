@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Library from './pages/Library';
 import MangaDetail from './pages/MangaDetail';
+import EditManga from './pages/EditManga';
 import Reader from './pages/Reader';
 import AnilistCallback from './pages/AnilistCallback';
 import Libraries from './pages/Libraries';
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/library" element={<Library />} />
         <Route path="/manga/:id" element={<MangaDetail />} />
+        <Route path="/manga/:id/edit" element={<EditManga />} />
         <Route path="/read/:chapterId" element={<Reader />} />
         <Route path="/libraries" element={<Libraries />} />
         <Route path="/settings" element={<Settings />} />

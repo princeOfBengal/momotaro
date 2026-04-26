@@ -1,0 +1,158 @@
+.edit-manga-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.edit-manga-main {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 36px 24px 60px;
+}
+
+.edit-manga-header {
+  margin-bottom: 28px;
+}
+
+.edit-manga-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.edit-manga-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.edit-manga-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+.edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.edit-input {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.edit-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.edit-input::placeholder,
+.edit-genre-input::placeholder {
+  color: var(--text-muted);
+}
+
+.edit-genres {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: text;
+}
+
+.edit-genres:focus-within {
+  border-color: var(--accent);
+}
+
+.edit-genre-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 10px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 13px;
+  border-radius: 14px;
+}
+
+.edit-genre-remove {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.edit-genre-remove:hover {
+  background: rgba(232, 93, 4, 0.25);
+}
+
+.edit-genre-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 4px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+
+.edit-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.edit-error {
+  font-size: 13px;
+  color: #f44336;
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid rgba(244, 67, 54, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@media (max-width: 580px) {
+  .edit-manga-main { padding: 20px 16px 40px; }
+  .edit-manga-form { padding: 18px; }
+  .edit-actions .btn { flex: 1; }
+}

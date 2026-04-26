@@ -399,16 +399,39 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
   });
 }));
 
-// PATCH /api/manga/:id — update per-manga settings
+// PATCH /api/manga/:id — update per-manga settings or user-editable metadata
 router.patch('/manga/:id', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT id FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  const { track_volumes } = req.body;
+  const { track_volumes, title, author, genres } = req.body;
+
   if (track_volumes !== undefined) {
     db.prepare('UPDATE manga SET track_volumes = ?, updated_at = unixepoch() WHERE id = ?')
       .run(track_volumes ? 1 : 0, req.params.id);
+  }
+
+  if (title !== undefined) {
+    const trimmed = String(title).trim();
+    if (!trimmed) return res.status(400).json({ error: 'title cannot be empty' });
+    db.prepare('UPDATE manga SET title = ?, updated_at = unixepoch() WHERE id = ?')
+      .run(trimmed, req.params.id);
+  }
+
+  if (author !== undefined) {
+    const trimmed = String(author).trim();
+    db.prepare('UPDATE manga SET author = ?, updated_at = unixepoch() WHERE id = ?')
+      .run(trimmed || null, req.params.id);
+  }
+
+  if (genres !== undefined) {
+    if (!Array.isArray(genres)) return res.status(400).json({ error: 'genres must be an array' });
+    const cleaned = genres
+      .map(g => (typeof g === 'string' ? g.trim() : ''))
+      .filter(Boolean);
+    db.prepare('UPDATE manga SET genres = ?, updated_at = unixepoch() WHERE id = ?')
+      .run(JSON.stringify(cleaned), req.params.id);
   }
 
   const updated = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);

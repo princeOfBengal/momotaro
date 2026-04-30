@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { setCached } = require('./cache');
 
 const ANILIST_URL = 'https://graphql.anilist.co';
 
@@ -111,7 +112,30 @@ function readRateHeaders(resp) {
   updateAdaptiveDelay();
 }
 
-async function anilistRequest(query, variables, token, attempt = 0) {
+// Best-effort short label describing what the caller asked for. Logged on
+// every AniList HTTP request so the system log shows exactly when and why
+// each ping was issued.
+function describeRequest(label, variables) {
+  if (label) return label;
+  if (!variables) return 'graphql';
+  if (variables.search !== undefined) return `search="${variables.search}"`;
+  if (variables.id     !== undefined) return `id=${variables.id}`;
+  if (variables.mediaId !== undefined) {
+    return variables.userId !== undefined
+      ? `mediaList(user=${variables.userId}, media=${variables.mediaId})`
+      : `mutation(media=${variables.mediaId})`;
+  }
+  // Aliased batch query — the variable keys s0/id0/... give away the shape
+  const keys = Object.keys(variables);
+  if (keys.length && keys.every(k => /^s\d+$/.test(k)))  return `batchSearch(n=${keys.length})`;
+  if (keys.length && keys.every(k => /^id\d+$/.test(k))) return `batchById(n=${keys.length})`;
+  return 'graphql';
+}
+
+async function anilistRequest(query, variables, token, { label, attempt = 0 } = {}) {
+  const desc = describeRequest(label, variables);
+  console.log(`[AniList] → ${desc}${token ? ' (auth)' : ''}`);
+
   const resp = await fetch(ANILIST_URL, {
     method: 'POST',
     headers: buildHeaders(token),
@@ -127,9 +151,9 @@ async function anilistRequest(query, variables, token, attempt = 0) {
     if (attempt < 3) {
       const retryAfter = parseInt(resp.headers.get('retry-after') || '60', 10);
       const delay = Math.min(retryAfter * 1000, 90_000);
-      console.warn(`[AniList] Rate limited — retrying in ${delay / 1000}s (attempt ${attempt + 1}/3)`);
+      console.warn(`[AniList] Rate limited (${desc}) — retrying in ${delay / 1000}s (attempt ${attempt + 1}/3)`);
       await new Promise(resolve => setTimeout(resolve, delay));
-      return anilistRequest(query, variables, token, attempt + 1);
+      return anilistRequest(query, variables, token, { label, attempt: attempt + 1 });
     }
     throw new Error('AniList rate limit exceeded after 3 retries');
   }
@@ -145,7 +169,7 @@ async function anilistRequest(query, variables, token, attempt = 0) {
       e.message?.toLowerCase().includes('unauthorized')
     );
     if (isInvalidToken && token) {
-      console.warn('[AniList] Stored token is invalid — retrying without authentication');
+      console.warn(`[AniList] Stored token is invalid (${desc}) — retrying without authentication`);
       const retry = await fetch(ANILIST_URL, {
         method: 'POST',
         headers: buildHeaders(null),
@@ -276,9 +300,11 @@ function cleanSearchTitle(title) {
 /** Auto-fetch: returns best single result or null. */
 async function fetchFromAniList(title, token) {
   const search = cleanSearchTitle(title);
-  const json = await anilistRequest(AUTO_SEARCH_QUERY, { search }, token);
+  const json = await anilistRequest(AUTO_SEARCH_QUERY, { search }, token, { label: `autoSearch="${search}"` });
   if (json.errors || !json.data?.Media) return null;
-  return normalizeMedia(json.data.Media);
+  const record = normalizeMedia(json.data.Media);
+  if (record?.anilist_id) setCached('anilist', record.anilist_id, record);
+  return record;
 }
 
 /**
@@ -308,29 +334,41 @@ async function fetchBatchFromAniList(titles, token) {
   `;
   const variables = Object.fromEntries(cleaned.map((s, i) => [`s${i}`, s]));
 
-  const json = await anilistRequest(query, variables, token);
+  const json = await anilistRequest(query, variables, token, { label: `batchSearch(n=${cleaned.length})` });
   // AniList populates `errors` when individual aliases return null but still
   // returns data for the rest, so we don't bail on json.errors here.
   if (!json.data) return titles.map(() => null);
 
   return titles.map((_, i) => {
     const media = json.data[`q${i}`];
-    return media ? normalizeMedia(media) : null;
+    if (!media) return null;
+    const record = normalizeMedia(media);
+    if (record?.anilist_id) setCached('anilist', record.anilist_id, record);
+    return record;
   });
 }
 
 /** Manual search: returns up to 10 results for user selection. */
 async function searchAniList(query, token, page = 1) {
-  const json = await anilistRequest(MANUAL_SEARCH_QUERY, { search: query, page }, token);
+  const json = await anilistRequest(MANUAL_SEARCH_QUERY, { search: query, page }, token, { label: `manualSearch="${query}" page=${page}` });
   if (json.errors || !json.data?.Page?.media) return [];
-  return json.data.Page.media.map(normalizeMedia);
+  const results = json.data.Page.media.map(normalizeMedia);
+  // Manual-search results are user-selected one at a time, but caching every
+  // result is cheap and lets `apply-metadata` short-circuit when the user
+  // picks one — avoids the second round-trip.
+  for (const r of results) {
+    if (r?.anilist_id) setCached('anilist', r.anilist_id, r);
+  }
+  return results;
 }
 
 /** Fetch full metadata by a known AniList ID. */
 async function fetchByAniListId(anilistId, token) {
-  const json = await anilistRequest(FETCH_BY_ID_QUERY, { id: anilistId }, token);
+  const json = await anilistRequest(FETCH_BY_ID_QUERY, { id: anilistId }, token, { label: `fetchById=${anilistId}` });
   if (json.errors || !json.data?.Media) return null;
-  return normalizeMedia(json.data.Media);
+  const record = normalizeMedia(json.data.Media);
+  if (record?.anilist_id) setCached('anilist', record.anilist_id, record);
+  return record;
 }
 
 /**
@@ -359,12 +397,15 @@ async function fetchBatchByAniListIds(ids, token) {
   `;
   const variables = Object.fromEntries(ids.map((id, i) => [`id${i}`, id]));
 
-  const json = await anilistRequest(query, variables, token);
+  const json = await anilistRequest(query, variables, token, { label: `batchById(n=${ids.length})` });
   if (!json.data) return ids.map(() => null);
 
   return ids.map((_, i) => {
     const media = json.data[`q${i}`];
-    return media ? normalizeMedia(media) : null;
+    if (!media) return null;
+    const record = normalizeMedia(media);
+    if (record?.anilist_id) setCached('anilist', record.anilist_id, record);
+    return record;
   });
 }
 
@@ -387,7 +428,12 @@ query ($userId: Int, $mediaId: Int) {
  * Returns the entry object or null if not on their list.
  */
 async function getMediaListEntry(token, userId, mediaId) {
-  const json = await anilistRequest(MEDIA_LIST_ENTRY_QUERY, { userId: parseInt(userId, 10), mediaId }, token);
+  const json = await anilistRequest(
+    MEDIA_LIST_ENTRY_QUERY,
+    { userId: parseInt(userId, 10), mediaId },
+    token,
+    { label: `mediaList(user=${userId}, media=${mediaId})` },
+  );
   if (json.errors || !json.data?.MediaList) return null;
   return json.data.MediaList;
 }
@@ -408,14 +454,9 @@ query {
 /** Fetch the authenticated user's profile. Requires a valid token. */
 async function getViewer(token) {
   if (!token) throw new Error('Token required');
-  const resp = await fetch(ANILIST_URL, {
-    method: 'POST',
-    headers: buildHeaders(token),
-    body: JSON.stringify({ query: VIEWER_QUERY }),
-  });
-  const json = await resp.json();
-  if (!resp.ok || json.errors) {
-    const msg = json?.errors?.[0]?.message || `HTTP ${resp.status}`;
+  const json = await anilistRequest(VIEWER_QUERY, {}, token, { label: 'viewer' });
+  if (json.errors || !json.data?.Viewer) {
+    const msg = json?.errors?.[0]?.message || 'no Viewer in response';
     throw new Error(`AniList: ${msg}`);
   }
   return json.data.Viewer;
@@ -462,14 +503,14 @@ async function saveMediaListEntry(token, mediaId, status, { chapters = null, vol
     }
   `;
 
-  const resp = await fetch(ANILIST_URL, {
-    method: 'POST',
-    headers: buildHeaders(token),
-    body: JSON.stringify({ query: mutation, variables }),
-  });
-  const json = await resp.json();
-  if (!resp.ok || json.errors) {
-    const msg = json?.errors?.[0]?.message || `HTTP ${resp.status}`;
+  const json = await anilistRequest(
+    mutation,
+    variables,
+    token,
+    { label: `saveMediaListEntry(media=${mediaId}, status=${status})` },
+  );
+  if (json.errors || !json.data?.SaveMediaListEntry) {
+    const msg = json?.errors?.[0]?.message || 'no SaveMediaListEntry in response';
     throw new Error(`AniList: ${msg}`);
   }
   return json.data.SaveMediaListEntry;

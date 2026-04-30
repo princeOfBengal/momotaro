@@ -87,7 +87,9 @@ When metadata is applied, the cover image is downloaded and saved as:
 {THUMBNAIL_DIR}/{mangaId}_mal.webp
 ```
 
-The file is resized to 300 × 430 WebP at 85 % quality (same as AniList covers). The `mal_cover` column in the `manga` table records the filename. The active cover (`{mangaId}.webp`) is updated to point to this file.
+The file is resized to 300 × 430 WebP at 85 % quality (same as AniList covers). The `mal_cover` column in the `manga` table records the filename.
+
+The active `<mangaId>.webp` is **not** swapped here. Cover assignment is delegated to the priority resolver in [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js), which compares all five candidate slots — `anilist_cover > mal_cover > mangaupdates_cover > doujinshi_cover > original_cover` — and copies the highest-priority on-disk file into the active filename. So a fresh MAL apply on an AniList-covered manga downloads `<mangaId>_mal.webp` for the Thumbnail Picker but leaves the visible cover on AniList; if the AniList linkage is later broken, the next reinforcement pass drops to MAL automatically. See [scanner.md § Cover Priority](./scanner.md#cover-priority).
 
 ## Rate Limiting & Bulk Throughput
 
@@ -123,14 +125,27 @@ This avoids the failure mode where three concurrent workers all keep hammering M
 
 ## Metadata Priority
 
-When multiple sources are available, Momotaro respects this order:
+Two independent priority orders apply.
+
+**Text fields** (`title`, `description`, `status`, `year`, `genres`, `score`, `author`):
 
 1. **Local JSON file** (`metadata_source = 'local'`)
 2. **AniList** (`metadata_source = 'anilist'`)
 3. **MyAnimeList** (`metadata_source = 'myanimelist'`)
-4. **Doujinshi.info** (`metadata_source = 'doujinshi'`)
+4. **MangaUpdates** (`metadata_source = 'mangaupdates'`)
+5. **Doujinshi.info** (`metadata_source = 'doujinshi'`)
 
-Bulk metadata pulls skip any title that already has metadata from a higher-priority source. Per-manga apply endpoints always overwrite because the user explicitly selected a new entry.
+**Active cover** (independent — local doesn't enter):
+
+1. **AniList** (`anilist_cover`)
+2. **MyAnimeList** (`mal_cover`)
+3. **MangaUpdates** (`mangaupdates_cover`)
+4. **Doujinshi.info** (`doujinshi_cover`)
+5. **Original scan** (`original_cover`)
+
+Bulk metadata pulls run over every title in the library and apply with priority-aware writes — text fields are overwritten only when the new source's priority is ≥ current. Per-manga apply endpoints never refuse, but follow the same priority rule.
+
+A manual user pick (`POST /api/manga/:id/set-thumbnail`) sets `cover_user_set = 1` and is sticky against subsequent metadata fetches; only `POST /api/admin/reset-thumbnails` and the post-scan reinforcement pass clear the flag and re-align the cover. See [scanner.md § Cover Priority](./scanner.md#cover-priority).
 
 ## Relevant Files
 

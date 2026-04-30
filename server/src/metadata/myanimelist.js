@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { setCached } = require('./cache');
 
 const MAL_API_BASE = 'https://api.myanimelist.net/v2';
 
@@ -36,6 +37,7 @@ async function _waitForCooldown() {
 }
 
 async function malRequest(path, clientId) {
+  console.log(`[MAL] → ${path}`);
   await _waitForCooldown();
   const resp = await fetch(`${MAL_API_BASE}${path}`, {
     headers: buildHeaders(clientId),
@@ -175,7 +177,9 @@ async function fetchFromMAL(title, clientId) {
   const json = await malRequest(`/manga?${params}`, clientId);
   const data = json.data;
   if (!Array.isArray(data) || data.length === 0) return null;
-  return normalizeManga(data[0].node);
+  const record = normalizeManga(data[0].node);
+  if (record?.mal_id) setCached('myanimelist', record.mal_id, record);
+  return record;
 }
 
 /**
@@ -194,7 +198,11 @@ async function searchMAL(query, clientId, page = 1) {
   const json = await malRequest(`/manga?${params}`, clientId);
   const data = json.data;
   if (!Array.isArray(data)) return [];
-  return data.map(item => normalizeManga(item.node));
+  const results = data.map(item => normalizeManga(item.node));
+  for (const r of results) {
+    if (r?.mal_id) setCached('myanimelist', r.mal_id, r);
+  }
+  return results;
 }
 
 /**
@@ -208,7 +216,9 @@ async function fetchByMALId(malId, clientId) {
   const params = new URLSearchParams({ fields: MANGA_FIELDS });
   const json = await malRequest(`/manga/${malId}?${params}`, clientId);
   if (!json || !json.id) return null;
-  return normalizeManga(json);
+  const record = normalizeManga(json);
+  if (record?.mal_id) setCached('myanimelist', record.mal_id, record);
+  return record;
 }
 
 /**

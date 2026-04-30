@@ -6,6 +6,7 @@ const { parseChapterInfo, getChapterPages, detectChapterType } = require('./chap
 const { generateThumbnail } = require('./thumbnailGenerator');
 const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
+const { reinforceAllCovers } = require('./coverResolver');
 
 // Concurrency knobs.
 //   MANGA_CONCURRENCY — how many manga directories we walk in parallel. Sharp
@@ -260,6 +261,28 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
     if (rootMtimeMs !== null) {
       db.prepare('UPDATE libraries SET last_scan_mtime_ms = ? WHERE id = ?')
         .run(rootMtimeMs, library.id);
+    }
+
+    // Reinforce cover priority across the library — equivalent to running
+    // Reset Thumbnails scoped to this library. Forces user-set covers back
+    // onto the priority order (anilist > mal > mu > doujinshi > original)
+    // so the visible cover stays in sync with the highest-priority record
+    // available for each manga. No upstream pings — this only re-uses
+    // cover files already on disk.
+    try {
+      const coverCounters = reinforceAllCovers(db, { libraryId: library.id, force: true });
+      console.log(
+        `[Scanner] Cover priority reinforced for "${library.name}": ` +
+        `${coverCounters.changed_to_anilist} → AniList, ` +
+        `${coverCounters.changed_to_mal} → MAL, ` +
+        `${coverCounters.changed_to_mu} → MangaUpdates, ` +
+        `${coverCounters.changed_to_doujinshi} → Doujinshi, ` +
+        `${coverCounters.changed_to_original} → original, ` +
+        `${coverCounters.kept_no_source} no source on disk, ` +
+        `${coverCounters.errors} errors (${coverCounters.total} total).`
+      );
+    } catch (err) {
+      console.warn(`[Scanner] Cover priority reinforcement failed: ${err.message}`);
     }
 
     console.log(`[Scanner] Done scanning library "${library.name}".`);

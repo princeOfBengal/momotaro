@@ -328,6 +328,12 @@ function LibrariesSection() {
                           </button>
                           <button
                             className="lp-bulk-meta-option"
+                            onClick={() => handleBulkMetadata(lib, 'mangaupdates')}
+                          >
+                            MangaUpdates
+                          </button>
+                          <button
+                            className="lp-bulk-meta-option"
                             onClick={() => handleBulkMetadata(lib, 'doujinshi')}
                           >
                             Doujinshi.info
@@ -1225,6 +1231,9 @@ function DatabaseSection() {
   const [thumbStatus, setThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
   const [thumbTotal, setThumbTotal] = useState(null);
 
+  const [resetThumbStatus, setResetThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
+  const [resetThumbResult, setResetThumbResult] = useState(null);   // counters from the API
+
   const [vacuumStatus, setVacuumStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
   const [vacuumResult, setVacuumResult] = useState(null); // { before, after }
 
@@ -1305,6 +1314,24 @@ function DatabaseSection() {
       setThumbStatus('done');
     } catch (err) {
       setThumbStatus('error');
+    }
+  }
+
+  async function handleResetThumbnails() {
+    if (!confirm(
+      'Reset all thumbnails to their priority-default cover?\n\n' +
+      'This will overwrite every manually-picked cover and re-align all manga to:\n' +
+      'AniList → MyAnimeList → MangaUpdates → Doujinshi.info → original scan.\n\n' +
+      'No upstream is contacted — only existing source-specific cover files are used.'
+    )) return;
+    setResetThumbStatus('loading');
+    setResetThumbResult(null);
+    try {
+      const d = await api.resetThumbnails();
+      setResetThumbResult(d);
+      setResetThumbStatus('done');
+    } catch (err) {
+      setResetThumbStatus('error');
     }
   }
 
@@ -1565,6 +1592,49 @@ function DatabaseSection() {
             disabled={thumbStatus === 'loading'}
           >
             {thumbStatus === 'loading' ? 'Starting…' : 'Regenerate All'}
+          </button>
+        </div>
+      </div>
+
+      {/* Reset Thumbnails */}
+      <div className="settings-card" style={{ marginBottom: 16 }}>
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">Reset Thumbnails</p>
+            <p className="db-op-desc">
+              Re-aligns every manga's cover to the priority order
+              <strong> AniList → MyAnimeList → MangaUpdates → Doujinshi.info → original scan</strong>.
+              Manually-picked covers are <strong>overridden</strong>. No upstream is contacted —
+              this only re-uses cover files already on disk from earlier metadata fetches.
+              The same priority pass also runs automatically at the end of every library scan.
+            </p>
+            {resetThumbStatus === 'done' && resetThumbResult && (
+              <p className="db-op-status db-op-status-ok">
+                Reset complete: {resetThumbResult.changed_to_anilist} → AniList,{' '}
+                {resetThumbResult.changed_to_mal} → MAL,{' '}
+                {resetThumbResult.changed_to_mu} → MangaUpdates,{' '}
+                {resetThumbResult.changed_to_doujinshi} → Doujinshi,{' '}
+                {resetThumbResult.changed_to_original} → original
+                {resetThumbResult.kept_no_source > 0
+                  ? `; ${resetThumbResult.kept_no_source} had no source on disk`
+                  : ''}
+                {resetThumbResult.errors > 0
+                  ? `; ${resetThumbResult.errors} errors`
+                  : ''}
+                {' '}({resetThumbResult.total} total).
+              </p>
+            )}
+            {resetThumbStatus === 'error' && (
+              <p className="db-op-status db-op-status-err">Failed — try again.</p>
+            )}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+            onClick={handleResetThumbnails}
+            disabled={resetThumbStatus === 'loading'}
+          >
+            {resetThumbStatus === 'loading' ? 'Resetting…' : 'Reset Thumbnails'}
           </button>
         </div>
       </div>

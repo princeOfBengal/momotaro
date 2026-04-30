@@ -16,7 +16,6 @@ services:
       - ./data:/app/data
     environment:
       - SCAN_ON_STARTUP=true
-      - METADATA_FETCH_ENABLED=true
       - REQUEST_DELAY_MS=700
     restart: unless-stopped
     healthcheck:

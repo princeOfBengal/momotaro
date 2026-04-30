@@ -47,12 +47,17 @@ One row per manga folder.
 | `genres` | TEXT | JSON array, e.g. `["Action","Romance"]` |
 | `anilist_id` | INTEGER | AniList media ID |
 | `mal_id` | INTEGER | MyAnimeList ID |
+| `mangaupdates_id` | INTEGER | MangaUpdates `series_id` (the modern long-form ID) |
 | `doujinshi_id` | TEXT | Doujinshi.info book slug, e.g. `glasses-in-summer-life` |
-| `score` | REAL | Average score from metadata source |
-| `metadata_source` | TEXT | `none`, `anilist`, `jikan`, `doujinshi`, `local` |
+| `score` | REAL | Average score from metadata source (0–10 scale) |
+| `metadata_source` | TEXT | `none`, `anilist`, `myanimelist`, `mangaupdates`, `doujinshi`, `local` — controls which source's text fields the UI displays |
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
 | `anilist_cover` | TEXT | Filename of the AniList-sourced thumbnail, e.g. `5_anilist.webp` |
-| `original_cover` | TEXT | Filename of the first-ever generated thumbnail, e.g. `5_original.webp` — set once and never overwritten |
+| `mal_cover` | TEXT | Filename of the MyAnimeList-sourced thumbnail, e.g. `5_mal.webp` |
+| `mangaupdates_cover` | TEXT | Filename of the MangaUpdates-sourced thumbnail, e.g. `5_mu.webp` |
+| `doujinshi_cover` | TEXT | Filename of the Doujinshi.info-sourced thumbnail, e.g. `5_dj.webp` (legacy installs see `5_cover.webp`, backfilled by `backfillDoujinshiCover`) |
+| `original_cover` | TEXT | Filename of the first-ever scan-generated thumbnail, e.g. `5_original.webp` — set once and never overwritten; final fallback in the cover priority |
+| `cover_user_set` | INTEGER | 1 when the user manually picked the active cover via `POST /api/manga/:id/set-thumbnail`. The post-scan and Reset-Thumbnails reinforcement passes are the only paths that ever clear it (and they always do; both call `reinforceAllCovers(force=true)`). Default 0. |
 | `last_metadata_fetch_attempt_at` | INTEGER | Unix timestamp of the last bulk-pull attempt (any source) — used to skip recently-tried no-match titles |
 | `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Refreshed per-manga by the watcher / optimize paths, and via one grouped `UPDATE … FROM (SELECT … GROUP BY manga_id)` at the end of each `scanLibrary` run. Lets `/api/stats` and `/api/manga/:id/info` answer without walking the library. |
 | `file_count` | INTEGER | Cached rollup of `SUM(chapters.file_count)` — total image pages across all chapters. |
@@ -135,6 +140,19 @@ Per-device AniList login state. Keyed by a UUID generated in the browser (`local
 | `anilist_username` | TEXT | Display name |
 | `anilist_avatar` | TEXT | Avatar URL |
 | `updated_at` | INTEGER | Unix timestamp |
+
+### `anilist_media_list_cache`
+
+Per-device cache of the user's AniList list entry for a given media ID. `GET /api/manga/:id/anilist-status` reads from here on every manga-detail page open and only falls through to a live `MediaList` GraphQL query when the cached row is missing or older than 5 minutes (`ANILIST_LIST_CACHE_TTL_SECONDS`). The mutating `PATCH /api/manga/:id/anilist-progress` writes the post-mutation entry back into the cache, so the next page open is served from cache without re-pinging AniList.
+
+| Column | Type | Notes |
+|---|---|---|
+| `device_id` | TEXT | UUID from browser localStorage (`X-Device-ID` header) |
+| `media_id` | INTEGER | AniList media id (`manga.anilist_id`) |
+| `entry_json` | TEXT | Serialised MediaList payload — **`NULL` is a real, cacheable answer** meaning "the user does not have this manga on their list yet" |
+| `fetched_at` | INTEGER | Unix timestamp; rows older than 5 minutes are treated as misses |
+
+**Primary key:** `(device_id, media_id)` — `INSERT … ON CONFLICT DO UPDATE` is used everywhere that writes to it, so the row is upserted with a fresh `fetched_at` on every refresh.
 
 ### `thumbnail_history`
 
@@ -289,14 +307,20 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `chapters` | `file_mtime` | Incremental scan optimisation |
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |
+| `manga` | `mangaupdates_id` | MangaUpdates integration |
 | `manga` | `anilist_cover` | AniList thumbnail filename |
-| `manga` | `original_cover` | First-ever generated thumbnail filename |
+| `manga` | `mal_cover` | MyAnimeList thumbnail filename |
+| `manga` | `mangaupdates_cover` | MangaUpdates thumbnail filename |
+| `manga` | `doujinshi_cover` | Doujinshi.info thumbnail filename (legacy installs are backfilled — see below) |
+| `manga` | `original_cover` | First-ever scan-generated thumbnail filename |
+| `manga` | `cover_user_set` | Manual-pick flag — see [scanner.md § Cover priority](./scanner.md#cover-priority) |
 | `manga` | `last_metadata_fetch_attempt_at` | Bulk-pull retry cooldown |
 | `chapters` | `bytes_on_disk` | Cached disk-usage column (see [scanner.md](./scanner.md#cached-disk-usage-columns)) |
 | `chapters` | `file_count` | Cached file-count column |
 | `manga` | `bytes_on_disk` | Rollup of chapter sizes for O(1) `/api/stats` |
 | `manga` | `file_count` | Rollup of chapter file counts |
 
-One structural migration is still handled separately:
+Structural migrations and one-time backfills handled separately from the column-level helper:
 
 - **`upgradeToMultiLibrary`** — Recreates the `manga` table to add `library_id` and change the unique constraint from `folder_name` to `path`. Runs once, detected by checking `pragma_table_info`.
+- **`backfillDoujinshiCover`** — Pre-`doujinshi_cover` installations saved Doujinshi.info covers as `<mangaId>_cover.webp` because doujinshi was the one source without a dedicated column. The new cover-priority resolver only looks at `*_cover` columns, so any doujinshi-displayed manga whose linkage exists but `doujinshi_cover IS NULL` gets the legacy filename written into the column on next startup. The actual file isn't touched. Logged as `[DB] Backfilled doujinshi_cover for N legacy doujinshi-displayed manga.` when it fires; no-op on subsequent boots.

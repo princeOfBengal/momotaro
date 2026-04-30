@@ -42,9 +42,10 @@ router.get('/admin/export-config', asyncWrapper(async (req, res) => {
 
   const mangaRows = db.prepare(`
     SELECT id, path, title, description, status, year, genres,
-           anilist_id, mal_id, doujinshi_id, score, author,
+           anilist_id, mal_id, mangaupdates_id, doujinshi_id, score, author,
            metadata_source, track_volumes,
-           cover_image, anilist_cover, original_cover, mal_cover
+           cover_image, cover_user_set,
+           anilist_cover, original_cover, mal_cover, mangaupdates_cover, doujinshi_cover
     FROM manga
   `).all();
 
@@ -52,23 +53,27 @@ router.get('/admin/export-config', asyncWrapper(async (req, res) => {
   const mangaIdToPath = new Map(mangaRows.map(m => [m.id, m.path]));
 
   const mangaMetadata = mangaRows.map(m => ({
-    path:            m.path,
-    title:           m.title,
-    description:     m.description,
-    status:          m.status,
-    year:            m.year,
-    genres:          safeJsonParse(m.genres, []),
-    anilist_id:      m.anilist_id,
-    mal_id:          m.mal_id,
-    doujinshi_id:    m.doujinshi_id,
-    score:           m.score,
-    author:          m.author,
-    metadata_source: m.metadata_source,
-    track_volumes:   m.track_volumes,
-    cover_image:     m.cover_image,
-    anilist_cover:   m.anilist_cover,
-    original_cover:  m.original_cover,
-    mal_cover:       m.mal_cover,
+    path:               m.path,
+    title:              m.title,
+    description:        m.description,
+    status:             m.status,
+    year:               m.year,
+    genres:             safeJsonParse(m.genres, []),
+    anilist_id:         m.anilist_id,
+    mal_id:             m.mal_id,
+    mangaupdates_id:    m.mangaupdates_id,
+    doujinshi_id:       m.doujinshi_id,
+    score:              m.score,
+    author:             m.author,
+    metadata_source:    m.metadata_source,
+    track_volumes:      m.track_volumes,
+    cover_image:        m.cover_image,
+    cover_user_set:     m.cover_user_set,
+    anilist_cover:      m.anilist_cover,
+    original_cover:     m.original_cover,
+    mal_cover:          m.mal_cover,
+    mangaupdates_cover: m.mangaupdates_cover,
+    doujinshi_cover:    m.doujinshi_cover,
   }));
 
   // Reading lists + memberships, exported by path.
@@ -244,23 +249,27 @@ router.post('/admin/import-config', asyncWrapper(async (req, res) => {
     if (Array.isArray(payload.manga_metadata)) {
       const upd = db.prepare(`
         UPDATE manga SET
-          title           = COALESCE(?, title),
-          description     = ?,
-          status          = ?,
-          year            = ?,
-          genres          = ?,
-          anilist_id      = ?,
-          mal_id          = ?,
-          doujinshi_id    = ?,
-          score           = ?,
-          author          = ?,
-          metadata_source = COALESCE(?, metadata_source),
-          track_volumes   = COALESCE(?, track_volumes),
-          cover_image     = COALESCE(?, cover_image),
-          anilist_cover   = ?,
-          original_cover  = ?,
-          mal_cover       = ?,
-          updated_at      = unixepoch()
+          title              = COALESCE(?, title),
+          description        = ?,
+          status             = ?,
+          year               = ?,
+          genres             = ?,
+          anilist_id         = ?,
+          mal_id             = ?,
+          mangaupdates_id    = ?,
+          doujinshi_id       = ?,
+          score              = ?,
+          author             = ?,
+          metadata_source    = COALESCE(?, metadata_source),
+          track_volumes      = COALESCE(?, track_volumes),
+          cover_image        = COALESCE(?, cover_image),
+          cover_user_set     = COALESCE(?, cover_user_set),
+          anilist_cover      = ?,
+          original_cover     = ?,
+          mal_cover          = ?,
+          mangaupdates_cover = ?,
+          doujinshi_cover    = ?,
+          updated_at         = unixepoch()
         WHERE id = ?
       `);
       for (const m of payload.manga_metadata) {
@@ -275,17 +284,21 @@ router.post('/admin/import-config', asyncWrapper(async (req, res) => {
           m.status ?? null,
           Number.isFinite(m.year) ? m.year : null,
           JSON.stringify(Array.isArray(m.genres) ? m.genres : []),
-          Number.isFinite(m.anilist_id)   ? m.anilist_id   : null,
-          Number.isFinite(m.mal_id)       ? m.mal_id       : null,
+          Number.isFinite(m.anilist_id)      ? m.anilist_id      : null,
+          Number.isFinite(m.mal_id)          ? m.mal_id          : null,
+          Number.isFinite(m.mangaupdates_id) ? m.mangaupdates_id : null,
           m.doujinshi_id ?? null,
           Number.isFinite(m.score) ? m.score : null,
           m.author ?? null,
           m.metadata_source ?? null,
           Number.isFinite(m.track_volumes) ? m.track_volumes : null,
           m.cover_image ?? null,
+          (m.cover_user_set === 0 || m.cover_user_set === 1) ? m.cover_user_set : null,
           m.anilist_cover ?? null,
           m.original_cover ?? null,
           m.mal_cover ?? null,
+          m.mangaupdates_cover ?? null,
+          m.doujinshi_cover ?? null,
           id,
         );
         counts.manga_metadata++;

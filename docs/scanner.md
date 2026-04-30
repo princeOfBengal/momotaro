@@ -9,6 +9,7 @@ The scanner turns filesystem folders and CBZ files into database records.
 | [server/src/scanner/libraryScanner.js](../server/src/scanner/libraryScanner.js) | Main scanner — walks directories, upserts DB rows, generates thumbnails |
 | [server/src/scanner/chapterParser.js](../server/src/scanner/chapterParser.js) | Parses chapter/volume numbers from names; lists and streams CBZ entries via `yauzl` |
 | [server/src/scanner/thumbnailGenerator.js](../server/src/scanner/thumbnailGenerator.js) | Generates WebP cover images via Sharp (accepts either a filesystem path or a CBZ entry descriptor) |
+| [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js) | Active-cover priority resolver. Used by `applyMetadataToManga`, `POST /api/admin/reset-thumbnails`, and the post-scan reinforcement pass. See [Cover Priority](#cover-priority). |
 | [server/src/scanner/localMetadata.js](../server/src/scanner/localMetadata.js) | Reads YAML/JSON sidecar metadata from manga folders |
 | [server/src/watcher/index.js](../server/src/watcher/index.js) | chokidar watcher — triggers `scanMangaDirectory` on file changes |
 
@@ -89,6 +90,51 @@ A second statement zeros out any manga left with no chapter rows so deletions pr
 The trade-off: at N manga with C chapters each, the per-manga path issues N statements hitting the `chapters` table N times; the bulk path replaces that with one `GROUP BY` pass. For a 10 k-manga library this eliminates ~10 k correlated-subquery round-trips per full scan.
 
 `GET /api/stats` sums `manga.bytes_on_disk` in a single query; `GET /api/manga/:id/info` reads the columns directly. Before the cached columns existed both endpoints walked the library folder on every request — untenable at 8 TB.
+
+## Cover Priority
+
+Every manga row stores up to five candidate cover filenames — one per third-party source plus the scanner-generated original — and a single active filename pointer:
+
+| Column | Source | Filename pattern |
+|---|---|---|
+| `anilist_cover` | AniList | `<mangaId>_anilist.webp` |
+| `mal_cover` | MyAnimeList | `<mangaId>_mal.webp` |
+| `mangaupdates_cover` | MangaUpdates | `<mangaId>_mu.webp` |
+| `doujinshi_cover` | Doujinshi.info | `<mangaId>_dj.webp` (legacy `<mangaId>_cover.webp` is backfilled — see [database.md](./database.md#migrations)) |
+| `original_cover` | Scanner | `<mangaId>_original.webp` (set once on first scan, never overwritten) |
+| `cover_image` | — | Always `<mangaId>.webp`, the active file content for serving |
+
+Each `*_cover` column points at an immutable archive of that source's image. The visible `<mangaId>.webp` is a copy of one of those archives, chosen by the priority resolver in [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js):
+
+```text
+anilist_cover > mal_cover > mangaupdates_cover > doujinshi_cover > original_cover
+```
+
+Local JSON sidecars (`metadata_source = 'local'`) **don't enter the cover priority** — they only swap text fields. A local-displayed manga that was previously linked to AniList still shows the AniList cover by default.
+
+### Manual user picks
+
+`POST /api/manga/:id/set-thumbnail` (page-derived or saved-file-derived) sets `manga.cover_user_set = 1`. From that point on:
+
+- Subsequent metadata fetches (`refresh-metadata`, `apply-metadata`, the bulk pull) only refresh the relevant `*_cover` source column. The active cover is left alone.
+- The active cover stays at whatever the user picked, even if it's a generated chapter cover (`<mangaId>_<timestamp>.webp` from the page-derived form) that isn't in any `*_cover` slot.
+
+### Reinforcement passes
+
+The flag is cleared (and the active cover re-aligned to the priority order) by `reinforceAllCovers(force = true)` in `coverResolver.js`. Two callers invoke it:
+
+1. **`POST /api/admin/reset-thumbnails`** — explicit user action from Settings → Database. Synchronous.
+2. **End of every `scanLibrary` run** — runs after the per-library rollup queries finish, before the watcher / runFullScan loop moves on. Logs per-source counts:
+
+   ```text
+   [Scanner] Cover priority reinforced for "library name": 301 → AniList,
+       52 → MAL, 8 → MangaUpdates, 4 → Doujinshi, 18 → original,
+       49 no source on disk, 0 errors (432 total).
+   ```
+
+Both call sites use `force = true`. **Neither pings any upstream** — the resolver only re-uses cover files already on disk from earlier metadata fetches. A soft variant (`force = false`) exists in the helper but is not currently called from anywhere; it would skip user-set manga while still re-aligning everything else.
+
+The same flow makes the `applyMetadataToManga` path (single refresh, single apply, bulk metadata) safe: it stores the fetched cover into the source-specific column and then calls `reinforceActiveCover` (force=false), which respects `cover_user_set` so a fresh AniList apply on a user-picked manga downloads the new AniList cover into `anilist_cover` without touching the visible `<mangaId>.webp`.
 
 ## Parallel Scanning
 

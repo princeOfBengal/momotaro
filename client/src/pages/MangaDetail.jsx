@@ -145,6 +145,34 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                 </div>
               )}
 
+              {options.mangaupdates_cover && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">MangaUpdates</h3>
+                  <div className="thumb-picker-grid">
+                    <ThumbOption
+                      src={api.thumbnailUrl(options.mangaupdates_cover)}
+                      label="MangaUpdates Cover"
+                      applying={applying === options.mangaupdates_cover}
+                      onUse={() => applyFile(options.mangaupdates_cover)}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {options.doujinshi_cover && (
+                <div className="thumb-picker-section">
+                  <h3 className="thumb-picker-section-title">Doujinshi.info</h3>
+                  <div className="thumb-picker-grid">
+                    <ThumbOption
+                      src={api.thumbnailUrl(options.doujinshi_cover)}
+                      label="Doujinshi.info Cover"
+                      applying={applying === options.doujinshi_cover}
+                      onUse={() => applyFile(options.doujinshi_cover)}
+                    />
+                  </div>
+                </div>
+              )}
+
               {options.original_cover && (
                 <div className="thumb-picker-section">
                   <h3 className="thumb-picker-section-title">Original</h3>
@@ -543,6 +571,115 @@ function MALSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
   );
 }
 
+// ── MangaUpdates Search Modal ──────────────────────────────────────────────
+function MangaUpdatesSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
+  const [query, setQuery] = useState(defaultQuery || '');
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [applying, setApplying] = useState(null);
+  const [searchError, setSearchError] = useState(null);
+
+  const doSearch = useCallback(async (q) => {
+    if (!q.trim()) return;
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const data = await api.searchMangaUpdates(q.trim());
+      setResults(data);
+      if (data.length === 0) setSearchError('No results found.');
+    } catch (err) {
+      setSearchError('Search failed: ' + err.message);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (defaultQuery) doSearch(defaultQuery);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleApply(result) {
+    setApplying(result.mangaupdates_id);
+    try {
+      const updated = await api.applyMangaUpdatesMetadata(mangaId, result.mangaupdates_id);
+      onApplied(updated);
+    } catch (err) {
+      alert('Failed to apply: ' + err.message);
+      setApplying(null);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter') doSearch(query);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Search MangaUpdates</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="modal-search-row">
+          <input
+            className="modal-search-input"
+            type="text"
+            placeholder="Search manga title..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            autoFocus
+          />
+          <button
+            className="btn btn-primary"
+            onClick={() => doSearch(query)}
+            disabled={searching || !query.trim()}
+          >
+            {searching ? '...' : 'Search'}
+          </button>
+        </div>
+
+        <div className="modal-results">
+          {searchError && <p className="modal-error">{searchError}</p>}
+          {results.map(r => (
+            <div key={r.mangaupdates_id} className="modal-result-row">
+              {r.cover_url && (
+                <img
+                  className="modal-result-cover"
+                  src={r.cover_url}
+                  alt={r.title}
+                  loading="lazy"
+                />
+              )}
+              <div className="modal-result-info">
+                <p className="modal-result-title">{r.title}</p>
+                <p className="modal-result-meta">
+                  {r.year && <span>{r.year}</span>}
+                  {r.status && <span>{r.status}</span>}
+                  {r.score && <span>★ {r.score.toFixed(1)}</span>}
+                </p>
+                {r.genres && r.genres.length > 0 && (
+                  <p className="modal-result-genres">
+                    {r.genres.slice(0, 4).join(' · ')}
+                  </p>
+                )}
+              </div>
+              <button
+                className="btn btn-primary modal-result-btn"
+                disabled={applying === r.mangaupdates_id}
+                onClick={() => handleApply(r)}
+              >
+                {applying === r.mangaupdates_id ? '...' : 'Use'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── AniList Status Panel ───────────────────────────────────────────────────────
 const STATUS_LABELS = {
   CURRENT:   'Reading',
@@ -794,7 +931,8 @@ export default function MangaDetail() {
   const [showSearch, setShowSearch] = useState(false);
   const [showDoujinshiSearch, setShowDoujinshiSearch] = useState(false);
   const [showMALSearch, setShowMALSearch] = useState(false);
-  const [metaSource, setMetaSource] = useState('anilist'); // 'anilist' | 'myanimelist' | 'doujinshi'
+  const [showMangaUpdatesSearch, setShowMangaUpdatesSearch] = useState(false);
+  const [metaSource, setMetaSource] = useState('anilist'); // 'anilist' | 'myanimelist' | 'mangaupdates' | 'doujinshi'
   const [savingTrackSetting, setSavingTrackSetting] = useState(false);
 
   // AniList reading status
@@ -1059,6 +1197,33 @@ export default function MangaDetail() {
     setShowMALSearch(false);
     setShowMetaModal(true);
     setMetaMessage({ type: 'success', text: 'Metadata applied from MyAnimeList.' });
+  }
+
+  function handleMangaUpdatesMetadataApplied(updated) {
+    setManga(prev => ({ ...prev, ...updated, chapters: prev.chapters, progress: prev.progress }));
+    setCoverBust(Date.now());
+    setShowMangaUpdatesSearch(false);
+    setShowMetaModal(true);
+    setMetaMessage({ type: 'success', text: 'Metadata applied from MangaUpdates.' });
+  }
+
+  async function handleFetchMangaUpdatesMetadata() {
+    setFetchingMeta(true);
+    setMetaMessage(null);
+    try {
+      const result = await api.refreshMangaUpdatesMetadata(id);
+      if (!result.found) {
+        setMetaMessage({ type: 'notfound', text: result.message || 'No match found on MangaUpdates.' });
+      } else {
+        setManga(prev => ({ ...prev, ...result.data, chapters: prev.chapters, progress: prev.progress }));
+        setCoverBust(Date.now());
+        setMetaMessage({ type: 'success', text: 'Metadata refreshed from MangaUpdates.' });
+      }
+    } catch (err) {
+      setMetaMessage({ type: 'error', text: 'Error: ' + err.message });
+    } finally {
+      setFetchingMeta(false);
+    }
   }
 
   async function handleExportMangaMetadata(source) {
@@ -1609,6 +1774,7 @@ export default function MangaDetail() {
                 >
                   <option value="anilist">AniList</option>
                   <option value="myanimelist">MyAnimeList</option>
+                  <option value="mangaupdates">MangaUpdates</option>
                   <option value="doujinshi">Doujinshi.info</option>
                 </select>
               </div>
@@ -1618,7 +1784,9 @@ export default function MangaDetail() {
                   ? 'Link this manga to an AniList entry to populate its title, cover image, description, genres, score, and release status.'
                   : metaSource === 'myanimelist'
                     ? 'Link this manga to a MyAnimeList entry to populate its title, cover image, description, genres, score, and release status.'
-                    : 'Link this manga to a Doujinshi.info entry to populate its title, cover image, year, and tags.'}
+                    : metaSource === 'mangaupdates'
+                      ? 'Link this manga to a MangaUpdates entry to populate its title, cover image, description, genres, score, and release status.'
+                      : 'Link this manga to a Doujinshi.info entry to populate its title, cover image, year, and tags.'}
                 {' '}Linked metadata will not be overwritten by local JSON files.
               </p>
 
@@ -1640,14 +1808,21 @@ export default function MangaDetail() {
                               <a href={`https://myanimelist.net/manga/${manga.mal_id}`} target="_blank" rel="noreferrer"> ↗</a>
                             )}
                           </span>
-                        : manga.metadata_source === 'doujinshi'
-                          ? <span className="meta-status-badge meta-status-doujinshi">
-                              Linked to Doujinshi.info
-                              {manga.doujinshi_id && (
-                                <a href={`https://doujinshi.info/book/${manga.doujinshi_id}`} target="_blank" rel="noreferrer"> ↗</a>
+                        : manga.metadata_source === 'mangaupdates'
+                          ? <span className="meta-status-badge meta-status-mangaupdates">
+                              Linked to MangaUpdates
+                              {manga.mangaupdates_id && (
+                                <a href={`https://www.mangaupdates.com/series.html?id=${manga.mangaupdates_id}`} target="_blank" rel="noreferrer"> ↗</a>
                               )}
                             </span>
-                          : <span className="meta-status-badge meta-status-anilist">Linked</span>
+                          : manga.metadata_source === 'doujinshi'
+                            ? <span className="meta-status-badge meta-status-doujinshi">
+                                Linked to Doujinshi.info
+                                {manga.doujinshi_id && (
+                                  <a href={`https://doujinshi.info/book/${manga.doujinshi_id}`} target="_blank" rel="noreferrer"> ↗</a>
+                                )}
+                              </span>
+                            : <span className="meta-status-badge meta-status-anilist">Linked</span>
                 ) : (
                   <span className="meta-status-badge meta-status-none">No metadata linked</span>
                 )}
@@ -1759,6 +1934,57 @@ export default function MangaDetail() {
                     </div>
                   )}
                 </div>
+              ) : metaSource === 'mangaupdates' ? (
+                <div className="meta-modal-actions">
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">{hasMetadata ? 'Re-fetch Metadata' : 'Fetch Metadata'}</span>
+                      <span className="meta-modal-action-desc">
+                        Automatically search MangaUpdates by this manga's title and apply the closest match.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleFetchMangaUpdatesMetadata}
+                      disabled={fetchingMeta}
+                    >
+                      {fetchingMeta ? 'Fetching…' : hasMetadata ? 'Re-fetch' : 'Fetch'}
+                    </button>
+                  </div>
+                  <div className="meta-modal-action-row">
+                    <div className="meta-modal-action-info">
+                      <span className="meta-modal-action-label">Search Manually</span>
+                      <span className="meta-modal-action-desc">
+                        Browse MangaUpdates search results and choose the correct entry yourself.
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => { setShowMetaModal(false); setShowMangaUpdatesSearch(true); }}
+                    >
+                      Search
+                    </button>
+                  </div>
+                  {manga.mangaupdates_id && (
+                    <div className="meta-modal-action-row">
+                      <div className="meta-modal-action-info">
+                        <span className="meta-modal-action-label">Export as JSON</span>
+                        <span className="meta-modal-action-desc">
+                          Read this manga's previously-fetched MangaUpdates record from cache and save it as
+                          <code>metadata.json</code> in the manga's folder. Any existing
+                          <code>metadata.json</code> will be overwritten.
+                        </span>
+                      </div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleExportMangaMetadata('mangaupdates')}
+                        disabled={exportingMangaMeta}
+                      >
+                        {exportingMangaMeta ? 'Exporting…' : 'Export'}
+                      </button>
+                    </div>
+                  )}
+                </div>
               ) : (
                 <div className="meta-modal-actions">
                   <div className="meta-modal-action-row">
@@ -1811,9 +2037,10 @@ export default function MangaDetail() {
                 </div>
               )}
 
-              {((metaSource === 'anilist'     && manga.anilist_id) ||
-                (metaSource === 'myanimelist' && manga.mal_id)     ||
-                (metaSource === 'doujinshi'   && manga.doujinshi_id)) && (
+              {((metaSource === 'anilist'      && manga.anilist_id)      ||
+                (metaSource === 'myanimelist'  && manga.mal_id)          ||
+                (metaSource === 'mangaupdates' && manga.mangaupdates_id) ||
+                (metaSource === 'doujinshi'    && manga.doujinshi_id)) && (
                 <div className="meta-modal-actions">
                   <div className="meta-modal-action-row">
                     <div className="meta-modal-action-info">
@@ -1822,6 +2049,7 @@ export default function MangaDetail() {
                         Remove the connection to{' '}
                         {metaSource === 'anilist' ? 'AniList'
                           : metaSource === 'myanimelist' ? 'MyAnimeList'
+                          : metaSource === 'mangaupdates' ? 'MangaUpdates'
                           : 'Doujinshi.info'}.{' '}
                         {manga.metadata_source === metaSource
                           ? 'All fetched metadata will be cleared.'
@@ -1867,6 +2095,15 @@ export default function MangaDetail() {
           defaultQuery={manga.title}
           onApplied={handleMalMetadataApplied}
           onClose={() => setShowMALSearch(false)}
+        />
+      )}
+
+      {showMangaUpdatesSearch && (
+        <MangaUpdatesSearchModal
+          mangaId={id}
+          defaultQuery={manga.title}
+          onApplied={handleMangaUpdatesMetadataApplied}
+          onClose={() => setShowMangaUpdatesSearch(false)}
         />
       )}
 

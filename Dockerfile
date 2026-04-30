@@ -28,7 +28,6 @@ ENV PORT=3000 \
     LIBRARY_PATH=/app/library \
     DATA_PATH=/app/data \
     SCAN_ON_STARTUP=true \
-    METADATA_FETCH_ENABLED=true \
     REQUEST_DELAY_MS=700
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

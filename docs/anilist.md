@@ -1,8 +1,40 @@
 # AniList Integration
 
 Momotaro integrates with AniList for:
+
 1. **Metadata enrichment** — fetch titles, descriptions, genres, cover art
 2. **Progress sync** — push reading progress back to the user's AniList list
+
+## When the server pings AniList
+
+AniList is only contacted in response to direct user activity. The server is
+**never** allowed to ping AniList in the background, on a timer, while idle,
+or as part of an export. The complete list of triggers:
+
+- The user clicks **Refresh Metadata** or runs an AniList **search** on a manga
+  (`POST /api/manga/:id/refresh-metadata`, `GET /api/anilist/search`,
+  `POST /api/manga/:id/apply-metadata`).
+- The user runs a **bulk metadata pull** for a library
+  (`POST /api/libraries/:id/bulk-metadata` with `source=anilist`). The pull
+  paces itself off the live `X-RateLimit-Limit` header — see below.
+- The user **finishes a chapter / volume** while logged in to AniList — the
+  progress sync inside `PUT /api/progress/:mangaId` pushes the new highest
+  chapter to the user's list.
+- The user opens a manga's detail page — `GET /api/manga/:id/anilist-status`
+  reads the user's list entry, but only on a per-device cache miss
+  (5-minute TTL). Repeated browsing of the same manga does not re-ping.
+- One-off OAuth events (token exchange + viewer fetch on login).
+
+**Export Metadata never pings AniList or MAL.** Both library-level and
+per-manga export endpoints serialize the previously-pulled record from the
+on-disk JSON cache (or the manga row, as a final fallback). If a per-source
+export is requested for a source that has never been fetched, the endpoint
+returns 409 with a hint to run a refresh first; it does **not** reach out
+to AniList silently.
+
+Every AniList HTTP request is logged through a single `[AniList]` line in
+the system log so the operator can audit exactly when and why each ping
+happened.
 
 ## Per-Device Login
 
@@ -17,6 +49,7 @@ The OAuth client credentials (`anilist_client_id`, `anilist_client_secret`) are 
 AniList uses OAuth 2.0. The user must create an AniList API application and supply the client ID and secret in Settings.
 
 **Flow:**
+
 1. User enters client ID + secret in Settings → stored in `settings` table
 2. Frontend redirects user to `https://anilist.co/api/v2/oauth/authorize?...`
 3. AniList redirects back to `<origin>/anilist/callback` with `?code=...`
@@ -25,6 +58,7 @@ AniList uses OAuth 2.0. The user must create an AniList API application and supp
 6. Token stored in `device_anilist_sessions` for the requesting device's `X-Device-ID`
 
 Relevant files:
+
 - [server/src/metadata/anilist.js](../server/src/metadata/anilist.js) — All AniList GraphQL queries
 - [server/src/routes/settings.js](../server/src/routes/settings.js) — OAuth exchange endpoint
 - [client/src/pages/AnilistCallback.jsx](../client/src/pages/AnilistCallback.jsx) — Callback handler
@@ -32,14 +66,17 @@ Relevant files:
 
 ## Metadata Fetch
 
-Triggered automatically on scan (if `METADATA_FETCH_ENABLED=true`) or manually via the "Refresh Metadata" button in MangaDetail.
+Triggered manually by the user — either the "Refresh Metadata" button on a manga's detail page, the "Refresh / Apply" actions in the metadata search modal, or a library-level bulk metadata pull from Settings. The library scanner does **not** call AniList; scans only apply local `metadata.json` sidecars when present.
 
 The server searches AniList by the manga's folder name / title, picks the best match, and stores:
+
 - `anilist_id`, `mal_id`
 - `title`, `description`, `status`, `year`, `genres`, `score`
 - `author` — extracted from the AniList `staff` edges (see below)
 - `track_volumes` — set to `1` if the AniList entry tracks volumes rather than chapters (e.g. light novels)
 - `cover_image` — downloaded and saved as thumbnail
+
+Every successful by-ID or search response is also written to a per-source JSON cache file at `data/metadata-cache/anilist/<id>.json`. The Export Metadata flow reads these cache files instead of re-pinging AniList.
 
 ### Author Extraction from Staff
 

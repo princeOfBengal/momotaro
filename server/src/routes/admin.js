@@ -6,6 +6,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { generateThumbnail } = require('../scanner/thumbnailGenerator');
+const { reinforceAllCovers } = require('../scanner/coverResolver');
 const cbzCache = require('../scanner/cbzCache');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 
@@ -235,6 +236,38 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
       `${regenerated} regenerated, ${errors} errors (${allManga.length} total)`
     );
   })();
+}));
+
+// POST /api/admin/reset-thumbnails
+//
+// Override every manga's active cover with the highest-priority cover already
+// on disk for that manga, in the order:
+//
+//   AniList > MyAnimeList > MangaUpdates > Doujinshi.info > original scan cover
+//
+// **Forces** even manga whose cover was manually picked back onto the priority
+// rule — the per-manga `cover_user_set` flag is cleared. Manga with no source-
+// specific cover at all are left as-is (the scan-generated original is the
+// final fallback inside the priority list, so they get that automatically).
+//
+// Crucially, this never pings AniList / MAL / MangaUpdates / Doujinshi.info —
+// it copies whichever source-specific files are already on disk from previous
+// metadata fetches.
+router.post('/admin/reset-thumbnails', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  console.log('[Admin] Reset Thumbnails: enforcing cover priority across the library (force=true).');
+  const counters = reinforceAllCovers(db, { force: true });
+  console.log(
+    `[Admin] Reset Thumbnails complete: ` +
+    `${counters.changed_to_anilist} → AniList, ` +
+    `${counters.changed_to_mal} → MAL, ` +
+    `${counters.changed_to_mu} → MangaUpdates, ` +
+    `${counters.changed_to_doujinshi} → Doujinshi, ` +
+    `${counters.changed_to_original} → original, ` +
+    `${counters.kept_no_source} no source on disk, ` +
+    `${counters.errors} errors (${counters.total} total)`
+  );
+  res.json({ data: counters });
 }));
 
 // ── Database Vacuum ───────────────────────────────────────────────────────────

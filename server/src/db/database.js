@@ -144,6 +144,18 @@ function migrate(db) {
       UNIQUE(manga_id, page_id)
     );
     CREATE INDEX IF NOT EXISTS idx_art_gallery_manga_id ON art_gallery(manga_id);
+
+    -- Per-device cache of the user's AniList list entry for a given media id.
+    -- entry_json is the serialised MediaList payload, or NULL meaning "the
+    -- AniList API confirmed the user does not have this manga on their list"
+    -- (a real, cacheable answer that we shouldn't keep re-fetching).
+    CREATE TABLE IF NOT EXISTS anilist_media_list_cache (
+      device_id  TEXT    NOT NULL,
+      media_id   INTEGER NOT NULL,
+      entry_json TEXT,
+      fetched_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (device_id, media_id)
+    );
   `);
 
   // Seed the two built-in reading lists
@@ -158,11 +170,18 @@ function migrate(db) {
   addColumnIfMissing(db, 'libraries', 'last_scan_mtime_ms', 'REAL');
   addColumnIfMissing(db, 'chapters',  'volume',      'REAL');
   addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
-  addColumnIfMissing(db, 'manga',     'author',         'TEXT');
-  addColumnIfMissing(db, 'manga',     'doujinshi_id',   'TEXT');
-  addColumnIfMissing(db, 'manga',     'anilist_cover',  'TEXT');
-  addColumnIfMissing(db, 'manga',     'original_cover', 'TEXT');
-  addColumnIfMissing(db, 'manga',     'mal_cover',      'TEXT');
+  addColumnIfMissing(db, 'manga',     'author',            'TEXT');
+  addColumnIfMissing(db, 'manga',     'doujinshi_id',      'TEXT');
+  addColumnIfMissing(db, 'manga',     'mangaupdates_id',   'INTEGER');
+  addColumnIfMissing(db, 'manga',     'anilist_cover',     'TEXT');
+  addColumnIfMissing(db, 'manga',     'original_cover',    'TEXT');
+  addColumnIfMissing(db, 'manga',     'mal_cover',         'TEXT');
+  addColumnIfMissing(db, 'manga',     'mangaupdates_cover','TEXT');
+  addColumnIfMissing(db, 'manga',     'doujinshi_cover',   'TEXT');
+  // 1 when the user manually picked a cover via the Thumbnail Picker; the
+  // priority-driven Reset Thumbnails op leaves these manga alone unless the
+  // operator runs the explicit reset (which clears the flag back to 0).
+  addColumnIfMissing(db, 'manga',     'cover_user_set',    'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'manga',     'last_metadata_fetch_attempt_at', 'INTEGER');
 
   // Cached disk-usage columns — populated during scan so that /api/stats and
@@ -173,6 +192,31 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'file_count',    'INTEGER');
 
   migrateSearchIndex(db);
+  backfillDoujinshiCover(db);
+}
+
+/**
+ * Pre-`doujinshi_cover`-column installations saved Doujinshi.info covers as
+ * `<mangaId>_cover.webp` because doujinshi was the one source without a
+ * dedicated column. The new cover-priority resolver only looks at *_cover
+ * columns, so doujinshi-displayed manga would otherwise lose their cover
+ * after the first Reset Thumbnails / post-scan reinforcement.
+ *
+ * Backfill: any manga whose `doujinshi_cover` is NULL but whose displayed
+ * source is doujinshi gets the legacy filename written into the new column.
+ * The actual file isn't touched — we only point the column at it.
+ */
+function backfillDoujinshiCover(db) {
+  const { changes } = db.prepare(`
+    UPDATE manga
+       SET doujinshi_cover = (id || '_cover.webp')
+     WHERE metadata_source = 'doujinshi'
+       AND doujinshi_cover IS NULL
+       AND doujinshi_id    IS NOT NULL
+  `).run();
+  if (changes > 0) {
+    console.log(`[DB] Backfilled doujinshi_cover for ${changes} legacy doujinshi-displayed manga.`);
+  }
 }
 
 /**

@@ -82,8 +82,7 @@ Available environment variables:
 | --- | --- | --- |
 | `PORT` | `3000` | Internal port the server listens on |
 | `SCAN_ON_STARTUP` | `true` | Automatically scan library when the container starts |
-| `METADATA_FETCH_ENABLED` | `true` | Fetch metadata from AniList/MAL during scans |
-| `REQUEST_DELAY_MS` | `700` | Delay between AniList API requests (ms) |
+| `REQUEST_DELAY_MS` | `700` | Floor delay (ms) between AniList API requests; the runtime adapts upward based on AniList's rate-limit headers. |
 
 ## Development
 

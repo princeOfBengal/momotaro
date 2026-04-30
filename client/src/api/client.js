@@ -173,6 +173,17 @@ export const api = {
       body: JSON.stringify({ mal_id: malId }),
     }),
 
+  // MangaUpdates — public read endpoints, no auth needed.
+  refreshMangaUpdatesMetadata: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/refresh-mangaupdates-metadata`, { method: 'POST' }),
+  searchMangaUpdates: (q, page = 1) =>
+    apiFetch(`/api/mangaupdates/search?${new URLSearchParams({ q, page })}`),
+  applyMangaUpdatesMetadata: (mangaId, mangaUpdatesId) =>
+    apiFetch(`/api/manga/${mangaId}/apply-mangaupdates-metadata`, {
+      method: 'POST',
+      body: JSON.stringify({ mangaupdates_id: mangaUpdatesId }),
+    }),
+
   getAnilistStatus: (mangaId) => apiFetch(`/api/manga/${mangaId}/anilist-status`),
   updateAnilistProgress: (mangaId, body) =>
     apiFetch(`/api/manga/${mangaId}/anilist-progress`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -227,6 +238,7 @@ export const api = {
   saveCbzCacheSettings: (body) =>
     apiFetch('/api/admin/cbz-cache-settings', { method: 'PUT', body: JSON.stringify(body) }),
   regenerateThumbnails: () => apiFetch('/api/admin/regenerate-thumbnails', { method: 'POST' }),
+  resetThumbnails:      () => apiFetch('/api/admin/reset-thumbnails',      { method: 'POST' }),
   vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
 
   // Config backup (export/import)

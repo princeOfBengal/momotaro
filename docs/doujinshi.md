@@ -1,6 +1,6 @@
 # Doujinshi.info Integration
 
-Momotaro integrates with [Doujinshi.info](https://doujinshi.info) for metadata enrichment of doujinshi titles. It is a secondary metadata source alongside AniList.
+Momotaro integrates with [Doujinshi.info](https://doujinshi.info) for metadata enrichment of doujinshi titles. It's the lowest-priority third-party source — the order is AniList > MyAnimeList > MangaUpdates > Doujinshi.info — but it owns titles the other three don't index.
 
 ## Authentication
 
@@ -43,7 +43,7 @@ The `normalizeBook()` function maps a doujinshi.info book object to Momotaro's s
 | --- | --- | --- |
 | `name.english` / `name.romaji` / `name.japanese` | `title` | First non-empty value |
 | `slug` | `doujinshi_id` | Text slug, e.g. `glasses-in-summer-life` |
-| `cover` | `cover_url` → `cover_image` | Downloaded and saved as WebP thumbnail |
+| `cover` | `doujinshi_cover` (`<mangaId>_dj.webp`) | Downloaded and saved as WebP thumbnail. Active cover is then chosen by the priority resolver — see [scanner.md § Cover Priority](./scanner.md#cover-priority). Legacy installs that pre-date the dedicated column have their `<mangaId>_cover.webp` filename backfilled into `doujinshi_cover` at startup. |
 | `date_released` (YYYY-MM-DD) | `year` | First 4 digits |
 | `tags.data` where `type.slug === 'genre'` | `genres` | JSON array |
 | `tags.data` where `type.slug === 'artist'` | `author` | Joined with `", "` |
@@ -68,24 +68,32 @@ All in [server/src/metadata/doujinshi.js](../server/src/metadata/doujinshi.js):
 
 ## Metadata Priority
 
-Metadata fields and covers follow two separate priority systems — the metadata fields are protected from overwrite by source, while the active thumbnail has its own promotion priority.
+Metadata fields and covers follow two **separate** priority systems — see [scanner.md § Cover Priority](./scanner.md#cover-priority) for the full cover story; what follows here is just doujinshi-specific.
 
-**Metadata fields** — local JSON is always preserved as the display source for fields (title, description, genres, etc.):
+**Text-field priority** — local JSON wins, every third-party source is ranked, then `none`:
 
-1. **Local JSON** (`metadata_source = 'local'`) — never overwritten by bulk or single-manga pulls. Bulk pulls against a `'local'` title perform a **link-only** write: only the external ID (`anilist_id` / `mal_id` / `doujinshi_id`) is stored.
-2. **Third-party** (`metadata_source = 'anilist' | 'myanimelist' | 'doujinshi'`) — already-linked third-party titles are skipped by bulk pulls entirely. Per-manga apply endpoints still overwrite because the user explicitly chose a new entry.
-3. `'none'` titles receive a full metadata apply on first bulk pull.
+1. **Local JSON** (`metadata_source = 'local'`) — never overwritten by bulk or single-manga pulls. Pulls against a `'local'` title perform a **link-only** write: only the external ID is stored.
+2. **AniList** (`metadata_source = 'anilist'`)
+3. **MyAnimeList** (`metadata_source = 'myanimelist'`)
+4. **MangaUpdates** (`metadata_source = 'mangaupdates'`)
+5. **Doujinshi.info** (`metadata_source = 'doujinshi'`)
 
-**Cover promotion** — covers have their own priority independent of the metadata-field rule above. During bulk pulls the enforced order is AniList > MyAnimeList > Doujinshi.info; a lower-priority source's cover is saved to its own column but does not overwrite `cover_image` when a higher-priority cover already exists. This applies uniformly to `'none'` and `'local'` titles, so a local-metadata title receiving AniList linkage via bulk pull will still swap its thumbnail to the AniList cover.
+Applying a higher-priority source on top of a lower-priority displayed manga rewrites text fields and updates `metadata_source`. Applying a lower-priority source records the linkage but leaves text fields alone.
 
-For single-manga operations (Fetch button, manual search), the user is explicitly choosing a source — cover promotion always fires regardless of what other covers are already saved (user intent overrides the priority rule). The metadata-field rule still applies: local JSON titles get link-only writes; other sources fully overwrite.
+**Cover priority** — local JSON does **not** enter; the active `<mangaId>.webp` is chosen by:
+
+```text
+anilist_cover > mal_cover > mangaupdates_cover > doujinshi_cover > original_cover
+```
+
+So a Doujinshi.info-only manga ends up with the doujinshi cover as active, and adding any higher-priority linkage automatically promotes that source's cover on the next reinforcement pass (which runs after every library scan, or on demand via `POST /api/admin/reset-thumbnails`). Manual user picks via `set-thumbnail` are sticky against fetches but cleared by Reset Thumbnails.
 
 ## Bulk Metadata Pull
 
-The bulk metadata pull endpoint (`POST /api/libraries/:id/bulk-metadata`) now accepts an optional `source` field in the request body:
+The bulk metadata pull endpoint (`POST /api/libraries/:id/bulk-metadata`) accepts an optional `source` field in the request body:
 
 ```json
 { "source": "doujinshi" }
 ```
 
-Defaults to `"anilist"` if omitted. The frontend (Settings → Library Management) shows a dropdown when the "Bulk Metadata Pull" button is clicked, letting the user choose between AniList and Doujinshi.info.
+Defaults to `"anilist"` if omitted. Valid values: `"anilist"`, `"myanimelist"`, `"mangaupdates"`, `"doujinshi"`. The frontend (Settings → Library Management) shows a dropdown when the **Bulk Metadata Pull** button is clicked, letting the user choose between all four sources.

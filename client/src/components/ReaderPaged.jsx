@@ -20,7 +20,7 @@ export default function ReaderPaged({
   orientationRtl,
   scaleType,
   zoom,
-  animateTransitions,
+  pageAnimation,
   animKey,
   animDir,
   gesturesEnabled,
@@ -28,6 +28,7 @@ export default function ReaderPaged({
   onPrev,
   onCenterTap,
   onZoomChange,
+  onAnyTap,
 }) {
   const rootRef = useRef(null);               // DOM ref — used for setPointerCapture & getBoundingClientRect
 
@@ -92,6 +93,9 @@ export default function ReaderPaged({
     if (!rootRef.current) return;
     const rect = rootRef.current.getBoundingClientRect();
     const pct  = (x - rect.left) / rect.width;
+    // Fire-and-forget notification so the parent can suppress edge hints. Must
+    // not affect the gesture flow — onAnyTap is purely advisory.
+    onAnyTap?.();
     if (pct < 0.25)      { rtl ? onNext() : onPrev(); }
     else if (pct > 0.75) { rtl ? onPrev() : onNext(); }
     else                 { onCenterTap(); }
@@ -295,7 +299,10 @@ export default function ReaderPaged({
   if (!page) return null;
 
   const page2     = page2Index != null ? pages[page2Index] : null;
-  const animClass = animateTransitions ? `page-anim-${animDir}` : '';
+  const animClass = pageAnimation === 'fade'  ? 'page-anim-fade'
+                  : pageAnimation === 'curl'  ? `page-anim-curl-${animDir}`
+                  : pageAnimation === 'slide' ? `page-anim-slide-${animDir}`
+                  : '';
   const leftPage  = page2 && orientationRtl ? page2 : page;
   const rightPage = page2 && orientationRtl ? page  : page2;
   const leftAlt   = page2 && orientationRtl ? `Page ${currentPage + 2}` : `Page ${currentPage + 1}`;

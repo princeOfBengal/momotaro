@@ -1,0 +1,84 @@
+/* Edge tap-zone hints. Sits above the brightness overlay (z-index 150) but
+   below the control bars (z-index 200). pointer-events:none so the gesture
+   system on .reader-paged keeps full control of every touch.
+
+   The chevrons are styled as solid dark pills with white glyphs so they
+   stay visible against any page background — pure-white pages, pure-black
+   pages, and the full range of cover/illustration art in between. */
+.reader-edge-hints {
+  position: absolute;
+  inset: 0;
+  z-index: 160;
+  pointer-events: none;
+  user-select: none;
+}
+
+.edge-hint {
+  position: absolute;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 36px;
+  font-weight: 300;
+  line-height: 1;
+  /* Slight ring + drop shadow keeps the pill defined on dark backgrounds too */
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+  transform: translateY(-50%);
+}
+
+.edge-hint-left  { left: 18px; }
+.edge-hint-right { right: 18px; }
+
+@media (max-width: 600px) {
+  .edge-hint {
+    width: 44px;
+    height: 44px;
+    font-size: 30px;
+  }
+  .edge-hint-left  { left: 12px; }
+  .edge-hint-right { right: 12px; }
+}
+
+/* ── Persistent mode ────────────────────────────────────────────────────── */
+
+.edge-hint-persistent .edge-hint {
+  opacity: 0.7;
+  transition: opacity 0.4s ease;
+}
+
+.edge-hint-persistent.suppressed .edge-hint {
+  opacity: 0;
+}
+
+/* ── First-run pulse ────────────────────────────────────────────────────── */
+
+.edge-hint-pulse .edge-hint {
+  opacity: 0;
+  animation: edge-hint-pulse 1.8s ease-out forwards;
+}
+
+@keyframes edge-hint-pulse {
+  0%   { opacity: 0;    transform: translateY(-50%) scale(0.92); }
+  18%  { opacity: 0.95; transform: translateY(-50%) scale(1); }
+  38%  { opacity: 0.15; transform: translateY(-50%) scale(0.96); }
+  58%  { opacity: 0.95; transform: translateY(-50%) scale(1); }
+  100% { opacity: 0;    transform: translateY(-50%) scale(0.92); }
+}
+
+/* Reduced motion: no pulse animation. Persistent mode still works because
+   its opacity is static and the suppression transition is short. */
+@media (prefers-reduced-motion: reduce) {
+  .edge-hint-pulse .edge-hint {
+    animation: none;
+    opacity: 0;
+  }
+}

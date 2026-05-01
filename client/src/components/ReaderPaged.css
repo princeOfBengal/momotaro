@@ -22,18 +22,23 @@
   transform: scale(var(--reader-zoom, 1));
   transform-origin: center center;
   overflow: hidden;
+  /* 3D context for the curl animation. No-op for slide/fade. */
+  perspective: 1200px;
 }
 
-/* Animation wrapper — full size flex container */
+/* Animation wrapper — full size flex container.
+   `--reader-anim-mult` is set on the parent .reader-page (default 1) and
+   scales every transition's duration. */
 .reader-paged-anim-wrapper {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
   height: 100%;
+  backface-visibility: hidden;
 }
 
-/* Page transition animations */
+/* Slide — direction-aware horizontal translate + opacity ramp */
 @keyframes page-slide-next {
   from { opacity: 0.5; transform: translateX(24px); }
   to   { opacity: 1;   transform: translateX(0); }
@@ -42,8 +47,46 @@
   from { opacity: 0.5; transform: translateX(-24px); }
   to   { opacity: 1;   transform: translateX(0); }
 }
-.page-anim-next { animation: page-slide-next 0.18s ease-out forwards; }
-.page-anim-prev { animation: page-slide-prev 0.18s ease-out forwards; }
+.page-anim-slide-next { animation: page-slide-next calc(0.18s * var(--reader-anim-mult, 1)) ease-out forwards; }
+.page-anim-slide-prev { animation: page-slide-prev calc(0.18s * var(--reader-anim-mult, 1)) ease-out forwards; }
+
+/* Fade — symmetric crossfade, ignores direction */
+@keyframes page-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.page-anim-fade { animation: page-fade calc(0.15s * var(--reader-anim-mult, 1)) ease-out forwards; }
+
+/* Curl — perspective rotateY from leading edge.
+   The .reader-paged-inner wrapper provides the perspective context below. */
+@keyframes page-curl-next {
+  from { opacity: 0.4; transform: rotateY(-22deg) translateX(18px); }
+  to   { opacity: 1;   transform: rotateY(0)      translateX(0); }
+}
+@keyframes page-curl-prev {
+  from { opacity: 0.4; transform: rotateY(22deg) translateX(-18px); }
+  to   { opacity: 1;   transform: rotateY(0)     translateX(0); }
+}
+.page-anim-curl-next {
+  transform-origin: left center;
+  animation: page-curl-next calc(0.22s * var(--reader-anim-mult, 1)) ease-out forwards;
+}
+.page-anim-curl-prev {
+  transform-origin: right center;
+  animation: page-curl-prev calc(0.22s * var(--reader-anim-mult, 1)) ease-out forwards;
+}
+
+/* OS reduced-motion overrides every transition above */
+@media (prefers-reduced-motion: reduce) {
+  .reader-paged-anim-wrapper,
+  .page-anim-slide-next,
+  .page-anim-slide-prev,
+  .page-anim-fade,
+  .page-anim-curl-next,
+  .page-anim-curl-prev {
+    animation: none !important;
+  }
+}
 
 /* Base image styles */
 .reader-page-img {

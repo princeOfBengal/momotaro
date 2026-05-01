@@ -4,8 +4,25 @@ import { api } from '../api/client';
 import ReaderPaged from '../components/ReaderPaged';
 import ReaderScroll from '../components/ReaderScroll';
 import ReaderControls from '../components/ReaderControls';
+import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
 import './Reader.css';
+
+// Resolve the page-transition style. Migrates the legacy boolean key
+// `reader_animTrans` (true → 'slide', false → 'off') the first time it's read.
+function resolveInitialPageAnimation() {
+  const stored = localStorage.getItem('reader_pageAnimation');
+  if (stored === 'off' || stored === 'slide' || stored === 'fade' || stored === 'curl') return stored;
+  const legacy = localStorage.getItem('reader_animTrans');
+  if (legacy === 'true')  return 'slide';
+  if (legacy === 'false') return 'off';
+  return 'slide';
+}
+
+function clampAnimSpeed(n) {
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(2, Math.max(0.5, n));
+}
 
 const PROGRESS_DEBOUNCE_MS = 2000;
 
@@ -25,7 +42,9 @@ export default function Reader() {
   // Reader settings — persisted to localStorage
   const [readingMode, setReadingMode] = useState(() => localStorage.getItem('reader_readingMode') || 'rtl');
   const [zoom, setZoom] = useState(() => Number(localStorage.getItem('reader_zoom')) || 100);
-  const [animateTransitions, setAnimateTransitions] = useState(() => localStorage.getItem('reader_animTrans') === 'true');
+  const [pageAnimation, setPageAnimation] = useState(resolveInitialPageAnimation);
+  const [pageAnimSpeed, setPageAnimSpeed] = useState(() => clampAnimSpeed(Number(localStorage.getItem('reader_pageAnimSpeed')) || 1));
+  const [showEdgeHints, setShowEdgeHints] = useState(() => localStorage.getItem('reader_edgeHints') === 'true');
   const [gesturesEnabled, setGesturesEnabled] = useState(() => localStorage.getItem('reader_gestures') !== 'false');
   const [alwaysFullscreen, setAlwaysFullscreen] = useState(() => localStorage.getItem('reader_alwaysFS') === 'true');
   const [bgColor, setBgColor] = useState(() => localStorage.getItem('reader_bgColor') || 'black');
@@ -54,6 +73,8 @@ export default function Reader() {
   const scrubActiveRef = useRef(false);
   const scrollerRef = useRef(null);
   const containerRef = useRef(null);
+  const hintSuppressTimer = useRef(null);
+  const [hintsSuppressed, setHintsSuppressed] = useState(false);
 
   // Derived
   const isPaged = readingMode === 'ltr' || readingMode === 'rtl';
@@ -108,8 +129,18 @@ export default function Reader() {
   // Persist settings
   useEffect(() => { localStorage.setItem('reader_readingMode', readingMode); }, [readingMode]);
   useEffect(() => { localStorage.setItem('reader_zoom', zoom); }, [zoom]);
-  useEffect(() => { localStorage.setItem('reader_animTrans', animateTransitions); }, [animateTransitions]);
+  useEffect(() => { localStorage.setItem('reader_pageAnimation', pageAnimation); }, [pageAnimation]);
+  useEffect(() => { localStorage.setItem('reader_pageAnimSpeed', String(pageAnimSpeed)); }, [pageAnimSpeed]);
+  useEffect(() => { localStorage.setItem('reader_edgeHints', String(showEdgeHints)); }, [showEdgeHints]);
   useEffect(() => { localStorage.setItem('reader_gestures', gesturesEnabled); }, [gesturesEnabled]);
+
+  // One-time cleanup of the legacy boolean key (resolveInitialPageAnimation
+  // already handled the migration at read-time).
+  useEffect(() => {
+    if (localStorage.getItem('reader_animTrans') !== null) {
+      localStorage.removeItem('reader_animTrans');
+    }
+  }, []);
   useEffect(() => { localStorage.setItem('reader_alwaysFS', alwaysFullscreen); }, [alwaysFullscreen]);
   useEffect(() => { localStorage.setItem('reader_bgColor', bgColor); }, [bgColor]);
   useEffect(() => { localStorage.setItem('reader_grayscale', grayscale); }, [grayscale]);
@@ -246,6 +277,27 @@ export default function Reader() {
     if (showSettings) { setShowSettings(false); return; }
     handleToggleControls();
   }, [showSettings, handleToggleControls]);
+
+  // Briefly fade out persistent edge hints after any tap so they don't compete
+  // visually with whatever the user is doing. Touch handlers are not modified —
+  // ReaderPaged calls this from its existing execTap path.
+  const handleAnyTap = useCallback(() => {
+    setHintsSuppressed(true);
+    clearTimeout(hintSuppressTimer.current);
+    hintSuppressTimer.current = setTimeout(() => setHintsSuppressed(false), 1500);
+  }, []);
+
+  // Hint mode resolution. Suppressed in non-paged modes, while the settings
+  // panel is open, and while zoomed in (panning would visually conflict).
+  // Controls visibility intentionally does NOT suppress hints: the top/bottom
+  // bars don't overlap with the vertical-center tap-zone affordances, and on
+  // touch devices controls stay visible from mount until a center tap, so
+  // gating on them would mean the first-run pulse never plays.
+  const isZoomedIn = zoom > 100;
+  const hintsInitiallySeen = useRef(localStorage.getItem('reader_hintsSeen') === 'true');
+  const hintMode = (!isPaged || showSettings || isZoomedIn)
+    ? 'off'
+    : (!hintsInitiallySeen.current ? 'first-run' : (showEdgeHints ? 'persistent' : 'off'));
 
   // Mouse movement auto-shows controls (desktop only).
   // Touch/pen interactions must not trigger this — mobile browsers fire
@@ -385,7 +437,9 @@ export default function Reader() {
       totalPages={pages.length}
       readingMode={readingMode}
       zoom={zoom}
-      animateTransitions={animateTransitions}
+      pageAnimation={pageAnimation}
+      pageAnimSpeed={pageAnimSpeed}
+      showEdgeHints={showEdgeHints}
       gesturesEnabled={gesturesEnabled}
       alwaysFullscreen={alwaysFullscreen}
       bgColor={bgColor}
@@ -400,7 +454,9 @@ export default function Reader() {
       isFullscreen={isFullscreen}
       onReadingModeChange={setReadingMode}
       onZoomChange={setZoom}
-      onAnimateTransitionsChange={setAnimateTransitions}
+      onPageAnimationChange={setPageAnimation}
+      onPageAnimSpeedChange={(n) => setPageAnimSpeed(clampAnimSpeed(n))}
+      onShowEdgeHintsChange={setShowEdgeHints}
       onGesturesChange={setGesturesEnabled}
       onAlwaysFullscreenChange={setAlwaysFullscreen}
       onBgColorChange={setBgColor}
@@ -472,7 +528,7 @@ export default function Reader() {
         `bg-${bgColor}`,
         grayscale ? 'reader-grayscale' : '',
       ].filter(Boolean).join(' ')}
-      style={{ '--reader-zoom': zoom / 100 }}
+      style={{ '--reader-zoom': zoom / 100, '--reader-anim-mult': pageAnimSpeed }}
     >
       <div className="reader-brightness-overlay" style={{ opacity: (100 - brightness) / 100 }} />
       {isPaged ? (
@@ -484,7 +540,7 @@ export default function Reader() {
           orientationRtl={readingOrientation === 'rtl'}
           scaleType={scaleType}
           zoom={zoom}
-          animateTransitions={animateTransitions}
+          pageAnimation={pageAnimation}
           animKey={animKey}
           animDir={animDir}
           gesturesEnabled={gesturesEnabled}
@@ -492,6 +548,7 @@ export default function Reader() {
           onPrev={prevPage}
           onCenterTap={handleCenterTap}
           onZoomChange={setZoom}
+          onAnyTap={handleAnyTap}
         />
       ) : (
         <ReaderScroll
@@ -503,6 +560,7 @@ export default function Reader() {
           isWebtoon={isWebtoon}
         />
       )}
+      <ReaderEdgeHints mode={hintMode} rtl={isRtl} suppressed={hintsSuppressed} />
       {controls}
     </div>
   );

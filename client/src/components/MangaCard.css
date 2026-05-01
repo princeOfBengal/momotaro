@@ -3,6 +3,13 @@
   flex-direction: column;
   gap: 8px;
   cursor: pointer;
+  /* Skip layout / paint of off-screen cards on long library grids. The
+     intrinsic-size hint matches a typical card (cover ≈ 240 px tall at the
+     default 160 px grid column + 80 px meta) so reserved space is correct
+     before the card scrolls into view. Browsers without support fall back
+     to standard rendering. */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 320px;
 }
 
 .manga-card-cover {

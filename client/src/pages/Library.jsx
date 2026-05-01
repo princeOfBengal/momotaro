@@ -4,6 +4,33 @@ import { api } from '../api/client';
 import MangaCard from '../components/MangaCard';
 import AppSidebar from '../components/AppSidebar';
 import './Library.css';
+// Reuse the skeleton classes (.skeleton-block, .skeleton-line, .skeleton-tile)
+// already defined for Home — same precedent as Home importing Library.css.
+import './Home.css';
+
+// Initial-load skeleton — renders placeholder cards inside the same
+// .manga-grid so vertical real-estate is reserved before data arrives. Only
+// shown when the grid is empty; refetches over existing data keep the real
+// grid visible to avoid blink.
+function LibrarySkeleton() {
+  const tiles = Array.from({ length: 24 });
+  return (
+    <div aria-hidden="true">
+      <div className="skeleton-line skeleton-title" style={{ marginBottom: 16 }} />
+      <div className="manga-grid">
+        {tiles.map((_, i) => (
+          <div className="manga-card skeleton-tile" key={i}>
+            <div className="manga-card-cover skeleton-block" />
+            <div className="manga-card-info">
+              <div className="skeleton-line skeleton-line-md" />
+              <div className="skeleton-line skeleton-line-xs" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function Library() {
   const navigate = useNavigate();
@@ -162,10 +189,15 @@ export default function Library() {
         />
 
         <main className="library-main">
-          {loading && (
-            <div className="loading-center"><div className="spinner" /></div>
+          {/* Initial load — no data yet. Skeleton replaces the spinner so
+              vertical real-estate is reserved and first paint feels instant. */}
+          {loading && manga.length === 0 && !error && (
+            <LibrarySkeleton />
           )}
-          {error && (
+
+          {/* Initial-load failure — full-page error. Refetch errors over
+              existing data fall through to the inline banner below. */}
+          {error && manga.length === 0 && (
             <div className="error-message">
               <h2>Failed to load library</h2>
               <p>{error}</p>
@@ -174,6 +206,7 @@ export default function Library() {
               </button>
             </div>
           )}
+
           {!loading && !error && manga.length === 0 && (
             <div className="library-empty">
               {libraries.length === 0 && !search && activeList === null ? (
@@ -203,8 +236,18 @@ export default function Library() {
               )}
             </div>
           )}
-          {!loading && !error && manga.length > 0 && (
-            <>
+
+          {/* Grid render — kept visible during refetches so search/sort
+              changes don't blink. A subtle opacity dim signals the in-flight
+              request without destroying current results. */}
+          {manga.length > 0 && (
+            <div className={`library-grid-wrap${loading ? ' is-refetching' : ''}`}>
+              {error && (
+                <div className="library-inline-error" role="alert">
+                  Failed to refresh: {error}
+                  <button className="btn btn-ghost btn-sm" onClick={load}>Retry</button>
+                </div>
+              )}
               <p className="library-count">{manga.length} series</p>
               <div className="manga-grid">
                 {manga.map(m => (
@@ -213,7 +256,7 @@ export default function Library() {
                   </Link>
                 ))}
               </div>
-            </>
+            </div>
           )}
         </main>
       </div>

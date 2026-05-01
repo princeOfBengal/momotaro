@@ -10,6 +10,73 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 
 const router = express.Router();
 
+// ── Library / reading-list listing helpers ──────────────────────────────────
+//
+// The library grid only renders cover, title, year, score, status. Returning
+// the full row (description, genres JSON, author, cover-source columns…) on
+// every Library / reading-list fetch was wasted bandwidth and JSON-parse cost.
+// Restrict to the columns the grid + keyset cursor actually need.
+//
+// `m.title` is needed for sort=title cursors; `m.updated_at` for sort=updated
+// cursors. Both are read by encodeCursor() via valueColumn lookup further
+// below.
+
+const LIBRARY_LIST_COLUMNS = [
+  'm.id',
+  'm.title',
+  'm.year',
+  'm.score',
+  'm.status',
+  'm.cover_image',
+  'm.updated_at',
+].join(', ');
+
+// Map a thin row to the response shape the client expects. `genres` is
+// intentionally omitted — MangaCard never reads it, and search-by-genre is
+// resolved server-side via manga_genres / FTS.
+function toListingRow(m) {
+  return {
+    id:          m.id,
+    title:       m.title,
+    year:        m.year,
+    score:       m.score,
+    status:      m.status,
+    cover_image: m.cover_image,
+    updated_at:  m.updated_at,
+    cover_url:   m.cover_image ? thumbnailUrl(m.cover_image) : null,
+  };
+}
+
+// Bounded LRU caches for the two listing endpoints. Keyspace is unbounded in
+// principle (free-form search queries), so cap at MAX_LISTING_CACHE entries
+// and evict oldest-inserted on overflow. TTL matches /api/home (30 s).
+const LISTING_CACHE_TTL_MS  = 30 * 1000;
+const MAX_LISTING_CACHE     = 50;
+const _libraryCache           = new Map(); // key -> { value, ts }
+const _readingListMangaCache  = new Map(); // key -> { value, ts }
+
+function getListingCache(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts >= LISTING_CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  // Refresh insertion order so this key is now most-recent.
+  cache.delete(key);
+  cache.set(key, entry);
+  return entry.value;
+}
+
+function setListingCache(cache, key, value) {
+  if (cache.size >= MAX_LISTING_CACHE) {
+    // Map iterates in insertion order — first key is the oldest.
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, { value, ts: Date.now() });
+}
+
 // ── Library CRUD ────────────────────────────────────────────────────────────
 
 // GET /api/libraries — list all libraries with manga counts
@@ -181,8 +248,17 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   if (!list) return res.status(404).json({ error: 'Reading list not found' });
 
   const { search, sort = 'title' } = req.query;
+
+  // Browser HTTP cache backs up the SW StaleWhileRevalidate. 15 s window
+  // matches the in-process cache TTL below.
+  res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+
+  const cacheKey = `list:${list.id}|s:${search || ''}|o:${sort}`;
+  const cached = getListingCache(_readingListMangaCache, cacheKey);
+  if (cached) return res.json({ data: cached });
+
   let query = `
-    SELECT m.* FROM manga m
+    SELECT ${LIBRARY_LIST_COLUMNS} FROM manga m
     INNER JOIN reading_list_manga rlm ON rlm.manga_id = m.id AND rlm.list_id = ?
     WHERE 1=1
   `;
@@ -205,14 +281,9 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   };
   query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}`;
 
-  const manga = db.prepare(query).all(...params);
-  res.json({
-    data: manga.map(m => ({
-      ...m,
-      genres: safeJsonParse(m.genres, []),
-      cover_url: m.cover_image ? thumbnailUrl(m.cover_image) : null,
-    })),
-  });
+  const manga = db.prepare(query).all(...params).map(toListingRow);
+  setListingCache(_readingListMangaCache, cacheKey, manga);
+  res.json({ data: manga });
 }));
 
 // POST /api/reading-lists/:id/manga — add manga to list
@@ -292,7 +363,24 @@ router.get('/library', asyncWrapper(async (req, res) => {
     limit = Math.min(parsed, MAX_LIMIT);
   }
 
-  let query = `SELECT m.* FROM manga m LEFT JOIN libraries l ON l.id = m.library_id WHERE 1=1`;
+  // Browser HTTP cache backs up the SW StaleWhileRevalidate for non-PWA
+  // tabs (incognito, fresh installs). Aligned with the in-process cache TTL.
+  res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+
+  // In-process cache: keyed by every parameter that affects the result. 30 s
+  // TTL matches /api/home / /api/stats — scans surface within that window.
+  const cacheKey = [
+    `s:${search || ''}`,
+    `st:${status || ''}`,
+    `o:${sort}`,
+    `lib:${library_id || ''}`,
+    `c:${cursor || ''}`,
+    `lim:${limit == null ? '' : limit}`,
+  ].join('|');
+  const cached = getListingCache(_libraryCache, cacheKey);
+  if (cached) return res.json(cached);
+
+  let query = `SELECT ${LIBRARY_LIST_COLUMNS} FROM manga m LEFT JOIN libraries l ON l.id = m.library_id WHERE 1=1`;
   const params = [];
 
   {
@@ -360,17 +448,14 @@ router.get('/library', asyncWrapper(async (req, res) => {
   }
 
   const payload = {
-    data: manga.map(m => ({
-      ...m,
-      genres: safeJsonParse(m.genres, []),
-      cover_url: m.cover_image ? thumbnailUrl(m.cover_image) : null,
-    })),
+    data: manga.map(toListingRow),
   };
   if (limit !== null) {
     payload.next_cursor = nextCursor;
     payload.has_more    = hasMore;
   }
 
+  setListingCache(_libraryCache, cacheKey, payload);
   res.json(payload);
 }));
 

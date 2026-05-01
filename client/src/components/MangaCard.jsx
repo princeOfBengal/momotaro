@@ -18,7 +18,15 @@ export default function MangaCard({ manga }) {
     <div className="manga-card">
       <div className="manga-card-cover">
         {coverUrl ? (
-          <img src={coverUrl} alt={manga.title} loading="lazy" />
+          <img
+            src={coverUrl}
+            alt={manga.title}
+            width={300}
+            height={450}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+          />
         ) : (
           <div className="manga-card-placeholder">
             <span>📖</span>

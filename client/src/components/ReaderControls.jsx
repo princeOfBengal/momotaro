@@ -54,7 +54,9 @@ export default function ReaderControls({
   totalPages,
   readingMode,
   zoom,
-  animateTransitions,
+  pageAnimation,
+  pageAnimSpeed,
+  showEdgeHints,
   gesturesEnabled,
   alwaysFullscreen,
   bgColor,
@@ -69,7 +71,9 @@ export default function ReaderControls({
   isFullscreen,
   onReadingModeChange,
   onZoomChange,
-  onAnimateTransitionsChange,
+  onPageAnimationChange,
+  onPageAnimSpeedChange,
+  onShowEdgeHintsChange,
   onGesturesChange,
   onAlwaysFullscreenChange,
   onBgColorChange,
@@ -274,10 +278,46 @@ export default function ReaderControls({
                   </div>
                 </div>
 
+                <div className="setting-group">
+                  <label className="setting-group-label">Page Transition</label>
+                  <div className="setting-options setting-options-grid">
+                    {[
+                      { value: 'off',   label: 'Off' },
+                      { value: 'slide', label: 'Slide' },
+                      { value: 'fade',  label: 'Fade' },
+                      { value: 'curl',  label: 'Curl' },
+                    ].map(({ value, label }) => (
+                      <button
+                        key={value}
+                        className={`setting-btn ${pageAnimation === value ? 'active' : ''}`}
+                        onClick={() => onPageAnimationChange(value)}
+                      >{label}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="setting-group">
+                  <label className="setting-group-label">Animation Speed</label>
+                  <div className="setting-slider-row">
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2}
+                      step={0.25}
+                      value={pageAnimSpeed}
+                      disabled={pageAnimation === 'off'}
+                      onChange={e => onPageAnimSpeedChange(Number(e.target.value))}
+                      className="setting-slider"
+                    />
+                    <span className="setting-slider-label">{pageAnimSpeed}×</span>
+                  </div>
+                </div>
+
                 <ToggleSetting
-                  label="Animate Page Transition"
-                  value={animateTransitions}
-                  onChange={onAnimateTransitionsChange}
+                  label="Show edge hints"
+                  desc="Faint arrows on screen edges show tap zones"
+                  value={showEdgeHints}
+                  onChange={onShowEdgeHintsChange}
                 />
                 <ToggleSetting
                   label="Gestures"

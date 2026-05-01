@@ -1027,26 +1027,60 @@ function ToggleRow({ label, desc, value, onChange }) {
   );
 }
 
+// Mirrors Reader.jsx — keep the migration logic identical so opening Settings
+// before the reader still translates the legacy boolean key correctly.
+function resolveInitialPageAnimation() {
+  const stored = localStorage.getItem('reader_pageAnimation');
+  if (stored === 'off' || stored === 'slide' || stored === 'fade' || stored === 'curl') return stored;
+  const legacy = localStorage.getItem('reader_animTrans');
+  if (legacy === 'true')  return 'slide';
+  if (legacy === 'false') return 'off';
+  return 'slide';
+}
+
+function clampAnimSpeed(n) {
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(2, Math.max(0.5, n));
+}
+
 function ReadingSection() {
   const [readingMode, setReadingMode]             = useState(() => localStorage.getItem('reader_readingMode') || 'rtl');
   const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
-  const [animateTransitions, setAnimateTransitions] = useState(() => localStorage.getItem('reader_animTrans') === 'true');
+  const [pageAnimation, setPageAnimation]         = useState(resolveInitialPageAnimation);
+  const [pageAnimSpeed, setPageAnimSpeed]         = useState(() => clampAnimSpeed(Number(localStorage.getItem('reader_pageAnimSpeed')) || 1));
+  const [showEdgeHints, setShowEdgeHints]         = useState(() => localStorage.getItem('reader_edgeHints') === 'true');
   const [gesturesEnabled, setGesturesEnabled]     = useState(() => localStorage.getItem('reader_gestures') !== 'false');
   const [alwaysFullscreen, setAlwaysFullscreen]   = useState(() => localStorage.getItem('reader_alwaysFS') === 'true');
   const [bgColor, setBgColor]                     = useState(() => localStorage.getItem('reader_bgColor') || 'black');
   const [grayscale, setGrayscale]                 = useState(() => localStorage.getItem('reader_grayscale') === 'true');
   const [scaleType, setScaleType]                 = useState(() => localStorage.getItem('reader_scaleType') || 'screen');
   const [pageLayout, setPageLayout]               = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
+  const [resetHintsMsg, setResetHintsMsg]         = useState(null);
 
   useEffect(() => { localStorage.setItem('reader_readingMode',  readingMode); },         [readingMode]);
   useEffect(() => { localStorage.setItem('reader_orientation',  readingOrientation); },  [readingOrientation]);
-  useEffect(() => { localStorage.setItem('reader_animTrans',    animateTransitions); },  [animateTransitions]);
+  useEffect(() => { localStorage.setItem('reader_pageAnimation', pageAnimation); },      [pageAnimation]);
+  useEffect(() => { localStorage.setItem('reader_pageAnimSpeed', String(pageAnimSpeed)); }, [pageAnimSpeed]);
+  useEffect(() => { localStorage.setItem('reader_edgeHints',    String(showEdgeHints)); }, [showEdgeHints]);
   useEffect(() => { localStorage.setItem('reader_gestures',     gesturesEnabled); },     [gesturesEnabled]);
   useEffect(() => { localStorage.setItem('reader_alwaysFS',     alwaysFullscreen); },    [alwaysFullscreen]);
   useEffect(() => { localStorage.setItem('reader_bgColor',      bgColor); },             [bgColor]);
   useEffect(() => { localStorage.setItem('reader_grayscale',    grayscale); },           [grayscale]);
   useEffect(() => { localStorage.setItem('reader_scaleType',    scaleType); },           [scaleType]);
   useEffect(() => { localStorage.setItem('reader_pageLayout',   pageLayout); },          [pageLayout]);
+
+  // One-time cleanup of the legacy boolean key.
+  useEffect(() => {
+    if (localStorage.getItem('reader_animTrans') !== null) {
+      localStorage.removeItem('reader_animTrans');
+    }
+  }, []);
+
+  function handleResetHints() {
+    try { localStorage.removeItem('reader_hintsSeen'); } catch (_) {}
+    setResetHintsMsg('Hint will replay on the next chapter open.');
+    setTimeout(() => setResetHintsMsg(null), 3000);
+  }
 
   return (
     <div>
@@ -1103,10 +1137,56 @@ function ReadingSection() {
 
           <div className="rs-divider" />
 
+          <div className="setting-group">
+            <label className="setting-group-label">Page Transition</label>
+            <p className="rs-setting-hint">Animation played when turning pages in paged modes.</p>
+            <div className="setting-options setting-options-grid">
+              {[
+                { value: 'off',   label: 'Off' },
+                { value: 'slide', label: 'Slide' },
+                { value: 'fade',  label: 'Fade' },
+                { value: 'curl',  label: 'Curl' },
+              ].map(({ value, label }) => (
+                <button
+                  key={value}
+                  className={`setting-btn${pageAnimation === value ? ' active' : ''}`}
+                  onClick={() => setPageAnimation(value)}
+                >{label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="rs-divider" />
+
+          <div className="setting-group">
+            <label className="setting-group-label">Animation Speed</label>
+            <p className="rs-setting-hint">
+              {pageAnimation === 'off'
+                ? 'Choose a transition style above to adjust speed.'
+                : 'Multiplier applied to the page-turn animation duration.'}
+            </p>
+            <div className="setting-slider-row">
+              <input
+                type="range"
+                min={0.5}
+                max={2}
+                step={0.25}
+                value={pageAnimSpeed}
+                disabled={pageAnimation === 'off'}
+                onChange={e => setPageAnimSpeed(clampAnimSpeed(Number(e.target.value)))}
+                className="setting-slider"
+              />
+              <span className="setting-slider-label">{pageAnimSpeed}×</span>
+            </div>
+          </div>
+
+          <div className="rs-divider" />
+
           <ToggleRow
-            label="Animate Page Transitions"
-            value={animateTransitions}
-            onChange={setAnimateTransitions}
+            label="Show edge hints"
+            desc="Faint arrows on screen edges show tap zones"
+            value={showEdgeHints}
+            onChange={setShowEdgeHints}
           />
           <ToggleRow
             label="Gestures"
@@ -1119,6 +1199,23 @@ function ReadingSection() {
             value={alwaysFullscreen}
             onChange={setAlwaysFullscreen}
           />
+
+          <div className="rs-divider" />
+
+          <div className="setting-group">
+            <label className="setting-group-label">Reset reader hints</label>
+            <p className="rs-setting-hint">
+              Replays the one-time edge-hint pulse the next time you open a chapter.
+            </p>
+            <button className="btn" onClick={handleResetHints} style={{ alignSelf: 'flex-start' }}>
+              Reset hints
+            </button>
+            {resetHintsMsg && (
+              <p className="rs-setting-hint" style={{ marginTop: 8, color: 'var(--accent, #4caf50)' }}>
+                {resetHintsMsg}
+              </p>
+            )}
+          </div>
         </div>
       </div>
 

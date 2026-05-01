@@ -244,6 +244,30 @@
   margin-bottom: 16px;
 }
 
+/* Hold-during-refetch: keep the current grid visible while a new fetch is in
+   flight, dimmed slightly so the user can tell something is loading. */
+.library-grid-wrap.is-refetching {
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+/* Inline error banner shown above the grid when a refetch fails but we still
+   have previous results to display. Full-page error remains for initial
+   loads. */
+.library-inline-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(244, 67, 54, 0.12);
+  border: 1px solid rgba(244, 67, 54, 0.4);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
 .manga-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));

@@ -56,7 +56,10 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 |---|---|
 | `reader_readingMode` | `rtl` |
 | `reader_zoom` | `100` |
-| `reader_animTrans` | `false` |
+| `reader_pageAnimation` | `slide` (one of `off` \| `slide` \| `fade` \| `curl`) |
+| `reader_pageAnimSpeed` | `1` (multiplier; bounded `[0.5, 2]` in 0.25 steps) |
+| `reader_edgeHints` | `false` |
+| `reader_hintsSeen` | unset (set to `true` after the first-run pulse plays once) |
 | `reader_gestures` | `true` |
 | `reader_alwaysFS` | `false` |
 | `reader_bgColor` | `black` |
@@ -65,6 +68,39 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_scaleType` | `screen` |
 | `reader_pageLayout` | `single` |
 | `reader_orientation` | `ltr` |
+
+**Legacy migration**: the previous boolean key `reader_animTrans` is translated on first read (`true` → `'slide'`, `false` → `'off'`) and then removed from `localStorage`. New installs default to `'slide'`.
+
+## Page-Turn Animations
+
+`reader_pageAnimation` selects which keyframe runs when `currentPage` changes in paged mode. `animKey` re-mounts the inner wrapper on every page change so the keyframe restarts.
+
+| Value | Keyframe | Base duration |
+| --- | --- | --- |
+| `off` | none | 0 |
+| `slide` | `page-slide-{next,prev}` (24 px X-translate + opacity ramp) | 180 ms |
+| `fade` | `page-fade` (symmetric opacity 0 → 1, ignores direction) | 150 ms |
+| `curl` | `page-curl-{next,prev}` (`perspective(1200px)` + `rotateY` from leading edge) | 220 ms |
+
+Every duration is multiplied by `var(--reader-anim-mult)` (set on `.reader-page` from `reader_pageAnimSpeed`), so the speed slider scales every style at once. `prefers-reduced-motion: reduce` overrides everything to `animation: none` regardless of the chosen style.
+
+The 3D `perspective` lives on `.reader-paged-inner`; for slide/fade it's a no-op since those animations don't use `rotateY`.
+
+## Edge Hints
+
+Subtle chevron affordances at the left/right tap zones. Implemented in [client/src/components/ReaderEdgeHints.jsx](../client/src/components/ReaderEdgeHints.jsx) with `pointer-events: none` so the gesture system in `ReaderPaged` retains exclusive control of every touch.
+
+| Mode | Trigger | Lifetime |
+| --- | --- | --- |
+| `first-run` | First reader open per device when `reader_hintsSeen !== 'true'` | Two-pulse keyframe (~1.8 s), then writes `reader_hintsSeen = 'true'` and unmounts |
+| `persistent` | `reader_edgeHints === 'true'` and the user has already seen the first-run pulse | Always shown at opacity 0.7; fades to 0 for 1.5 s after every tap |
+| `off` | Any of: not paged mode, settings panel open, zoom > 100, persistent disabled and first-run already seen | — |
+
+The hints render as solid dark pills with white chevrons (z-index 160, sitting above the brightness overlay but below the control bars at z-index 200) so they remain legible against any page background — pure-white pages, pure-black pages, and the full range of cover art in between. Controls visibility intentionally does **not** suppress hints: the top/bottom bars don't overlap the vertical-center pills, and on touch devices controls stay visible from mount until a center tap, so gating on them would prevent the first-run pulse from ever playing.
+
+Tap-driven suppression is wired through a new `onAnyTap` callback on `ReaderPaged`, fired from `execTap` after a confirmed tap. The callback is purely advisory — it never affects which side advances or any other gesture decision. **Reset reader hints** in Settings → Reading Settings clears `reader_hintsSeen` so the first-run pulse fires again on the next open.
+
+In RTL mode the chevrons flip so each arrow visually points at the side that advances reading.
 
 ## Brightness
 

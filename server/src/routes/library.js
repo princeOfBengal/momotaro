@@ -7,6 +7,7 @@ const { runFullScan, scanLibrary, getScanStatus } = require('../scanner/libraryS
 const { thumbnailPath, thumbnailUrl } = require('../scanner/thumbnailPaths');
 const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
+const genresCache = require('../genresCache');
 
 const router = express.Router();
 
@@ -595,6 +596,26 @@ router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
       size_mb:    Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
     },
   });
+}));
+
+// ── Genres ───────────────────────────────────────────────────────────────────
+//
+// GET /api/genres — every distinct genre across visible libraries plus a
+// representative top-rated cover per genre. Powers the Browse By Genre page.
+//
+// The expensive cover-resolution sub-queries are NOT run on a TTL timer.
+// Instead, the payload is built lazily on first request and then kept until
+// the CBZ cache auto-clear scheduler fires `genresCache.precompute()` — so
+// recomputation rides along with the user's existing maintenance cadence
+// (off / daily / weekly, configured in Settings → Database). When auto-clear
+// is off, the payload is pinned for the process lifetime by the user's
+// explicit choice. See `server/src/genresCache.js`.
+//
+// Service-worker StaleWhileRevalidate + Cache-Control further mean the
+// browser usually paints from disk without ever touching the server.
+router.get('/genres', asyncWrapper(async (req, res) => {
+  res.set('Cache-Control', 'private, max-age=300, stale-while-revalidate=600');
+  res.json({ data: genresCache.getPayload() });
 }));
 
 // ── Statistics ───────────────────────────────────────────────────────────────

@@ -1,0 +1,112 @@
+/* Browse By Genre page. Reuses .library-page / .library-layout / .home-main
+   from Library.css + Home.css, so only the genre grid + tile styling lives
+   here. */
+
+.genres-header {
+  margin: 8px 0 20px;
+}
+
+.genres-title {
+  margin: 0 0 4px;
+  font-size: 24px;
+  color: var(--text-primary);
+}
+
+.genres-sub {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.genres-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+/* Each tile is a button so keyboard users can navigate the grid. The faded
+   thumbnail is purely decorative — pointer-events none so it never steals
+   the click, alt="" + aria-hidden so screen readers ignore it. */
+.genre-tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  background: var(--bg-surface, #1a1a1a);
+  color: var(--text-primary);
+  cursor: pointer;
+  overflow: hidden;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-start;
+  text-align: left;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.genre-tile:hover,
+.genre-tile:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  outline: none;
+}
+
+.genre-tile-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* The thumbnail is decoration; keep it faded so the genre name reads
+     clearly. Greyscale + low opacity dampens busy cover art. */
+  opacity: 0.22;
+  filter: grayscale(0.4) blur(0.5px);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Gradient that ensures readable contrast for the label regardless of how
+   bright the underlying cover happens to be. */
+.genre-tile-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.55) 100%
+  );
+  pointer-events: none;
+}
+
+.genre-tile-label {
+  position: relative;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.genre-tile-count {
+  position: relative;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+@media (max-width: 700px) {
+  .genres-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .genre-tile {
+    padding: 10px;
+  }
+  .genre-tile-label {
+    font-size: 14px;
+  }
+  .genre-tile-count {
+    font-size: 11px;
+  }
+}

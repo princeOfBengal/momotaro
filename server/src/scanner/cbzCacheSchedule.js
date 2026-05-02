@@ -1,5 +1,6 @@
 const cbzCache = require('./cbzCache');
 const { getDb } = require('../db/database');
+const genresCache = require('../genresCache');
 
 // Auto-clear scheduler for the CBZ extract cache. Fires at a configurable
 // daily or weekly time (server local time) and wipes the cache. State lives
@@ -101,6 +102,10 @@ function reschedule() {
     } catch (err) {
       console.error('[CBZ Cache] Auto-clear failed:', err.message);
     }
+    // Piggyback on the auto-clear cadence to refresh the Browse By Genre
+    // payload. Keeps the per-genre top-cover sub-queries off the request
+    // path — they fire once per scheduled wipe, not once per visitor.
+    genresCache.precompute();
     reschedule();
   }, ms);
   currentTimer.unref();

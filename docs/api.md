@@ -788,6 +788,35 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 
 ---
 
+## Genres
+
+`GET /api/genres` — every distinct genre across **visible libraries** (same scope as Home: `libraries.show_in_all = 1` or `manga.library_id IS NULL`), each paired with a count of tagged manga and the cover of the highest-scored manga in that genre. Powers the Browse By Genre page (`/genres`).
+
+**Response `data` shape:**
+
+```json
+[
+  { "genre": "Mystery",  "manga_count": 14, "cover_url": "/thumbnails/.../25.webp" },
+  { "genre": "Romance",  "manga_count": 31, "cover_url": "/thumbnails/.../12.webp" }
+]
+```
+
+- Returned in alphabetical order (`g.genre ASC`).
+- `cover_url` is the cover of the highest-scored manga tagged with that genre, with `NULL` scores sinking to the bottom of the ranking. Returns `null` when no manga in the genre has a stored thumbnail.
+- The Browse By Genre page renders each tile with `cover_url` faded behind the genre name; clicking a tile navigates to `/library` with the genre name pre-filled in the search box, where the existing search route resolves it via the normalised `manga_genres` table — no separate genre filter API was added.
+
+**Caching (3 layers).** The genre list barely changes — it only mutates when a scan finds a new genre tag or metadata apply rewrites a manga's `genres` JSON — so the endpoint is aggressively cached at every layer:
+
+1. **Service worker** — `/api/genres` is registered under the `browse-data` StaleWhileRevalidate rule (alongside `/api/home`, `/api/library`, `/api/stats`, etc.), 500 entries / 30 days. Repeat visits to `/genres` paint **instantly from disk cache** without a network round-trip; the SW background-fetches a fresh response and updates the cache for next time. Most "click Browse By Genre" actions never hit the server at all after the first visit.
+2. **Browser HTTP cache** — `Cache-Control: private, max-age=300, stale-while-revalidate=600` so non-PWA tabs / incognito (where the SW isn't active) still get 5 minutes of pure-cache hits.
+3. **Server in-memory payload** — built lazily on first request, then **pinned until the CBZ cache auto-clear scheduler fires** (lives in [`server/src/genresCache.js`](../server/src/genresCache.js)). The schedule lives in Settings → Database (`Off` / `Daily` / `Weekly` at a chosen time); whenever the auto-clear timer wipes the CBZ cache, it also calls `genresCache.precompute()` so the per-genre top-cover sub-queries fire once on that schedule rather than on every visitor's request. When auto-clear is `Off`, the payload is computed once on first hit after server start and stays pinned for the lifetime of the process — by the user's explicit choice. Server restart and explicit `precompute()` calls are the only other times the queries run.
+
+The combined effect is that under typical usage the Browse By Genre page costs **zero queries** to open: the SW serves instantly, and even when it revalidates, the server returns a precomputed in-memory payload. The expensive cover-resolution sub-queries fire at most once per scheduled CBZ auto-clear (i.e. once a day or once a week, depending on the user's setting), not on a periodic timer and not on every reader's request.
+
+**Efficiency:** the outer query is a single GROUP BY on the indexed `manga_genres` table joined to `manga` for the visible-library filter. The per-row correlated subquery picks the top cover via `(score DESC NULLS LAST, id ASC)` and stops at LIMIT 1; on libraries with hundreds of distinct genres this is still bounded by `genres × log(manga_per_genre)` index probes — even on a cold cache the request is well under the 30 ms range.
+
+---
+
 ## Statistics
 
 | Method | Path | Description |

@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
+import Genres from './pages/Genres';
 import Library from './pages/Library';
 import MangaDetail from './pages/MangaDetail';
 import EditManga from './pages/EditManga';
@@ -14,6 +15,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/genres" element={<Genres />} />
         <Route path="/library" element={<Library />} />
         <Route path="/manga/:id" element={<MangaDetail />} />
         <Route path="/manga/:id/edit" element={<EditManga />} />

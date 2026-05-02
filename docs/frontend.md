@@ -9,6 +9,7 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | Path | Component | Description |
 | --- | --- | --- |
 | `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Recently Added, Discover, Art Gallery, Top Manga per favourite genre) |
+| `/genres` | `Genres` | Browse By Genre — grid of every genre across visible libraries, each tile decorated with a faded top-rated cover; clicking a tile searches All Libraries for that genre |
 | `/library` | `Library` | Main manga grid with search, sort, and the libraries / reading-lists sidebar |
 | `/manga/:id` | `MangaDetail` | Manga info and chapter list |
 | `/manga/:id/edit` | `EditManga` | Manual metadata editor — title, author, genres, and the `track_volumes` toggle. Reached from the *Edit Metadata* button on MangaDetail. PATCHes `/api/manga/:id`. |
@@ -53,6 +54,16 @@ Selecting a library or reading list in the sidebar navigates the user to `/libra
 **Empty state** — when Continue Reading, Discover, Art Gallery, and all four genre ribbons are empty (fresh install with no reading history), Home renders a "Welcome to Momotaro" empty state that links to `/library`. Individual empty ribbons are suppressed from the layout rather than rendered as dead sections.
 
 **PWA behaviour** — `/api/home` is registered under the `browse-data` StaleWhileRevalidate rule in the service worker (see *PWA caching strategy* below), so Home hydrates instantly from cache on every visit while a fresh response arrives in the background. The 30-second server-side cache absorbs the resulting burst of prefetches without extra DB load.
+
+### Genres (`src/pages/Genres.jsx`)
+
+Landing page at `/genres`. Renders the shared `AppSidebar` on the left and a responsive grid of **genre tiles** on the right (one tile per distinct genre across visible libraries). Data comes from a single `GET /api/genres` fetch — see [api.md § Genres](./api.md#genres).
+
+Each tile is a `<button>` (so it stays keyboard-navigable) decorated with a **faded thumbnail** of the highest-scored manga in that genre — the cover is positioned `inset: 0`, `object-fit: cover`, `opacity: 0.22`, with a slight grayscale + blur and a bottom-weighted gradient overlay for label contrast. The thumbnail is purely decorative (`alt=""`, `aria-hidden="true"`, `pointer-events: none`); the button label is the genre name plus the manga count.
+
+Clicking a tile calls `navigate('/library', { state: { search: genre } })`, which Library reads on mount and seeds into its search box. Single-term search resolves to an exact (case-insensitive) genre match server-side via the normalised `manga_genres` table — see [api.md § Search](./api.md#search-search) — so the existing search route is the only filter mechanism; no separate "filter by genre" code path was added.
+
+Empty / loading / error states mirror the rest of the app: a skeleton grid replaces the tiles before data arrives, an inline error block surfaces failures with a Retry button, and a "No genres yet" state appears when the library has no tagged metadata.
 
 ### Library (`src/pages/Library.jsx`)
 
@@ -203,6 +214,7 @@ Shared left-rail sidebar rendered by both Home and Library. Contents, top to bot
 - **Home** shortcut (always present) — `<Link to="/">` with a house icon.
 - **Libraries** — each configured library (with manga count) and, when there are ≥ 2, an **All Libraries** aggregate entry.
 - **Reading Lists** — every list with an inline `+` affordance to create a new one and `×` to delete non-default lists.
+- **Browse By Genre** shortcut — `<Link to="/genres">` rendered below the Reading Lists section. Always visible regardless of library / list state.
 
 Selection is driven by optional `onSelectAll` / `onSelectLibrary` / `onSelectList` props. Library passes in-place setState callbacks; Home omits them, which causes the sidebar to navigate to `/library` with the chosen filter in React Router location state. List creation and deletion are managed inside the component itself, with `onReadingListsChanged` letting the host refetch counts afterwards.
 

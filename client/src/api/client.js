@@ -269,6 +269,10 @@ export const api = {
     return apiFetch(`/api/home${qs ? '?' + qs : ''}`);
   },
 
+  // Genres — every distinct genre across visible libraries with a
+  // representative top-rated cover per genre. Powers the Browse By Genre page.
+  getGenres: () => apiFetch('/api/genres'),
+
   // Statistics. Pass a library ID to scope every aggregate to that library;
   // omit or pass null for the All Libraries view.
   getStats: (libraryId = null) => {

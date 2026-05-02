@@ -217,6 +217,24 @@ export default function AppSidebar({
           </div>
         </form>
       )}
+
+      <div className="library-sidebar-divider" />
+
+      <Link
+        to="/genres"
+        className="library-sidebar-item library-sidebar-home"
+        onClick={closeDrawer}
+      >
+        <svg
+          className="library-sidebar-home-icon"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M3 4a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 8a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H4a1 1 0 01-1-1v-4zm8-8a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V4zm0 8a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+        </svg>
+        Browse By Genre
+      </Link>
     </aside>
   );
 }

@@ -8,12 +8,15 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 
 | Path | Component | Description |
 | --- | --- | --- |
-| `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Discover, Art Gallery, Top Manga per favourite genre) |
+| `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Recently Added, Discover, Art Gallery, Top Manga per favourite genre) |
 | `/library` | `Library` | Main manga grid with search, sort, and the libraries / reading-lists sidebar |
-| `/manga/:mangaId` | `MangaDetail` | Manga info and chapter list |
+| `/manga/:id` | `MangaDetail` | Manga info and chapter list |
+| `/manga/:id/edit` | `EditManga` | Manual metadata editor — title, author, genres, and the `track_volumes` toggle. Reached from the *Edit Metadata* button on MangaDetail. PATCHes `/api/manga/:id`. |
 | `/read/:chapterId` | `Reader` | Full-screen reader |
+| `/libraries` | `Libraries` | Older standalone Library Management page; the same controls also live under Settings → Libraries. |
 | `/settings` | `Settings` | App settings + AniList OAuth |
 | `/auth/anilist/callback` | `AnilistCallback` | OAuth redirect handler |
+| `*` | — | Anything else `Navigate`s to `/`. |
 
 **Back-link convention:** the `<Link to="/">` used as the navbar logo on every page always returns to Home. "← Back" / "← Library" buttons (on MangaDetail, Settings, Libraries) target `/library` so they return to the full browsable grid, not the ribbon landing page.
 
@@ -55,7 +58,7 @@ Selecting a library or reading list in the sidebar navigates the user to `/libra
 
 - Loads manga via `GET /api/library`
 - Sidebar filter by library or reading list
-- Search bar with 300 ms debounce — matches against title, **author/artist name** (partial), or genre. Comma-separated terms filter by all listed genres simultaneously.
+- Search bar with 300 ms debounce — matches against title, **author/artist name** (whole-word, case-insensitive via FTS5), or genre (exact, case-insensitive). Multi-word input is implicit AND on title/author. Comma-separated terms filter by all listed genres simultaneously. See [api.md § Search](./api.md#search-search) for full semantics.
 - Sort by: A–Z, recently updated, year, **rating** (AniList/MAL `score`, descending; unrated manga sink to the bottom ordered alphabetically)
 - **Default sort** comes from `localStorage.home_default_sort` (set via Settings → Homepage Settings; valid values `title` \| `updated` \| `year` \| `rating`, defaults to `title`). Falls back to `title` if the stored value is missing or unrecognised. Changing the sort from the top bar does not update the persisted default — use Homepage Settings for that.
 - Scan button triggers `POST /api/scan`
@@ -63,6 +66,13 @@ Selecting a library or reading list in the sidebar navigates the user to `/libra
 - **Filter initialisation from navigation state** — on mount, `activeLibrary` and `activeList` are seeded from `location.state.library` and `location.state.list` (React Router state), and `search` is seeded from `location.state.search`. This allows the MangaDetail nav drawer to navigate back to a specific library or reading list without URL parameters, and lets the Home page's *See all* links on the genre ribbons pre-fill the search box with the genre name.
 - **First-time setup state**: when no libraries are configured (`libraries.length === 0`) and no search or list filter is active, shows a "Welcome to Momotaro" prompt with a button that navigates to Settings → Library Management tab
 - **Libraries sidebar section**: shown whenever at least one library exists (`libraries.length > 0`). The **All Libraries** aggregate entry is only shown when there are two or more libraries — with a single library it is omitted as redundant.
+
+**Loading & error UX:**
+
+- **Initial-load skeleton** — until the first `GET /api/library` response arrives, the page renders a grid of placeholder cards matching the live `.manga-grid` layout (with a count-line placeholder above) so vertical real-estate is reserved before first paint. Replaces the prior spinner-only state. The skeleton classes (`.skeleton-block`, `.skeleton-line`, `.skeleton-tile`) are shared with Home — `Library.jsx` imports `Home.css` for that reason.
+- **Hold-during-refetch** — sort changes, search keystrokes, and library/list switches keep the current grid visible (subtly dimmed via `.library-grid-wrap.is-refetching { opacity: 0.6 }`) instead of blanking to the spinner. Empty / error states only replace the grid when there is no data to show.
+- **Inline error banner** — when a refetch fails over an existing grid (e.g. the network drops during a search), the error surfaces as a red banner (`.library-inline-error`) above the unchanged grid with a Retry button. Initial-load failures still show the full-page error treatment.
+- **Off-screen card skipping** — `.manga-card` carries `content-visibility: auto` + `contain-intrinsic-size: 0 320px`, so the browser skips layout / paint for cards outside the viewport on long grids. In-page find (Ctrl+F), screen readers, and tab navigation are unaffected. Browsers without support (Safari < 18) fall back to standard rendering.
 
 ### MangaDetail (`src/pages/MangaDetail.jsx`)
 
@@ -173,9 +183,13 @@ The "Momotaro" logo (`/logo.png`) appears in the navbar of every page as a `<Lin
 
 ### `MangaCard`
 
-- Cover image (thumbnail URL)
-- Title, chapter count
-- Progress indicator (last read chapter)
+The grid tile rendered by Library and by Home's search-results view. Reads only `cover_url` (with `cover_image` as fallback for legacy callers), `title`, `year`, `score`, and `status` off the row.
+
+- Cover image (thumbnail URL) with a colour-coded **status badge** (top-left, hidden when `status` is missing or `UNKNOWN`) and an AniList/MAL **score badge** (bottom-right, ★ + 1-decimal, hidden when `score` is null)
+- Title (clamped to 2 lines)
+- Year (when present)
+
+**Performance hints** — the cover `<img>` carries `width={300}` / `height={450}` (matching the 2:3 aspect of generated thumbnails), `loading="lazy"`, `decoding="async"`, and `draggable={false}`. The width/height attributes are a layout hint only — CSS `width: 100%; height: 100%; object-fit: cover` still drives painted size. Together with `content-visibility: auto` on `.manga-card` (see *Library Loading & error UX* above), this keeps long grids cheap to scroll and eliminates layout shift as covers stream in.
 
 ### `ReaderPaged` / `ReaderScroll` / `ReaderControls`
 

@@ -94,7 +94,7 @@ One row per image page.
 | `chapter_id` | INTEGER FK | References `chapters(id)`, CASCADE delete |
 | `page_index` | INTEGER | 0-based position |
 | `filename` | TEXT | Basename for display (e.g. `001.jpg`) |
-| `path` | TEXT | **Dual-purpose by chapter type.** For `chapters.type = 'folder'` rows: absolute filesystem path. For `chapters.type = 'cbz'` rows: the ZIP entry name inside `chapters.path` (used by `yauzl` to stream the entry on demand). |
+| `path` | TEXT | **Dual-purpose by chapter type.** For `chapters.type = 'folder'` rows: absolute filesystem path. For `chapters.type = 'cbz'` rows: a filename relative to the chapter's CBZ extraction cache directory (`CBZ_CACHE_DIR/<chapterId>_<mtimeFloor>/`). Newly-scanned CBZ chapters initially store the ZIP entry name; the first time the chapter is opened, `GET /api/chapters/:id/pages` extracts the archive into the cache and rebuilds the rows so `path` matches the on-disk cache filename (e.g. `0001.jpg`). See [scanner.md → CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
 | `width` | INTEGER | Pixel dimensions. Folder-chapter pages get them at scan time; CBZ pages start null and are populated by the API the first time the chapter is opened (see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching)). Stays null only when an entry is unreadable. |
 | `height` | INTEGER | |
 | `is_wide` | — | Not a column. Derived at API serve time from `width`/`height`: `true` when the page's width is ≥ 1.5× the median page width across the chapter (a true double-page spread that visually occupies two normal pages). `null` when dimensions are unknown. |

@@ -223,6 +223,21 @@
   margin-top: 4px;
 }
 
+.detail-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.detail-action-icon {
+  display: none;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.detail-action-count {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Chapters */
 .chapter-section-title {
   font-size: 18px;
@@ -1474,13 +1489,23 @@
   /* AniList panel: shrink the fixed-width label so rows don't overflow */
   .al-status-field { min-width: 90px; font-size: 11px; }
 
-  /* Action buttons should fill available width on narrow screens */
+  /* Action buttons become compact icon buttons on narrow screens */
   .detail-actions { gap: 8px; }
   .detail-actions .btn { flex: 1; min-width: 0; justify-content: center; text-align: center; }
+  .detail-actions .detail-action-btn {
+    padding: 10px 12px;
+    gap: 4px;
+  }
+  .detail-action-icon { display: inline-block; }
+  .detail-action-label { display: none; }
+  .rl-dropdown-trigger .rl-chevron,
+  .detail-settings-trigger .detail-settings-chevron { display: none; }
 
-  /* Settings dropdown trigger should stretch like the other buttons */
+  /* Keep dropdown wrappers stretching like the other buttons */
   .detail-settings-wrap { flex: 1; min-width: 0; }
   .detail-settings-trigger { width: 100%; justify-content: center; }
+  .rl-dropdown-wrap { flex: 1; min-width: 0; }
+  .rl-dropdown-trigger { width: 100%; justify-content: center; }
 
   /* Dropdown opens upward on mobile to avoid clipping at the bottom of the action row */
   .detail-settings-dropdown {

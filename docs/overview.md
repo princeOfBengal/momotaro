@@ -9,7 +9,7 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 | Backend | Node.js + Express |
 | Database | SQLite via `better-sqlite3` |
 | Image processing | `sharp` (WebP thumbnails) |
-| Archive reads | `yauzl` (streaming CBZ/ZIP — single-entry reads, no extraction) |
+| Archive reads | `yauzl` — central-directory-only reads at scan time; full per-chapter extraction to disk on first reader open (see [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache)) |
 | Archive writes | `adm-zip` (CBZ creation in the optimize endpoint only) |
 | File watching | `chokidar` |
 | Frontend | React 18 + React Router 6 |
@@ -92,9 +92,10 @@ docker volume rm momotaro_data
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | Server listen port |
+| `LIBRARY_PATH` | `./library` | Default library directory used when no library row exists yet. Libraries are normally configured at runtime via the API; this is just a fallback path. |
 | `DATA_PATH` | `./data` | Where DB and thumbnails are stored |
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
 | `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Per-chapter extract cache for CBZ archives. Size cap and scheduled auto-clear are runtime-configurable from Settings → Database (persisted in the `settings` table). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
-| `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts |
+| `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts (set to the literal string `false` to disable). |
 | `REQUEST_DELAY_MS` | `700` | Legacy minimum delay floor; the AniList integration now reads `X-RateLimit-Limit` and adapts spacing per response (default range 700–5 000 ms). |

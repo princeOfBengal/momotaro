@@ -70,11 +70,12 @@ Triggered manually by the user — either the "Refresh Metadata" button on a man
 
 The server searches AniList by the manga's folder name / title, picks the best match, and stores:
 
-- `anilist_id`, `mal_id`
-- `title`, `description`, `status`, `year`, `genres`, `score`
-- `author` — extracted from the AniList `staff` edges (see below)
-- `track_volumes` — set to `1` if the AniList entry tracks volumes rather than chapters (e.g. light novels)
-- `cover_image` — downloaded and saved as thumbnail
+- `anilist_id` — recorded on the manga row. Existing `mal_id` / `mangaupdates_id` / `doujinshi_id` linkages are preserved via `COALESCE` and never overwritten by an AniList apply.
+- `title`, `description`, `status`, `year`, `genres`, `score` — written only when the incoming source's display priority ≥ the manga's current `metadata_source` (see [api.md § Linkage and display priority](./api.md#linkage-and-display-priority)).
+- `author` — extracted from the AniList `staff` edges (see below). Subject to the same display-priority guard.
+- `anilist_cover` — downloaded to `<mangaId>_anilist.webp`. The active `<mangaId>.webp` is then re-resolved by the cover-priority resolver, which respects `cover_user_set` and falls through `anilist > mal > mangaupdates > doujinshi > original`.
+
+`track_volumes` is **not** populated by the metadata fetch path — it is a per-manga toggle the user controls via `PATCH /api/manga/:id` (Settings on MangaDetail). It affects how the reader labels chapters and how progress is reported to AniList.
 
 Every successful by-ID or search response is also written to a per-source JSON cache file at `data/metadata-cache/anilist/<id>.json`. The Export Metadata flow reads these cache files instead of re-pinging AniList.
 
@@ -86,9 +87,27 @@ If no staff edges match those roles the field is stored as `null` and the author
 
 ## Progress Sync
 
-Triggered **asynchronously** after every `PUT /api/progress/:mangaId` call. The HTTP response is sent first; sync happens in the background.
+Triggered **asynchronously** when (and only when) the set of completed chapters
+for a manga actually changes. The HTTP response is sent first; sync happens in
+the background. Routine page-by-page progress saves while the user is mid-chapter
+do **not** trigger a sync — this is enforced server-side so the reader can keep
+debouncing page updates without worrying about hammering AniList.
 
-The `PUT /api/progress/:mangaId` handler extracts `X-Device-ID` from the request header and passes it to `syncToAniList()`. That function looks up the token from `device_anilist_sessions` for that device. If the device has no AniList session, sync is skipped silently.
+The two routes that can trigger a sync are:
+
+- `PUT /api/progress/:mangaId` — fires the sync **only** when the request both
+  carries `markChapterComplete: true` AND the `chapterId` was not already in the
+  stored `completed_chapters`. This is the "user advanced past the last page of
+  a chapter" case. Every other PUT (page-by-page progress within an unfinished
+  chapter, or a re-mark of an already-completed chapter) skips the sync.
+- `PATCH /api/progress/:mangaId/chapter/:chapterId` — fires the sync **only**
+  when the chapter's completion state actually flips (unread → completed or
+  completed → unread). A no-op toggle does not ping AniList.
+
+Both handlers extract `X-Device-ID` from the request header and pass it to
+`syncToAniList()`. That function looks up the token from
+`device_anilist_sessions` for that device. If the device has no AniList session,
+sync is skipped silently.
 
 Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `syncToAniList()`:
 
@@ -118,7 +137,7 @@ Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `
 
 The recommended delay is clamped to `[700, 5 000] ms`. A 429 forces it to 5 000 ms until headers from a successful response indicate the service is healthy again. The retry loop itself is unchanged: up to 3 attempts honouring `Retry-After` (capped at 90 s); throws `'AniList rate limit exceeded after 3 retries'` if all attempts fail.
 
-**Adult content:** `Media(...)` queries do not pass `isAdult`, so AniList returns adult and SFW titles together. This matches the on-disk library scanner, which indexes whatever the user dropped in.
+**Adult content:** Single-title queries (`AUTO_SEARCH_QUERY`, `MANUAL_SEARCH_QUERY`, `FETCH_BY_ID_QUERY`) do not pass `isAdult`, so AniList returns adult and SFW titles together — matching the on-disk library scanner, which indexes whatever the user dropped in. The bulk-search batch path (`fetchBatchFromAniList`) currently passes `isAdult: false` on each alias, so a bulk title-search phase only matches SFW results; pre-linked manga that go through the bulk refresh-by-ID phase (`fetchBatchByAniListIds`) and manual single-manga search/apply paths are unaffected.
 
 ## GraphQL Queries Used
 
@@ -137,9 +156,9 @@ All media queries use the shared `MEDIA_FIELDS` fragment which includes `staff` 
 
 ## `track_volumes` Flag
 
-When AniList marks a manga as tracking volumes (e.g. light novels published by volume rather than serialized chapters), the `manga.track_volumes` column is set to `1`.
+`manga.track_volumes` is a per-manga toggle the user controls from MangaDetail (it ships PATCH `/api/manga/:id` with `{ track_volumes }`). Defaults to `0`. It is **not** populated by any metadata fetch path — neither AniList, MAL, MangaUpdates, nor Doujinshi.info touches it.
 
-This flag affects:
+When set to `1`, this flag affects:
 - **UI labels**: "Volume 1" instead of "Chapter 1" in MangaDetail and the reader
-- **Progress sync**: volume numbers are reported to AniList instead of chapter numbers
+- **Progress sync**: volume numbers are reported to AniList (`{ volumes: N }`) instead of chapter numbers (`{ chapters: N }`)
 - **Chapter display**: chapter entries show `Volume N` if only a volume number is parsed

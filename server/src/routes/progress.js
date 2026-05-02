@@ -29,7 +29,9 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const existing = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
   let completedChapters = safeJsonParse(existing?.completed_chapters, []);
 
-  if (markChapterComplete && chapterId && !completedChapters.includes(chapterId)) {
+  const newlyCompleted =
+    markChapterComplete && chapterId && !completedChapters.includes(chapterId);
+  if (newlyCompleted) {
     completedChapters.push(chapterId);
   }
 
@@ -58,11 +60,15 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
     },
   });
 
-  // Fire-and-forget AniList sync (don't block the response)
-  const deviceId = req.headers['x-device-id'] || null;
-  syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
-    console.warn('[AniList Sync] Failed:', err.message)
-  );
+  // Fire-and-forget AniList sync (don't block the response).
+  // Only sync when a chapter was just newly completed — page-by-page progress
+  // updates within an unfinished chapter must not ping AniList.
+  if (newlyCompleted) {
+    const deviceId = req.headers['x-device-id'] || null;
+    syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
+      console.warn('[AniList Sync] Failed:', err.message)
+    );
+  }
 }));
 
 // PATCH /api/progress/:mangaId/chapter/:chapterId — toggle a single chapter's read status
@@ -80,8 +86,11 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
   let currentChapterId   = existing?.current_chapter_id ?? null;
   let currentPage        = existing?.current_page       ?? 0;
 
+  const wasCompleted    = completedChapters.includes(chapterId);
+  const completionChanged = (!!completed) !== wasCompleted;
+
   if (completed) {
-    if (!completedChapters.includes(chapterId)) completedChapters.push(chapterId);
+    if (!wasCompleted) completedChapters.push(chapterId);
 
     // Sorted chapter list — same order as the client's sortedChapters
     const allChapters = db.prepare(`
@@ -130,11 +139,15 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
     },
   });
 
-  // Fire-and-forget AniList sync
-  const deviceId = req.headers['x-device-id'] || null;
-  syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
-    console.warn('[AniList Sync] Failed:', err.message)
-  );
+  // Fire-and-forget AniList sync — only when the chapter's completion state
+  // actually flipped, so a no-op toggle (e.g. marking an already-complete
+  // chapter as complete) does not ping AniList.
+  if (completionChanged) {
+    const deviceId = req.headers['x-device-id'] || null;
+    syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
+      console.warn('[AniList Sync] Failed:', err.message)
+    );
+  }
 }));
 
 // DELETE /api/progress/:mangaId

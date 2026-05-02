@@ -1520,13 +1520,32 @@ export default function MangaDetail() {
 
             <div className="detail-actions">
               {chapters.length > 0 && (
-                <button className="btn btn-primary" onClick={continueReading}>
-                  {progress?.current_chapter_id ? 'Continue Reading' : 'Start Reading'}
+                <button
+                  className="btn btn-primary detail-action-btn"
+                  onClick={continueReading}
+                  aria-label={progress?.current_chapter_id ? 'Continue Reading' : 'Start Reading'}
+                  title={progress?.current_chapter_id ? 'Continue Reading' : 'Start Reading'}
+                >
+                  <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 3l5 5-5 5M9 3l5 5-5 5"/>
+                  </svg>
+                  <span className="detail-action-label">
+                    {progress?.current_chapter_id ? 'Continue Reading' : 'Start Reading'}
+                  </span>
                 </button>
               )}
               {progress && (
-                <button className="btn btn-ghost" onClick={handleResetProgress}>
-                  Reset Progress
+                <button
+                  className="btn btn-ghost detail-action-btn"
+                  onClick={handleResetProgress}
+                  aria-label="Reset Progress"
+                  title="Reset Progress"
+                >
+                  <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M14 8a6 6 0 1 1-1.76-4.24"/>
+                    <polyline points="14 2 14 6 10 6"/>
+                  </svg>
+                  <span className="detail-action-label">Reset Progress</span>
                 </button>
               )}
               {/* Desktop: individual buttons */}
@@ -1542,11 +1561,17 @@ export default function MangaDetail() {
               {/* Mobile: consolidated Settings dropdown */}
               <div className="detail-settings-wrap detail-mobile-only" ref={settingsDropdownRef}>
                 <button
-                  className={`btn btn-ghost detail-settings-trigger${showSettingsDropdown ? ' open' : ''}`}
+                  className={`btn btn-ghost detail-action-btn detail-settings-trigger${showSettingsDropdown ? ' open' : ''}`}
                   onClick={() => setShowSettingsDropdown(v => !v)}
+                  aria-label="Settings"
+                  title="Settings"
                 >
-                  Settings
-                  <svg className="detail-settings-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="detail-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                  </svg>
+                  <span className="detail-action-label">Settings</span>
+                  <svg className="detail-settings-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M1 1l4 4 4-4"/>
                   </svg>
                 </button>
@@ -1567,11 +1592,19 @@ export default function MangaDetail() {
               {readingLists.length > 0 && (
                 <div className="rl-dropdown-wrap" ref={listDropdownRef}>
                   <button
-                    className={`btn btn-ghost rl-dropdown-trigger${showListDropdown ? ' open' : ''}`}
+                    className={`btn btn-ghost detail-action-btn rl-dropdown-trigger${showListDropdown ? ' open' : ''}`}
                     onClick={() => setShowListDropdown(v => !v)}
+                    aria-label={`Reading Lists${mangaListIds.size > 0 ? ` (${mangaListIds.size})` : ''}`}
+                    title="Reading Lists"
                   >
-                    Lists{mangaListIds.size > 0 ? ` · ${mangaListIds.size}` : ''}
-                    <svg className="rl-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+                      <line x1="3" y1="4" x2="13" y2="4"/>
+                      <line x1="3" y1="8" x2="13" y2="8"/>
+                      <line x1="3" y1="12" x2="13" y2="12"/>
+                    </svg>
+                    <span className="detail-action-label">Lists</span>
+                    {mangaListIds.size > 0 && <span className="detail-action-count">· {mangaListIds.size}</span>}
+                    <svg className="rl-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <path d="M1 1l4 4 4-4"/>
                     </svg>
                   </button>

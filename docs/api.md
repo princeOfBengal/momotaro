@@ -69,7 +69,7 @@ Response shape:
 | GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
-| PATCH | `/api/manga/:id` | Update manga settings `{ track_volumes? }` |
+| PATCH | `/api/manga/:id` | Update user-editable manga fields. Body accepts any subset of `{ track_volumes?, title?, author?, genres? }`. `track_volumes` is coerced to 0/1; an empty `title` returns 400; `author = ""` clears the field; `genres` must be an array of strings (non-strings/empties are dropped). The triggers on `manga` keep `manga_fts` and `manga_genres` in sync automatically when `title`/`author`/`genres` change. |
 | GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages (each annotated with its pre-generated cover when available) |
 | POST | `/api/manga/:id/set-thumbnail` | Set thumbnail from a page `{ page_id }` or saved file `{ saved_filename }` |
 | POST | `/api/manga/:id/generate-chapter-covers` | Render a 300×430 WebP from the first page of every chapter and save each into `thumbnail_history` (idempotent per chapter); does not change the active cover |
@@ -117,6 +117,32 @@ Paginated response shape:
 `next_cursor` is `null` when `has_more` is `false` — i.e. the final page has been returned. Cursors are opaque base64url tokens containing the last row's sort-key plus its `id` as a tiebreaker; do not parse or construct them on the client.
 
 Under the hood, the server fetches `limit + 1` rows and uses `WHERE (title, id) > (?, ?)` (or `<` for DESC sorts) against the `idx_manga_title` / `idx_manga_updated_at` indexes, so the cost of fetching page N is independent of N — unlike `OFFSET`, which scans every skipped row.
+
+### Listing row shape
+
+`GET /api/library` and `GET /api/reading-lists/:id/manga` return a **slim** row containing only the columns the grid renders. Heavier metadata fields (`description`, `genres`, `author`, `anilist_id`, `mal_id`, `mangaupdates_id`, `doujinshi_id`, all `*_cover` source columns, `metadata_source`, `track_volumes`, `bytes_on_disk`, `file_count`, etc.) are intentionally omitted. Fetch the full row via `GET /api/manga/:id` when needed.
+
+```json
+{
+  "id":          5,
+  "title":       "...",
+  "year":        2020,
+  "score":       8.3,
+  "status":      "FINISHED",
+  "cover_image": "5.webp",
+  "cover_url":   "/thumbnails/05/5.webp",
+  "updated_at":  1713200000
+}
+```
+
+`updated_at` is retained because the `sort=updated` keyset cursor reads it. `title` is retained for the `sort=title` cursor. Both are also rendered by the UI (year/score badges, title text). Search-by-genre still works because the WHERE clause is resolved server-side via the indexed `manga_genres` table — the response payload does not need to include genres.
+
+### Caching
+
+Both `/api/library` and `/api/reading-lists/:id/manga` are cached at two layers:
+
+- **In-process LRU cache** — keyed by every parameter that affects the result (`search`, `status`, `sort`, `library_id`, `cursor`, `limit` for the library endpoint; `list_id`, `search`, `sort` for the reading-list endpoint). 30 s TTL, capped at 50 entries per endpoint with oldest-insertion eviction. New manga from a scan, metadata refresh, or `PATCH /api/manga/:id` become visible within the TTL window — same staleness contract as `/api/home` and `/api/stats`.
+- **HTTP cache header** — every response carries `Cache-Control: private, max-age=15, stale-while-revalidate=60` so non-PWA tabs (incognito, fresh installs) get a fast browser cache to back up the service worker's StaleWhileRevalidate rule. Different query strings get different SW / browser cache entries.
 
 ### `GET /api/manga/:id/info` response
 
@@ -173,7 +199,7 @@ Generates a 300 × 430 WebP from the page image, saves it as `{mangaId}_{timesta
 **Folder vs. CBZ chapters** — the page source is resolved from the parent chapter's `type`:
 
 - `folder` — the page's absolute file path is passed directly to `sharp`.
-- `cbz` — the single ZIP entry named by `pages.path` is streamed out of the archive via `yauzl.openReadStream`, buffered, and handed to `sharp`. The archive is never fully extracted; only the central directory and the one needed entry are read. Memory footprint is one page (≈1–2 MB) for the duration of the resize.
+- `cbz` — `cbzCache.getCbzPageFile(chapterId, chapterPath, pageIndex)` extracts the chapter to the on-disk cache (no-op if it's already extracted) and returns the absolute path of the requested page file. That path is then handed to `sharp` like a folder page. Subsequent picks from the same chapter reuse the cache dir; an LRU/auto-clear eviction can wipe it, in which case the next call re-extracts. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
 
 ```json
 { "saved_filename": "5_anilist.webp" }
@@ -257,12 +283,12 @@ Both return `{ data: { deleted: true } }` on success; neither is an error if the
 | GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide) |
 | GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`) |
 
-Page images are served in one of two ways depending on the parent chapter's `type`:
+Page images are served via `res.sendFile` in both cases:
 
-- **Folder chapters** — `res.sendFile(path)` against the absolute filesystem path stored on the page row. Express handles `ETag`, `Last-Modified`, and conditional 304 responses.
-- **CBZ chapters** — `yauzl` opens the archive, locates the entry named by `pages.path`, and pipes the decompressed stream through to the response. No files are extracted to disk. `Cache-Control: public, max-age=86400` is set explicitly because `sendFile`'s automatic cache headers don't apply.
+- **Folder chapters** — `res.sendFile(pages.path)` against the absolute filesystem path stored on the page row. Express handles `ETag`, `Last-Modified`, and conditional 304 responses.
+- **CBZ chapters** — `cbzCache.ensureChapterExtracted(chapterId, chapterPath)` is called first to make sure the archive's per-chapter cache directory under `CBZ_CACHE_DIR/<chapterId>_<mtimeFloor>/` exists; if the cache was evicted since the chapter was opened it re-extracts on the fly. Then `res.sendFile(<dir>/<pages.path>)` serves the page like a plain folder image. `Cache-Control: max-age=86400` is set on both branches via `sendFile`'s `maxAge` option, plus standard ETag / Last-Modified.
 
-`width` and `height` in `/api/chapters/:id/pages` are populated for every page. Folder-chapter pages get them at scan time; CBZ-chapter pages start out null (dimension fetching is skipped during the scan to avoid decompressing every entry) and the route then populates them lazily on the first open of each chapter — see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching). The first open of a CBZ chapter therefore briefly waits while every entry is read through `sharp.metadata()`; subsequent opens read the persisted values and respond immediately.
+`width` and `height` in `/api/chapters/:id/pages` are populated for every page. Folder-chapter pages get them at scan time; CBZ-chapter pages start out null (dimension fetching is skipped during the scan to avoid decompressing every entry) and the route then populates them lazily on the first open of each chapter — see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching). The first open of a CBZ chapter therefore briefly waits while it is fully extracted to the cache directory and every extracted file is read through `sharp.metadata()`; subsequent opens hit the cache and respond from the persisted page rows.
 
 `is_wide` is computed at serve time from the stored `width`/`height` and is `true` only when the page is a true double-page spread — its width is ≥ 1.5× the median page width across the chapter. This catches pages drawn at twice the normal width (so the reader can render them solo in Double Page (Manga) mode) without flagging mildly-landscape pages. It is `null` only when dimensions are still unknown (e.g. an unreadable CBZ entry).
 
@@ -521,7 +547,7 @@ The shared cleaner lives in [server/src/metadata/anilist.js](../server/src/metad
 
 This adaptive pacing also drives the per-manga `POST /api/libraries/:id/export-metadata` route's AniList re-fetch step.
 
-**Adult content** — AniList queries no longer pass `isAdult: false`, so adult titles are returned alongside SFW results (matching what the on-disk library scanner already saw). MyAnimeList's `/manga` endpoint now sends `nsfw=true`, opting into the gray and black NSFW grades (default would silently filter them out).
+**Adult content** — Single-manga AniList search/refresh/apply queries do **not** pass `isAdult`, so AniList returns both adult and SFW titles together (matching what the library scanner already indexed on disk). The bulk-by-title AniList batch path (`fetchBatchFromAniList`) currently does send `isAdult: false` per alias, so the bulk title-search phase will only match SFW results — pre-linked manga (the refresh-by-ID phase) and per-manga manual searches are unaffected. MyAnimeList's `/manga` endpoint sends `nsfw=true`, opting into the gray and black NSFW grades (default would silently filter them out).
 
 **Cover promotion** — driven by the same display priority. A source's cover is always downloaded into its dedicated column (`anilist_cover`, `mal_cover`) on a successful fetch, so the Thumbnail Picker can offer it later. The active `cover_image` is only swapped when the incoming source becomes the new display source, which means: AniList replaces MAL/none/doujinshi covers, MAL replaces only doujinshi/none, MAL never overwrites an AniList cover or a local-displayed manga's cover.
 
@@ -688,7 +714,8 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/manga/:id/optimize` | Convert chapter folders to CBZ / standardize filenames |
+| POST | `/api/manga/:id/optimize` | Convert chapter folders to CBZ, optionally repack `.7z` archives via the system 7-Zip binary, and standardise chapter names. Triggers a `scanMangaDirectory` re-scan when finished. |
+| POST | `/api/libraries/:id/bulk-optimize` | Run the same optimisation across every manga in the library. Responds immediately; the work runs in the background. Used by the **Bulk Optimize** button in Settings → Libraries. |
 
 ---
 

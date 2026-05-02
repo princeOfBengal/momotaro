@@ -165,7 +165,7 @@ Page dimensions (width/height) are read with `sharp` so the reader can detect wi
 
 **CBZ chapters skip dimension fetching at scan time.** Reading dimensions for a page inside a CBZ would require decompressing the entry, which is exactly what the streaming change is meant to avoid. Rows for CBZ pages are inserted with `width` and `height` set to `NULL`.
 
-Dimensions for CBZ pages are then filled in lazily by the API the first time the chapter is opened. `GET /api/chapters/:id/pages` ([server/src/routes/pages.js](../server/src/routes/pages.js)) detects any rows with null width/height for a CBZ chapter, decompresses each entry through `sharp.metadata()` at concurrency 4, and persists the results back into the `pages` table inside a single transaction. Every subsequent open of the same chapter hits the cached values, so the cost is paid once per CBZ chapter. This is what lets the **Double Page (Manga)** layout detect true double-page spreads inside CBZ archives — without dimensions the reader can't tell a wide spread from a normal page, and would pair them with the next page instead of rendering them solo.
+Dimensions for CBZ pages are filled in the first time the chapter is opened, on the same code path that extracts the archive. `GET /api/chapters/:id/pages` ([server/src/routes/pages.js](../server/src/routes/pages.js)) calls `cbzCache.ensureChapterExtracted`; on a fresh extraction (or whenever the existing rows don't match the cache directory) `rebuildCbzPageRows` deletes and re-inserts every row for the chapter — `sharp.metadata()` runs at concurrency 4 against the *already-extracted* on-disk files (no in-memory zip streaming), and the results are persisted in a single transaction. Every subsequent open of the same chapter hits the cached pages rows, so the cost is paid once per CBZ chapter unless the archive's mtime changes (a new extraction directory) or its rows go out of sync with the cache contents. This is what lets the **Double Page (Manga)** layout detect true double-page spreads inside CBZ archives — without dimensions the reader can't tell a wide spread from a normal page, and would pair them with the next page instead of rendering them solo.
 
 Folder-chapter pages continue to have their dimensions indexed during the scan — reading a few KB of image header per file is cheap and local.
 
@@ -220,8 +220,8 @@ Before matching, the parser:
 
 CBZ files are read via `yauzl` in two modes:
 
-1. **At scan time** — `listCbzEntries(cbzPath)` opens the archive, walks the central directory, and returns one entry per image file inside. No compressed data is read, no file is written. For a 100 MB CBZ this is a handful of KB of disk I/O.
-2. **At serve time** — requested entries are extracted to a bounded on-disk cache on first hit (see [CBZ Serve Cache](#cbz-serve-cache) below) and sent via `res.sendFile` on subsequent hits. Dimension fetching for the reader's double-page detection still uses `openCbzEntryStream` (streams without extracting).
+1. **At scan time** — `listCbzEntries(cbzPath)` opens the archive, walks the central directory, and returns one entry per image file inside. No compressed data is read, no file is written. For a 100 MB CBZ this is a handful of KB of disk I/O. The bounded LRU described below caches the parsed central directory so repeat scans don't re-walk it.
+2. **At serve time** — the entire chapter is extracted into a bounded on-disk cache on first hit (see [CBZ Serve Cache](#cbz-serve-cache) below) and every subsequent page request is a plain `res.sendFile` from that directory. Dimension fetching for the reader's double-page detection reads `sharp.metadata()` from the extracted on-disk files (not via `yauzl` streaming) at the time of the first chapter-open extraction.
 
 ### Central-Directory Cache
 
@@ -238,12 +238,12 @@ The first read of a given archive pays the parse cost once; every subsequent pag
 
 ### How page rows represent archive entries
 
-For CBZ chapters, the `pages.path` column stores the **ZIP entry name** (e.g. `001.jpg` inside the archive) rather than a filesystem path. The serving route joins `pages` to `chapters` so it can see `chapters.type` and `chapters.path` (the CBZ file on disk):
+For CBZ chapters, the `pages.path` column stores a **per-chapter cache filename** rather than a filesystem path. The serving route joins `pages` to `chapters` so it can see `chapters.type` and `chapters.path` (the CBZ file on disk):
 
-- `chapters.type = 'folder'` → `pages.path` is absolute; `res.sendFile(path)`
-- `chapters.type = 'cbz'` → `pages.path` is the entry name; stream it from `chapters.path`
+- `chapters.type = 'folder'` → `pages.path` is absolute; `res.sendFile(pages.path)`.
+- `chapters.type = 'cbz'` → ensure the chapter is extracted to `CBZ_CACHE_DIR/<chapterId>_<mtimeFloor>/`, then `res.sendFile(<dir>/<pages.path>)`.
 
-Natural sort is applied to entry names during scanning, so `pages.page_index` matches the reader's expected order regardless of how the archive was authored.
+Newly-scanned CBZ chapters initially store the **ZIP entry name** in `pages.path` (the scan only reads the central directory; nothing is extracted yet). The first time `GET /api/chapters/:id/pages` runs against the chapter it triggers a full extraction, then `rebuildCbzPageRows` deletes the existing rows and re-inserts them with `pages.path` set to the extracted cache filename (`0001.jpg`, `0002.jpg`, …). Natural sort is applied at extraction time on the basenames of the archive entries, so `pages.page_index` matches the reader's expected order regardless of how the archive was authored or whether entries lived in subdirectories inside the zip.
 
 ## CBZ Serve Cache
 

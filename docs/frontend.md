@@ -111,7 +111,8 @@ Selecting a library or reading list in the sidebar navigates the user to `/libra
   6. **Previously Used** — up to 20 entries from `thumbnail_history`, most recent first
   7. **Chapter Covers** — the first page (`page_index = 0`) of every chapter
   Selecting an option calls either `POST /api/manga/:id/set-thumbnail` with `{ saved_filename }` (for saved files) or `{ page_id }` (for chapter first pages). **Either form sets `manga.cover_user_set = 1`**, which sticks the user's choice against subsequent metadata fetches — only the **Reset Thumbnails** action (Settings → Database) and the post-scan reinforcement pass clear the flag and re-align the cover to the priority order. For CBZ-backed chapters, the server streams the single ZIP entry out of the archive and resizes it with `sharp` — the archive is never extracted to disk, so this works even at library sizes of several TB. On success, the active cover image is cache-busted by updating a `coverBust` timestamp appended to the thumbnail URL.
-- **Mobile Settings dropdown** — on screens ≤ 640 px the individual *Metadata*, *Optimize*, and *More Info* buttons are replaced by a single **Settings ▾** dropdown (class `detail-settings-wrap detail-mobile-only`). Tapping an item closes the dropdown then opens the relevant modal. On desktop the three buttons remain visible individually (class `detail-desktop-only`).
+- **Mobile Settings dropdown** — on screens ≤ 640 px the individual *Metadata*, *Optimize*, and *More Info* buttons are replaced by a single **Settings** dropdown (class `detail-settings-wrap detail-mobile-only`). Tapping an item closes the dropdown then opens the relevant modal. On desktop the three buttons remain visible individually (class `detail-desktop-only`).
+- **Mobile action-row icons** — on screens ≤ 640 px the four buttons in `.detail-actions` (*Continue Reading*, *Reset Progress*, *Settings*, *Lists*) collapse to icon-only via the `.detail-action-btn` / `.detail-action-icon` / `.detail-action-label` triple: each button renders both an inline SVG (double-chevron, circular-arrow refresh, gear cog, three-line list) and a `<span class="detail-action-label">` with the original text. Default CSS hides the icon and shows the label; the `≤ 640 px` media query inverts that, also hides the dropdown chevrons (`.rl-chevron`, `.detail-settings-chevron`), and tightens padding so all four buttons fit in one row. The Lists count badge (`.detail-action-count`, e.g. `· 2`) stays visible alongside the icon. `aria-label` and `title` attributes carry the accessible name regardless of which mode is active.
 
 ### Reader (`src/pages/Reader.jsx`)
 
@@ -366,8 +367,8 @@ The app is fully responsive and designed to work on phones and small screens. No
 
 ### MangaDetail page (≤ 640px / ≤ 600px)
 
-- Action buttons stretch to fill the full row width.
-- *Metadata*, *Optimize*, and *More Info* are consolidated into a **Settings ▾** dropdown to save row space (see MangaDetail page description above).
+- Action buttons stretch to fill the full row width and switch to **icon-only** rendering — *Continue Reading* (double chevron), *Reset Progress* (circular refresh arrow), *Settings* (gear cog), and *Lists* (three-line list, with the count badge preserved). Dropdown chevrons are hidden in this mode. See *Mobile action-row icons* above for the class wiring.
+- *Metadata*, *Optimize*, and *More Info* are consolidated into the **Settings** dropdown to save row space (see MangaDetail page description above).
 - The metadata/search **modals become bottom sheets** at `≤ 600px`: `align-items: flex-end`, rounded top corners only, `max-height: 88vh`.
 
 ### Reader (≤ 600px)

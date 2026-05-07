@@ -1,0 +1,23 @@
+.virt-grid-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.virt-grid-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+  /* grid-template-columns + column-gap are set inline based on the measured
+     column count and the cascaded --col-gap CSS variable. */
+}
+
+.virt-grid-cell {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  /* min-width: 0 lets a long title's flex/grid descendants shrink instead of
+     forcing the row to overflow horizontally. */
+  min-width: 0;
+}

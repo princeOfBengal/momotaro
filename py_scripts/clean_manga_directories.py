@@ -1,189 +1,262 @@
-import os
 import re
 import csv
 import shutil
 import hashlib
+import difflib
+import argparse
+import datetime
 from pathlib import Path
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from PIL import Image
+from tqdm import tqdm
 
 # ---------------------------
-# Helpers
+# CONFIG
+# ---------------------------
+
+SIMILARITY_THRESHOLD = 0.92
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_WORKERS = None  # None = auto
+
+# ---------------------------
+# NORMALIZATION
 # ---------------------------
 
 def normalize_name(name: str) -> str:
     name = re.sub(r"\(.*?\)", "", name)
     name = re.sub(r"\[.*?\]", "", name)
+    name = re.sub(r"[-–—]+", " ", name)
+    name = re.sub(r"[^\w\s]", "", name)
     name = re.sub(r"\s+", " ", name)
     return name.strip().lower()
 
+# ---------------------------
+# FUZZY GROUPING
+# ---------------------------
 
-def hash_file(path: Path, chunk_size=8192):
-    """
-    Compute SHA-256 hash of a file.
-    """
-    hasher = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(chunk_size):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+def group_folders(base_path: Path):
+    folders = [f for f in base_path.iterdir() if f.is_dir()]
+    normalized = [(f, normalize_name(f.name)) for f in folders]
 
+    groups = []
+    used = set()
 
-def build_hash_map(folder: Path):
-    """
-    Build hash map of files in target folder.
-    Returns: {hash: Path}
-    """
-    hash_map = {}
+    for i, (fa, na) in enumerate(normalized):
+        if i in used:
+            continue
 
-    for item in folder.iterdir():
-        if item.is_file():
-            try:
-                file_hash = hash_file(item)
-                hash_map[file_hash] = item
-            except Exception as e:
-                print(f"Error hashing {item}: {e}")
+        group = [fa]
+        used.add(i)
 
-    return hash_map
+        for j, (fb, nb) in enumerate(normalized):
+            if j in used:
+                continue
 
+            sim = difflib.SequenceMatcher(None, na, nb).ratio()
+            if sim >= SIMILARITY_THRESHOLD:
+                group.append(fb)
+                used.add(j)
 
-def get_folder_groups(base_path: Path):
-    groups = {}
-
-    for item in base_path.iterdir():
-        if item.is_dir():
-            norm = normalize_name(item.name)
-            groups.setdefault(norm, []).append(item)
+        groups.append(group)
 
     return groups
 
+# ---------------------------
+# HASHING (PARALLEL)
+# ---------------------------
+
+def hash_worker(path_str):
+    try:
+        h = hashlib.sha256()
+        with open(path_str, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return (path_str, h.hexdigest(), None)
+    except Exception as e:
+        return (path_str, None, str(e))
+
+def parallel_hash(paths, desc="Hashing"):
+    results = {}
+
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = [ex.submit(hash_worker, str(p)) for p in paths]
+
+        for f in tqdm(as_completed(futures), total=len(futures), desc=desc):
+            path_str, h, err = f.result()
+            p = Path(path_str)
+
+            if err:
+                print(f"Hash error: {p} -> {err}")
+                continue
+
+            results[p] = h
+
+    return results
 
 # ---------------------------
-# Phase 1: Propose
+# IMAGE UTILS
 # ---------------------------
 
-def propose_merges(base_path: str, output_csv: str):
+def is_image(p: Path):
+    return p.suffix.lower() in IMAGE_EXTENSIONS
+
+def resolution(p: Path):
+    try:
+        with Image.open(p) as img:
+            return img.width * img.height
+    except:
+        return 0
+
+# ---------------------------
+# LOGGING
+# ---------------------------
+
+def log(msg, f):
+    print(msg)
+    f.write(msg + "\n")
+
+# ---------------------------
+# PROPOSE
+# ---------------------------
+
+def propose(base_path, csv_path):
     base = Path(base_path)
-    groups = get_folder_groups(base)
+    groups = group_folders(base)
 
     proposals = []
 
-    for norm_name, folders in groups.items():
-        if len(folders) < 2:
+    for g in groups:
+        if len(g) < 2:
             continue
 
-        folders_sorted = sorted(folders, key=lambda x: len(x.name))
-        target = folders_sorted[0]
+        g_sorted = sorted(g, key=lambda x: len(x.name))
+        target = g_sorted[0]
 
-        for source in folders_sorted[1:]:
+        for src in g_sorted[1:]:
             proposals.append({
                 "action": "merge",
-                "source_folder": str(source),
+                "source_folder": str(src),
                 "target_folder": str(target),
-                "normalized_name": norm_name,
-                "source_name": source.name,
+                "source_name": src.name,
                 "target_name": target.name
             })
 
-    with open(output_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "action", "source_folder", "target_folder",
-            "normalized_name", "source_name", "target_name"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=proposals[0].keys() if proposals else [
+            "action","source_folder","target_folder","source_name","target_name"
         ])
         writer.writeheader()
         writer.writerows(proposals)
 
-    print(f"Proposals written to: {output_csv}")
-    print(f"Total proposals: {len(proposals)}")
-
+    print(f"Proposals written: {csv_path}")
+    print(f"Total: {len(proposals)}")
 
 # ---------------------------
-# Phase 2: Execute with Dedup
+# EXECUTE
 # ---------------------------
 
-def execute_merges_from_csv(csv_file: str):
-    with open(csv_file, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+def execute(csv_path, log_path):
+    stats = defaultdict(int)
 
-        for row in reader:
-            if row.get("action") != "merge":
-                continue
+    with open(log_path, "w", encoding="utf-8") as logfile:
+        log(f"=== START {datetime.datetime.now()} ===", logfile)
 
-            source = Path(row["source_folder"])
-            target = Path(row["target_folder"])
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
 
-            if not source.exists():
-                print(f"SKIP: Source missing -> {source}")
-                continue
-
-            if not target.exists():
-                print(f"SKIP: Target missing -> {target}")
-                continue
-
-            print(f"\nMerging: {source} -> {target}")
-
-            # Build hash map of target folder
-            target_hashes = build_hash_map(target)
-
-            for item in source.iterdir():
-                if not item.is_file():
+            for row in reader:
+                if row["action"] != "merge":
                     continue
+
+                src = Path(row["source_folder"])
+                dst = Path(row["target_folder"])
+
+                if not src.exists() or not dst.exists():
+                    log(f"SKIP missing: {src} / {dst}", logfile)
+                    stats["skipped"] += 1
+                    continue
+
+                log(f"\nMERGE: {src} -> {dst}", logfile)
+                stats["merges"] += 1
+
+                target_files = [f for f in dst.iterdir() if f.is_file()]
+                target_hashes = parallel_hash(target_files, desc="Hashing target")
+                hash_map = {h: p for p, h in target_hashes.items()}
+
+                source_files = [f for f in src.iterdir() if f.is_file()]
+                source_hashes = parallel_hash(source_files, desc="Hashing source")
+
+                for item in tqdm(source_files, desc="Processing files"):
+                    h = source_hashes.get(item)
+                    if not h:
+                        stats["errors"] += 1
+                        continue
+
+                    # Duplicate
+                    if h in hash_map:
+                        log(f"DELETE duplicate: {item}", logfile)
+                        item.unlink()
+                        stats["duplicates"] += 1
+                        continue
+
+                    dest = dst / item.name
+
+                    # Conflict
+                    if dest.exists():
+                        if is_image(item) and is_image(dest):
+                            src_res = resolution(item)
+                            dst_res = resolution(dest)
+
+                            if src_res > dst_res:
+                                log(f"REPLACE lower-res: {dest}", logfile)
+                                dest.unlink()
+                                shutil.move(item, dest)
+                                stats["replaced"] += 1
+                            else:
+                                log(f"DROP lower-res: {item}", logfile)
+                                item.unlink()
+                                stats["dropped"] += 1
+                        else:
+                            new_dest = dst / f"{item.stem}_merge{item.suffix}"
+                            log(f"RENAME: {item} -> {new_dest}", logfile)
+                            shutil.move(item, new_dest)
+                            stats["renamed"] += 1
+                    else:
+                        shutil.move(item, dest)
+                        stats["moved"] += 1
 
                 try:
-                    src_hash = hash_file(item)
-                except Exception as e:
-                    print(f"  ERROR hashing {item}: {e}")
-                    continue
-
-                # Case 1: Exact duplicate (same content)
-                if src_hash in target_hashes:
-                    print(f"  DELETE duplicate: {item}")
-                    item.unlink()
-                    continue
-
-                dest = target / item.name
-
-                # Case 2: Same name but different content
-                if dest.exists():
-                    new_name = f"{item.stem}_from_merge{item.suffix}"
-                    dest = target / new_name
-                    print(f"  RENAME + MOVE: {item} -> {dest}")
-                else:
-                    print(f"  MOVE: {item} -> {dest}")
-
-                shutil.move(str(item), str(dest))
-
-                # Update hash map after move
-                try:
-                    new_hash = hash_file(dest)
-                    target_hashes[new_hash] = dest
+                    src.rmdir()
+                    log(f"REMOVED: {src}", logfile)
+                    stats["folders_removed"] += 1
                 except:
-                    pass
+                    log(f"NOT EMPTY: {src}", logfile)
 
-            # Remove source folder if empty
-            try:
-                source.rmdir()
-                print(f"  Removed folder: {source}")
-            except OSError:
-                print(f"  Could not remove (not empty): {source}")
+        log("\n=== SUMMARY ===", logfile)
+        for k, v in stats.items():
+            log(f"{k}: {v}", logfile)
 
+        log(f"=== END {datetime.datetime.now()} ===", logfile)
 
 # ---------------------------
 # CLI
 # ---------------------------
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser()
+
     parser.add_argument("mode", choices=["propose", "execute"])
-    parser.add_argument("--path", help="Base folder path")
+    parser.add_argument("--path")
     parser.add_argument("--csv", required=True)
+    parser.add_argument("--log", default="merge_log.txt")
 
     args = parser.parse_args()
 
     if args.mode == "propose":
         if not args.path:
-            raise ValueError("Provide --path for propose mode")
-        propose_merges(args.path, args.csv)
+            raise ValueError("Need --path")
+        propose(args.path, args.csv)
 
     elif args.mode == "execute":
-        execute_merges_from_csv(args.csv)
+        execute(args.csv, args.log)

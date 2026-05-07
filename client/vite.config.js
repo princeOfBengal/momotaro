@@ -50,6 +50,29 @@ export default defineConfig({
         clientsClaim: true,
 
         runtimeCaching: [
+          // ── 0. Search requests — NetworkOnly, NEVER cached ────────────────────
+          // Every keystroke produces a unique `?search=…` URL. Letting Rule 4
+          // catch them stuffed each one into the `browse-data` SWR cache
+          // (capped at 500 entries via Workbox's ExpirationPlugin, which
+          // tracks timestamps in IndexedDB). On mobile Chromium each cache
+          // hit / put / LRU-eviction round-trips IndexedDB on the SW IO
+          // thread. With repeated searching, that work stacked up and
+          // stalled the SW just enough that the page appeared frozen — the
+          // freeze the user reported when searching inside a library that
+          // had already populated the cache through normal browsing.
+          //
+          // NetworkOnly means the SW just forwards the request — no cache
+          // read, no cache write, no IndexedDB activity. The server also
+          // sends `Cache-Control: no-store` on search responses so the
+          // browser's HTTP cache doesn't accumulate them either.
+          {
+            urlPattern: ({ url }) => {
+              if (!url.pathname.startsWith('/api/')) return false;
+              return url.searchParams.has('search');
+            },
+            handler: 'NetworkOnly',
+          },
+
           // ── 1. Page images ────────────────────────────────────────────────────
           // Content is indexed by numeric ID and never mutated.  Safe to cache
           // for a very long time.
@@ -103,13 +126,21 @@ export default defineConfig({
           // These change only on scan or metadata update, so showing cached data
           // instantly and refreshing in the background (StaleWhileRevalidate)
           // gives the best perceived performance without sacrificing freshness.
+          //
+          // maxEntries dropped from 500 → 100. The previous cap was sized
+          // assuming each entry was a stable URL, but with search URLs no
+          // longer landing here (Rule 0) the working set is much smaller —
+          // a hundred unique browse / detail / chapter URLs covers the
+          // common case. Smaller cap = less IndexedDB activity per fetch
+          // on mobile, which is what surfaced as a freeze when the SW had
+          // to maintain LRU bookkeeping over a busy cache.
           {
             urlPattern: /\/api\/(library|libraries|manga|chapters|reading-lists|stats|home|genres)/,
             handler: 'StaleWhileRevalidate',
             options: {
               cacheName: 'browse-data',
               expiration: {
-                maxEntries: 500,
+                maxEntries: 100,
                 maxAgeSeconds: 30 * 24 * 60 * 60, // 30 days
               },
               cacheableResponse: { statuses: [0, 200] },

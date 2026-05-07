@@ -1055,6 +1055,7 @@ function ReadingSection() {
   const [grayscale, setGrayscale]                 = useState(() => localStorage.getItem('reader_grayscale') === 'true');
   const [scaleType, setScaleType]                 = useState(() => localStorage.getItem('reader_scaleType') || 'screen');
   const [pageLayout, setPageLayout]               = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
+  const [prefetchPages, setPrefetchPages]         = useState(() => localStorage.getItem('reader_prefetchPages') !== 'false');
   const [resetHintsMsg, setResetHintsMsg]         = useState(null);
 
   useEffect(() => { localStorage.setItem('reader_readingMode',  readingMode); },         [readingMode]);
@@ -1068,6 +1069,7 @@ function ReadingSection() {
   useEffect(() => { localStorage.setItem('reader_grayscale',    grayscale); },           [grayscale]);
   useEffect(() => { localStorage.setItem('reader_scaleType',    scaleType); },           [scaleType]);
   useEffect(() => { localStorage.setItem('reader_pageLayout',   pageLayout); },          [pageLayout]);
+  useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
 
   // One-time cleanup of the legacy boolean key.
   useEffect(() => {
@@ -1198,6 +1200,12 @@ function ReadingSection() {
             label="Always Full Screen"
             value={alwaysFullscreen}
             onChange={setAlwaysFullscreen}
+          />
+          <ToggleRow
+            label="Preload upcoming pages"
+            desc="Fetch the next pages in the background so taps feel instant. Skipped automatically on metered (Save-Data) connections."
+            value={prefetchPages}
+            onChange={setPrefetchPages}
           />
 
           <div className="rs-divider" />

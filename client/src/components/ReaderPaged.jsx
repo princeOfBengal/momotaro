@@ -70,13 +70,6 @@ export default function ReaderPaged({
     }
   }, [isZoomed]);
 
-  // ── Preload ────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    [currentPage + 1, currentPage + 2].forEach(i => {
-      if (i < pages.length) { const img = new Image(); img.src = api.pageImageUrl(pages[i].id); }
-    });
-  }, [currentPage, pages]);
-
   // ── Helpers ────────────────────────────────────────────────────────────────────
 
   // Call setPointerCapture on the real DOM node, not React's synthetic currentTarget.

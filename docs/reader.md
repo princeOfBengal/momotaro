@@ -68,8 +68,37 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_scaleType` | `screen` |
 | `reader_pageLayout` | `single` |
 | `reader_orientation` | `ltr` |
+| `reader_prefetchPages` | `true` (any value other than the literal string `false` is treated as on — see [Page Prefetch](#page-prefetch)) |
 
 **Legacy migration**: the previous boolean key `reader_animTrans` is translated on first read (`true` → `'slide'`, `false` → `'off'`) and then removed from `localStorage`. New installs default to `'slide'`.
+
+## Page Prefetch
+
+Implemented in [client/src/hooks/useReaderPrefetch.js](../client/src/hooks/useReaderPrefetch.js). The hook is invoked from `Reader.jsx` and is the **only** place page-image prefetching happens — `ReaderPaged.jsx` is purely a renderer + gesture surface. Toggle: `reader_prefetchPages` (default on), exposed in both the in-reader settings panel and Settings → Reading Settings.
+
+**Layout-aware target selection.** The set of pages prefetched on each `currentPage` change depends on `pageLayout` and (for double-manga) the `mangaSpreads` array computed in `Reader.jsx`:
+
+| Layout | Targets |
+| --- | --- |
+| `single` | `currentPage + 1`, `+ 2`, plus `- 1` for cheap back-navigation |
+| `double` | `currentPage + 2, + 3` (next visible pair), `+ 4, + 5` (the pair after), plus `- 2` |
+| `double-manga` | flatten of `mangaSpreads[spreadIdx + 1]`, `mangaSpreads[spreadIdx + 2]`, `mangaSpreads[spreadIdx - 1]` |
+
+The double-manga branch is what makes the spread invariants survive prefetch: because `mangaSpreads` already encodes "page 0 solo, wide pages solo, otherwise greedily paired", the targets the hook hands to `new Image()` always match what the renderer is about to paint. A wide page coming up is fetched once (solo); the page that *would* have been its naïve `+1` neighbour is *not* fetched alongside it, because it is not going to render alongside it.
+
+Currently-displayed pages (`currentPage`, `page2Index`) are excluded from targets, so a layout swap mid-chapter does not double-fetch the on-screen image.
+
+**De-duplication.** A `Set<string>` of issued URLs lives in a hook-scoped ref. Each loop skips URLs already seen, so rapid forward/backward paging never re-issues an in-flight `new Image()` for the same page. The set is reset when `chapterId` changes and trimmed to the most recent ~200 entries to bound memory.
+
+**Next-chapter warm-up.** When `currentPage >= pages.length - 3`, the hook fetches `api.getPages(nextChapterId)` once per chapter transition (also gated by a ref-set) and prefetches the first two pages of the result. This populates the SW's `chapter-pages-meta` cache (CacheFirst, 30-day TTL) at the same time, so the cold-start cost of opening the next chapter is paid in the background rather than on the user's tap.
+
+**Skipped when:**
+
+- `enabled` is false (toggle off in settings)
+- `isPaged` is false — webtoon / vertical-scroll already lazy-loads via `IntersectionObserver` in `ReaderScroll`, so the hook does not duplicate that work
+- `navigator.connection.saveData === true` or `effectiveType` is `'slow-2g'`/`'2g'` — Save-Data is honoured automatically without a user toggle change
+
+**Interaction with the service worker.** Every prefetch is a normal `<img>` GET, so it flows through the SW's `page-images` CacheFirst rule and populates the same cache the on-screen `<img>` will read on the next page turn. There are no SW changes; the win is purely in the request being initiated earlier.
 
 ## Page-Turn Animations
 

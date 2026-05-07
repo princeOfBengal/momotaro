@@ -2,7 +2,7 @@ import React from 'react';
 import { api } from '../api/client';
 import './MangaCard.css';
 
-export default function MangaCard({ manga }) {
+function MangaCardImpl({ manga }) {
   const coverUrl = manga.cover_url || api.thumbnailUrl(manga.cover_image);
 
   const statusColors = {
@@ -54,3 +54,20 @@ export default function MangaCard({ manga }) {
     </div>
   );
 }
+
+const MangaCard = React.memo(MangaCardImpl, (prev, next) => {
+  const a = prev.manga;
+  const b = next.manga;
+  if (a === b) return true;
+  return (
+    a.id === b.id
+    && a.title === b.title
+    && a.year === b.year
+    && a.score === b.score
+    && a.status === b.status
+    && a.cover_image === b.cover_image
+    && a.cover_url === b.cover_url
+  );
+});
+
+export default MangaCard;

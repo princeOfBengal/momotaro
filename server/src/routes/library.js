@@ -252,7 +252,18 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
 
   // Browser HTTP cache backs up the SW StaleWhileRevalidate. 15 s window
   // matches the in-process cache TTL below.
-  res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+  //
+  // Search responses are explicitly NOT cached anywhere on the device:
+  // every keystroke produces a unique URL, and accumulating them in the
+  // browser HTTP cache (in addition to the SW) put enough pressure on
+  // mobile storage to noticeably stall subsequent fetches. The SW also
+  // has a NetworkOnly rule for `?search=` that bypasses its runtime
+  // cache, but the server-side header makes the contract explicit.
+  if (search) {
+    res.set('Cache-Control', 'no-store');
+  } else {
+    res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+  }
 
   const cacheKey = `list:${list.id}|s:${search || ''}|o:${sort}`;
   const cached = getListingCache(_readingListMangaCache, cacheKey);
@@ -366,7 +377,18 @@ router.get('/library', asyncWrapper(async (req, res) => {
 
   // Browser HTTP cache backs up the SW StaleWhileRevalidate for non-PWA
   // tabs (incognito, fresh installs). Aligned with the in-process cache TTL.
-  res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+  //
+  // Search responses are NOT cached on the device — every keystroke is a
+  // unique URL, and caching them flooded both the SW's `browse-data` LRU
+  // and the browser HTTP cache, which on mobile Chromium showed up as a
+  // freeze during search inside a particular library. The SW's NetworkOnly
+  // rule for `?search=` already bypasses runtime caching there; this
+  // header keeps the browser HTTP cache aligned.
+  if (search) {
+    res.set('Cache-Control', 'no-store');
+  } else {
+    res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+  }
 
   // In-process cache: keyed by every parameter that affects the result. 30 s
   // TTL matches /api/home / /api/stats — scans surface within that window.

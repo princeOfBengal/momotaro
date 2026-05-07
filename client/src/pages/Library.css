@@ -1,5 +1,12 @@
 .library-page {
+  /* `100dvh` tracks the dynamic viewport height — it shrinks when the URL
+     bar is shown and when the on-screen keyboard opens on Android Chromium.
+     `100vh` is kept as a fallback for browsers without dynamic-viewport
+     support; it stays at the *largest* viewport height (URL bar collapsed),
+     so on focus + keyboard appearance the body would otherwise be taller
+     than the visual viewport, triggering scroll-into-view cascades. */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -214,7 +221,16 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 14px;
+  /* iOS Safari auto-zooms the page when an <input> with font-size < 16px is
+     focused. On Library that triggers a full-page reflow over thousands of
+     mounted MangaCards which can lock the main thread long enough for iOS to
+     mark the page unresponsive (the freeze the user reported when tapping the
+     search bar inside a particular library). 16px disables the zoom. The
+     visual scale is unchanged by clamping the rendered text via -webkit-text-
+     size-adjust on the descendants, but for an <input> the rendered size is
+     intentionally 16px on mobile — the pixel difference is barely visible and
+     correctness wins over a 2px style preference. */
+  font-size: 16px;
   outline: none;
 }
 .library-search:focus { border-color: var(--accent); }
@@ -236,6 +252,12 @@
   padding: 24px;
   min-width: 0;
   overflow-y: auto;
+  /* Single source of truth for the manga grid's column sizing. The
+     virtualizer reads these via getComputedStyle to compute its column count
+     using the same `auto-fill, minmax(...)` algorithm the CSS grid would, and
+     `.manga-grid` below references them so JS and CSS never drift. */
+  --col-min: 160px;
+  --col-gap: 20px;
 }
 
 .library-count {
@@ -270,8 +292,31 @@
 
 .manga-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(var(--col-min, 160px), 1fr));
+  gap: var(--col-gap, 20px);
+}
+
+/* Infinite-scroll sentinel + status row, rendered below the grid while
+   pagination is engaged. The IntersectionObserver in Library.jsx watches
+   this element and triggers the next page when it crosses into view. */
+.library-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  padding: 24px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.library-load-more-spinner {
+  width: 24px;
+  height: 24px;
+  border-width: 2px;
+}
+
+.library-load-more-hint {
+  opacity: 0.7;
 }
 
 .library-empty {
@@ -310,6 +355,20 @@
 .lib-hamburger:hover { background: var(--bg-hover); }
 .lib-hamburger:active { background: var(--bg-hover); }
 
+/* ── Mobile-only search row ──
+   Hidden on desktop; on mobile this lifts the search input out of the sticky
+   navbar so iOS Safari doesn't have to relayout the sticky context + heavy
+   grid below when the soft keyboard appears, which previously froze the page. */
+.lib-mobile-search-row {
+  display: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+.lib-mobile-search-row .library-search {
+  width: 100%;
+}
+
 /* ── Mobile-only sort+scan bar ── */
 .lib-mobile-bar {
   display: none;
@@ -346,14 +405,31 @@
   /* Show hamburger */
   .lib-hamburger { display: flex; }
 
-  /* Show mobile sort+scan bar */
+  /* Show mobile search row + sort+scan bar */
+  .lib-mobile-search-row { display: block; }
   .lib-mobile-bar { display: flex; }
 
   /* Show backdrop when drawer is open */
   .library-drawer-backdrop { display: block; }
   .library-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
 
-  /* Sidebar becomes a fixed slide-out drawer */
+  /* Sidebar becomes a fixed slide-out drawer.
+
+     The Browse By Genre Link added to the bottom of the sidebar pushed the
+     sidebar's content past the mobile viewport for users with several
+     libraries / reading lists, engaging the `overflow-y` scroll context on
+     this fixed element. iOS Safari has well-known issues where a fixed
+     element with an active scroll context interacts badly with the
+     keyboard-zoom and viewport-resize cascade triggered by focusing an
+     <input> elsewhere on the page — this was the second contributor to the
+     "tap search → app freezes" report.
+
+     `pointer-events: none` + `overflow: hidden` while closed make the
+     off-screen drawer fully inert: iOS won't hit-test it, the scroll
+     context stays disengaged, and nothing here participates in the
+     focus-time relayout. `.drawer-open` restores both. The transform
+     animation still drives the slide; only the inert-vs-interactive
+     distinction is new. */
   .library-sidebar {
     position: fixed;
     top: 0;
@@ -363,12 +439,17 @@
     z-index: 200;
     background: var(--bg-primary);
     border-right: 1px solid var(--border);
-    overflow-y: auto;
+    overflow: hidden;
+    pointer-events: none;
     transform: translateX(-100%);
     transition: transform 0.25s ease;
     padding-top: 0;
   }
-  .library-sidebar.drawer-open { transform: translateX(0); }
+  .library-sidebar.drawer-open {
+    transform: translateX(0);
+    overflow-y: auto;
+    pointer-events: auto;
+  }
 
   /* Show drawer header */
   .lib-drawer-header {
@@ -405,18 +486,21 @@
   }
 
   /* Grid and main adjustments */
-  .manga-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
-  .library-main { padding: 16px; }
+  .library-main {
+    padding: 16px;
+    --col-min: 130px;
+    --col-gap: 12px;
+  }
   .library-search-wrap { max-width: none; flex: 1; min-width: 0; }
 }
 
 /* ── Very small phones (≤ 420 px) ── */
 @media (max-width: 420px) {
-  .manga-grid {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 10px;
+  .library-main {
+    padding: 12px;
+    --col-min: 100px;
+    --col-gap: 10px;
   }
-  .library-main { padding: 12px; }
   /* Compact the navbar on tiny screens */
   .navbar { gap: 6px; padding: 0 12px; }
   .navbar-logo { height: 32px; }

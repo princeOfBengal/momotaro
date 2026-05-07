@@ -5,6 +5,7 @@ import ReaderPaged from '../components/ReaderPaged';
 import ReaderScroll from '../components/ReaderScroll';
 import ReaderControls from '../components/ReaderControls';
 import ReaderEdgeHints from '../components/ReaderEdgeHints';
+import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
 import './Reader.css';
 
@@ -53,6 +54,7 @@ export default function Reader() {
   const [pageLayout, setPageLayout] = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
   const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
   const [brightness, setBrightness] = useState(() => Number(localStorage.getItem('reader_brightness')) || 100);
+  const [prefetchPages, setPrefetchPages] = useState(() => localStorage.getItem('reader_prefetchPages') !== 'false');
 
   const [showControls, setShowControls] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -126,6 +128,18 @@ export default function Reader() {
     return null;
   }, [isPaged, pageLayout, currentPage, pages.length, mangaSpreads]);
 
+  useReaderPrefetch({
+    pages,
+    currentPage,
+    page2Index,
+    pageLayout,
+    mangaSpreads,
+    isPaged,
+    allChapters,
+    chapterId,
+    enabled: prefetchPages,
+  });
+
   // Persist settings
   useEffect(() => { localStorage.setItem('reader_readingMode', readingMode); }, [readingMode]);
   useEffect(() => { localStorage.setItem('reader_zoom', zoom); }, [zoom]);
@@ -148,6 +162,7 @@ export default function Reader() {
   useEffect(() => { localStorage.setItem('reader_pageLayout', pageLayout); }, [pageLayout]);
   useEffect(() => { localStorage.setItem('reader_orientation', readingOrientation); }, [readingOrientation]);
   useEffect(() => { localStorage.setItem('reader_brightness', brightness); }, [brightness]);
+  useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
 
   // Fullscreen
   useEffect(() => {
@@ -445,6 +460,7 @@ export default function Reader() {
       bgColor={bgColor}
       grayscale={grayscale}
       brightness={brightness}
+      prefetchPages={prefetchPages}
       scaleType={scaleType}
       pageLayout={pageLayout}
       showSettings={showSettings}
@@ -462,6 +478,7 @@ export default function Reader() {
       onBgColorChange={setBgColor}
       onGrayscaleChange={setGrayscale}
       onBrightnessChange={setBrightness}
+      onPrefetchPagesChange={setPrefetchPages}
       onScaleTypeChange={setScaleType}
       onPageLayoutChange={setPageLayout}
       readingOrientation={readingOrientation}

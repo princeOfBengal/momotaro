@@ -17,36 +17,61 @@ function getDeviceId() {
 }
 
 async function apiFetch(path, options = {}) {
-  const { timeoutMs = 15_000, ...fetchOptions } = options;
+  // `signal` is the caller-supplied AbortSignal (used by Library to cancel
+  // stale debounced fetches when the user keeps typing). It is composed with
+  // the internal timeout signal so either one can abort the request, and we
+  // can distinguish "user cancelled" from "timed out" in the catch.
+  //
+  // `raw: true` returns the full JSON envelope ({ data, next_cursor, ... })
+  // instead of just `data`. Used for paginated endpoints where the caller
+  // needs the cursor + has_more fields alongside the rows.
+  const { timeoutMs = 15_000, signal: userSignal, raw = false, ...fetchOptions } = options;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+  let onUserAbort = null;
+  if (userSignal) {
+    if (userSignal.aborted) {
+      controller.abort();
+    } else {
+      onUserAbort = () => controller.abort();
+      userSignal.addEventListener('abort', onUserAbort, { once: true });
+    }
+  }
+
   try {
     const resp = await fetch(`${BASE}${path}`, {
+      ...fetchOptions,
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'X-Device-ID': getDeviceId(),
         ...fetchOptions.headers,
       },
-      ...fetchOptions,
     });
     const json = await resp.json();
     if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    if (raw) return json;
     return json.data !== undefined ? json.data : json;
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error('Request timed out');
+    if (err.name === 'AbortError') {
+      // Bubble user-cancellation as an AbortError so the caller can ignore it
+      // without surfacing a misleading "Request timed out" to the UI.
+      if (userSignal?.aborted) throw err;
+      throw new Error('Request timed out');
+    }
     throw err;
   } finally {
     clearTimeout(timeout);
+    if (userSignal && onUserAbort) userSignal.removeEventListener('abort', onUserAbort);
   }
 }
 
 export const api = {
   // Library
-  getLibrary: (params = {}) => {
+  getLibrary: (params = {}, options = {}) => {
     const q = new URLSearchParams(params).toString();
-    return apiFetch(`/api/library${q ? '?' + q : ''}`);
+    return apiFetch(`/api/library${q ? '?' + q : ''}`, options);
   },
   getManga: (id) => apiFetch(`/api/manga/${id}`),
   updateManga: (id, body) =>
@@ -194,9 +219,9 @@ export const api = {
     apiFetch('/api/reading-lists', { method: 'POST', body: JSON.stringify(body) }),
   deleteReadingList: (id) =>
     apiFetch(`/api/reading-lists/${id}`, { method: 'DELETE' }),
-  getReadingListManga: (id, params = {}) => {
+  getReadingListManga: (id, params = {}, options = {}) => {
     const q = new URLSearchParams(params).toString();
-    return apiFetch(`/api/reading-lists/${id}/manga${q ? '?' + q : ''}`);
+    return apiFetch(`/api/reading-lists/${id}/manga${q ? '?' + q : ''}`, options);
   },
   addToReadingList: (listId, mangaId) =>
     apiFetch(`/api/reading-lists/${listId}/manga`, { method: 'POST', body: JSON.stringify({ manga_id: mangaId }) }),

@@ -203,6 +203,8 @@ The grid tile rendered by Library and by Home's search-results view. Reads only 
 
 **Performance hints** — the cover `<img>` carries `width={300}` / `height={450}` (matching the 2:3 aspect of generated thumbnails), `loading="lazy"`, `decoding="async"`, and `draggable={false}`. The width/height attributes are a layout hint only — CSS `width: 100%; height: 100%; object-fit: cover` still drives painted size. Together with `content-visibility: auto` on `.manga-card` (see *Library Loading & error UX* above), this keeps long grids cheap to scroll and eliminates layout shift as covers stream in.
 
+**Memoization** — the component is wrapped in `React.memo` with a custom equality check that compares only the slim row fields the card actually renders (`id`, `title`, `year`, `score`, `status`, `cover_image`, `cover_url`). Library renders the entire grid up front (potentially thousands of cards), so without memoization any sibling state change — opening a sidebar drawer, focusing the search input, sort changes, refetch settling — re-renders every card, which on mobile is heavy enough to cause a perceived freeze. The custom comparator avoids the per-render allocation footprint of the default shallow check and ignores fields that aren't part of the rendered output.
+
 ### `ReaderPaged` / `ReaderScroll` / `ReaderControls`
 
 See [reader.md](./reader.md).
@@ -376,6 +378,7 @@ The app is fully responsive and designed to work on phones and small screens. No
 - **Important**: the backdrop element is always in the DOM at `≤ 700px` but uses `opacity: 0; pointer-events: none` when closed so it never intercepts taps. Only the `.open` class restores `opacity: 1; pointer-events: auto`.
 - Manga grid columns shrink to `minmax(130px, 1fr)` (100px at `≤ 420px`).
 - A mobile-only sort bar replaces the toolbar that is hidden with `.lib-desktop-only`.
+- The **search input lives outside the sticky navbar** at this breakpoint. The desktop search-wrap inside the navbar is hidden via `.lib-desktop-only`, and a dedicated `.lib-mobile-search-row` (a non-sticky full-width row directly below the navbar, above `.lib-mobile-bar`) carries an identical `<input type="search">` bound to the same React state. Both inputs use the same `value` / `onChange`, so cross-viewport behavior is identical. Reason: with the search input *inside* the sticky navbar on mobile, focusing it spawned the iOS soft keyboard, which shrunk the visual viewport and forced iOS Safari to relayout the sticky context against a fully-rendered manga grid below — a known iOS rendering pipeline pattern that froze the page hard enough that the user had to force-quit the app. Lifting the input out of the sticky context entirely sidesteps the cascade. The mobile input also carries `enterKeyHint="search"`, `autoComplete/autoCorrect/autoCapitalize="off"`, and `spellCheck={false}` for a cleaner mobile keyboard. The Home page search input stays inside the sticky navbar at every breakpoint because Home does not render the heavy library grid at search-tap time (only ribbons), so the sticky-input + soft-keyboard cascade never reaches a layout cost that matters there.
 
 ### MangaDetail page (≤ 640px / ≤ 600px)
 

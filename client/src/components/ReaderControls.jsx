@@ -62,6 +62,7 @@ export default function ReaderControls({
   bgColor,
   grayscale,
   brightness,
+  prefetchPages,
   scaleType,
   pageLayout,
   showSettings,
@@ -79,6 +80,7 @@ export default function ReaderControls({
   onBgColorChange,
   onGrayscaleChange,
   onBrightnessChange,
+  onPrefetchPagesChange,
   onScaleTypeChange,
   onPageLayoutChange,
   readingOrientation,
@@ -329,6 +331,12 @@ export default function ReaderControls({
                   label="Always Full Screen"
                   value={alwaysFullscreen}
                   onChange={onAlwaysFullscreenChange}
+                />
+                <ToggleSetting
+                  label="Preload upcoming pages"
+                  desc="Fetch the next pages in the background so taps feel instant"
+                  value={prefetchPages}
+                  onChange={onPrefetchPagesChange}
                 />
 
                 <button

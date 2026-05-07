@@ -121,10 +121,38 @@
   outline-offset: 2px;
 }
 
+/* Full-size variant — used by the dedicated Art Gallery page. The tile's
+   aspect-ratio is set inline from the page's stored width/height so landscape
+   spreads keep their proportions and aren't cropped. */
+.gallery-ribbon.fullsize .gallery-ribbon-tile {
+  width: auto;
+  height: 280px;
+  background: #000;
+}
+.gallery-ribbon.fullsize .gallery-ribbon-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.gallery-ribbon-title-link {
+  color: inherit;
+  text-decoration: none;
+}
+.gallery-ribbon-title-link:hover,
+.gallery-ribbon-title-link:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
 @media (max-width: 640px) {
   .gallery-ribbon-tile {
     width: 120px;
     height: 170px;
+  }
+  .gallery-ribbon.fullsize .gallery-ribbon-tile {
+    width: auto;
+    height: 200px;
   }
   .gallery-ribbon-viewport {
     -webkit-mask-image: linear-gradient(
@@ -148,5 +176,9 @@
   .gallery-ribbon-tile {
     width: 104px;
     height: 148px;
+  }
+  .gallery-ribbon.fullsize .gallery-ribbon-tile {
+    width: auto;
+    height: 170px;
   }
 }

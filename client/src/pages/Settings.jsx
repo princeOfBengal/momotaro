@@ -76,6 +76,9 @@ function LibrariesSection() {
   const [bulkSourceDropdown, setBulkSourceDropdown] = useState(null); // lib.id of open dropdown
   const [exporting, setExporting] = useState(null); // lib.id being exported
   const [exportStatus, setExportStatus] = useState(null); // { libId, message }
+  const [resetting, setResetting] = useState(null); // lib.id being reset
+  const [resetConfirm, setResetConfirm] = useState(null); // library object pending confirm
+  const [resetStatus, setResetStatus] = useState(null); // { libId, message }
 
   useEffect(() => {
     api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
@@ -184,6 +187,43 @@ function LibrariesSection() {
       alert('Bulk optimize failed: ' + err.message);
     } finally {
       setBulkOptimizing(null);
+    }
+  }
+
+  async function handleConfirmReset() {
+    const lib = resetConfirm;
+    if (!lib) return;
+    setResetConfirm(null);
+    setResetting(lib.id);
+    setResetStatus(null);
+    try {
+      const result = await api.resetLibraryMetadata(lib.id);
+      const {
+        titles_reset           = 0,
+        json_files_deleted     = 0,
+        cache_files_deleted    = 0,
+        thumbnails_restored    = 0,
+        thumbnails_regenerated = 0,
+      } = result;
+      const plural = (n, s, p = s + 's') => `${n} ${n === 1 ? s : p}`;
+      const thumbBits = [];
+      if (thumbnails_restored    > 0) thumbBits.push(`restored ${thumbnails_restored}`);
+      if (thumbnails_regenerated > 0) thumbBits.push(`regenerated ${thumbnails_regenerated} from first page`);
+      const thumbSentence = thumbBits.length > 0
+        ? ` Thumbnails: ${thumbBits.join(', ')}.`
+        : '';
+      const message =
+        `Reset ${plural(titles_reset, 'title')}. ` +
+        `Deleted ${plural(json_files_deleted, 'local JSON file')} and ` +
+        `${plural(cache_files_deleted, 'cached metadata file')}.` +
+        thumbSentence;
+      setResetStatus({ libId: lib.id, message });
+      // Manga counts don't change, but let other UI pick up cleared metadata.
+      api.getLibraries().then(data => setLibraries(data)).catch(() => {});
+    } catch (err) {
+      alert('Reset metadata failed: ' + err.message);
+    } finally {
+      setResetting(null);
     }
   }
 
@@ -358,6 +398,14 @@ function LibrariesSection() {
                       {exporting === lib.id ? 'Exporting…' : 'Export Metadata'}
                     </button>
                     <button
+                      className="btn btn-ghost btn-sm lp-btn-danger"
+                      onClick={() => setResetConfirm(lib)}
+                      disabled={resetting === lib.id}
+                      title="Delete all third-party metadata and local metadata.json sidecars in this library"
+                    >
+                      {resetting === lib.id ? 'Resetting…' : 'Reset Metadata'}
+                    </button>
+                    <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => { setEditId(lib.id); setEditError(null); setShowAdd(false); }}
                     >
@@ -376,10 +424,55 @@ function LibrariesSection() {
                   {exportStatus?.libId === lib.id && (
                     <p className="lp-bulk-status">{exportStatus.message}</p>
                   )}
+                  {resetStatus?.libId === lib.id && (
+                    <p className="lp-bulk-status">{resetStatus.message}</p>
+                  )}
                 </>
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {resetConfirm && (
+        <div className="lp-modal-backdrop" onClick={() => setResetConfirm(null)}>
+          <div className="lp-modal-box" onClick={e => e.stopPropagation()}>
+            <div className="lp-modal-icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.485 2.495a1.75 1.75 0 013.03 0l6.28 10.875A1.75 1.75 0 0116.28 16H3.72a1.75 1.75 0 01-1.515-2.63l6.28-10.875zM10 7a1 1 0 00-1 1v3a1 1 0 102 0V8a1 1 0 00-1-1zm0 7a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <h2 className="lp-modal-title">Reset metadata for "{resetConfirm.name}"?</h2>
+            <p className="lp-modal-body">
+              This will permanently remove <strong>all third-party metadata</strong>
+              {' '}(AniList, MyAnimeList, MangaUpdates, Doujinshi.info) for every
+              series in this library, and delete any local metadata
+              <code className="lp-modal-code">.json</code> sidecar files
+              (<code className="lp-modal-code">metadata.json</code>,{' '}
+              <code className="lp-modal-code">info.json</code>,{' '}
+              <code className="lp-modal-code">gallery.json</code>,
+              image-sidecar files, etc.) saved in each manga folder. Each
+              series' title will revert to its folder name and its thumbnail
+              will revert to the original generated cover.
+            </p>
+            <p className="lp-modal-warning">
+              This action cannot be undone.
+            </p>
+            <div className="lp-modal-actions">
+              <button
+                className="btn btn-ghost"
+                onClick={() => setResetConfirm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn lp-btn-danger-solid"
+                onClick={handleConfirmReset}
+              >
+                Reset Metadata
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

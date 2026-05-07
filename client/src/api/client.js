@@ -159,6 +159,14 @@ export const api = {
       // so allow up to 10 minutes for very large libraries.
       timeoutMs: 600_000,
     }),
+  // Wipe every third-party metadata field for every manga in a library and
+  // delete any local metadata JSON sidecars saved into their folders. Walks
+  // the whole library on disk, so allow up to 10 minutes.
+  resetLibraryMetadata: (libraryId) =>
+    apiFetch(`/api/libraries/${libraryId}/reset-metadata`, {
+      method: 'POST',
+      timeoutMs: 600_000,
+    }),
   searchAnilist: (q, page = 1) =>
     apiFetch(`/api/anilist/search?${new URLSearchParams({ q, page })}`),
   applyMetadata: (mangaId, anilistId) =>
@@ -297,6 +305,11 @@ export const api = {
   // Genres — every distinct genre across visible libraries with a
   // representative top-rated cover per genre. Powers the Browse By Genre page.
   getGenres: () => apiFetch('/api/genres'),
+
+  // Every saved art-gallery page across visible libraries, grouped by series.
+  // Items include `width` / `height` so landscape pages can render at their
+  // natural aspect ratio on the dedicated Art Gallery page.
+  getAllGallery: () => apiFetch('/api/gallery/all'),
 
   // Statistics. Pass a library ID to scope every aggregate to that library;
   // omit or pass null for the All Libraries view.

@@ -322,6 +322,98 @@
   border-color: rgba(244, 67, 54, 0.4);
 }
 
+/* Reset-metadata confirmation modal. Self-contained styles so this dialog
+   doesn't depend on MangaDetail.css. */
+.lp-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.lp-modal-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 480px;
+  width: 100%;
+  padding: 28px 26px 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.lp-modal-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(244, 67, 54, 0.12);
+  color: #f44336;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.lp-modal-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.lp-modal-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.lp-modal-body {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.lp-modal-warning {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f44336;
+  margin: 0;
+}
+
+.lp-modal-code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--bg-surface);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+
+.lp-modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  width: 100%;
+  justify-content: center;
+}
+
+.lp-btn-danger-solid {
+  background: #f44336;
+  color: #fff;
+  border: 1px solid #f44336;
+}
+.lp-btn-danger-solid:hover {
+  background: #d63b2f;
+  border-color: #d63b2f;
+}
+
 /* ── Empty state ── */
 .lp-empty {
   text-align: center;

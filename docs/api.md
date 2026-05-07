@@ -290,7 +290,7 @@ Page images are served via `res.sendFile` in both cases:
 
 `width` and `height` in `/api/chapters/:id/pages` are populated for every page. Folder-chapter pages get them at scan time; CBZ-chapter pages start out null (dimension fetching is skipped during the scan to avoid decompressing every entry) and the route then populates them lazily on the first open of each chapter — see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching). The first open of a CBZ chapter therefore briefly waits while it is fully extracted to the cache directory and every extracted file is read through `sharp.metadata()`; subsequent opens hit the cache and respond from the persisted page rows.
 
-`is_wide` is computed at serve time from the stored `width`/`height` and is `true` only when the page is a true double-page spread — its width is ≥ 1.5× the median page width across the chapter. This catches pages drawn at twice the normal width (so the reader can render them solo in Double Page (Manga) mode) without flagging mildly-landscape pages. It is `null` only when dimensions are still unknown (e.g. an unreadable CBZ entry).
+`is_wide` is computed at serve time from the stored `width`/`height` and is `true` whenever the page is landscape — i.e. `width > height`. The reader uses this to render such pages solo in Double Page (Manga) mode, since landscape pages typically represent a spread or otherwise shouldn't be paired. It is `null` only when dimensions are still unknown (e.g. an unreadable CBZ entry).
 
 ---
 

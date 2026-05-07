@@ -229,10 +229,11 @@ function ResumeHero({ manga }) {
     : (manga.current_chapter?.volume != null
         ? `Volume ${manga.current_chapter.volume}`
         : manga.current_chapter?.folder_name || '—');
-  const pct = manga.total_chapters > 0
-    ? Math.min(100, Math.round((manga.completed_count / manga.total_chapters) * 100))
-    : 0;
   const page = manga.current_page ? Number(manga.current_page) : 0;
+  const pageCount = manga.current_chapter?.page_count || 0;
+  const pct = pageCount > 0
+    ? Math.min(100, Math.round(((page + 1) / pageCount) * 100))
+    : 0;
   const resumeHref = `/read/${manga.current_chapter_id}?mangaId=${manga.id}${page ? `&page=${page}` : ''}`;
   return (
     <section className="home-hero" aria-label="Resume reading">

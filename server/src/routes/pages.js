@@ -140,24 +140,14 @@ router.get('/chapters/:id/pages', asyncWrapper(async (req, res) => {
     'SELECT id, page_index, filename, path, width, height FROM pages WHERE chapter_id = ? ORDER BY page_index ASC'
   ).all(chapter.id);
 
-  // A page is considered "wide" only when it's a true double-page spread —
-  // i.e. its width is roughly 2× the typical page width in the chapter.
-  // Comparing against the median width (rather than just width > height)
-  // avoids treating mildly-landscape pages as spreads.
-  const WIDE_FACTOR = 1.5;
-  const sortedWidths = pages
-    .map(p => p.width)
-    .filter(w => w !== null && w > 0)
-    .sort((a, b) => a - b);
-  const medianWidth = sortedWidths.length > 0
-    ? sortedWidths[Math.floor(sortedWidths.length / 2)]
-    : null;
-
+  // A page is considered "wide" when it's landscape-oriented (width > height).
+  // In Double Page (Manga) mode the reader renders such pages solo, since they
+  // typically represent a spread or otherwise shouldn't be paired.
   res.json({
     data: pages.map(({ path: _path, ...rest }) => ({
       ...rest,
-      is_wide: rest.width !== null && medianWidth !== null
-        ? rest.width > medianWidth * WIDE_FACTOR
+      is_wide: rest.width !== null && rest.height !== null && rest.width > 0 && rest.height > 0
+        ? rest.width > rest.height
         : null,
     })),
   });

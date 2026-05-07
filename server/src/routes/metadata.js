@@ -1226,6 +1226,220 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
   res.json({ data: { ...updated, genres: safeJsonParse(updated.genres, []) } });
 }));
 
+// POST /api/libraries/:id/reset-metadata — wipe ALL third-party metadata for
+// every manga in a library and delete any local metadata JSON sidecars saved
+// inside their folders. Per-manga effect mirrors the full-reset branch of
+// POST /manga/:id/reset-metadata, repeated for every title in the library.
+//
+// What gets cleared per manga:
+//   • DB columns: every *_id linkage, every sourced field (description,
+//     status, year, genres, score, author), metadata_source -> 'none',
+//     last_metadata_fetch_attempt_at -> NULL.
+//   • Title is reverted to the cleaned folder name (same rule the scanner
+//     uses on first ingest), since titles can have been overwritten by a
+//     third-party fetch.
+//   • Cover: third-party cover-filename pointers (anilist/mal/mangaupdates/
+//     doujinshi) are NULLed and `cover_user_set` is reset, then the active
+//     thumbnail is rebuilt from `original_cover` (the scanner-generated
+//     first-page thumbnail). When `original_cover` is missing, we
+//     regenerate from the lowest-numbered chapter's first page on the fly.
+//   • On-disk: the metadata-cache files keyed by each linkage id
+//     (`data/metadata-cache/<source>/<id>.json`).
+//   • Local sidecars: any `metadata.json` / `info.json` / `gallery.json` /
+//     `comic.json` / `book.json` at the top of the manga folder, plus any
+//     `<image>.<ext>.json` image-sidecar files at that level. We only delete
+//     files the local-metadata scanner would itself have picked up — we
+//     deliberately do NOT walk into chapter subfolders or wipe unknown JSON.
+//
+// Files on disk other than the JSON sidecars are not touched. Cover-image
+// files for other sources stay on disk (orphaned but harmless).
+router.post('/libraries/:id/reset-metadata', asyncWrapper(async (req, res) => {
+  const { cleanTitle } = require('../scanner/libraryScanner');
+  const { generateThumbnail } = require('../scanner/thumbnailGenerator');
+  const { thumbnailPath: thumbPathFor, ensureShardDir: ensureThumbShard } = require('../scanner/thumbnailPaths');
+
+  const db = getDb();
+  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
+  if (!library) return res.status(404).json({ error: 'Library not found' });
+
+  const allManga = db.prepare(
+    `SELECT id, path, folder_name, original_cover,
+            anilist_id, mal_id, mangaupdates_id, doujinshi_id
+       FROM manga WHERE library_id = ?`
+  ).all(library.id);
+
+  const IMAGE_SIDECAR_RE = /\.(jpe?g|png|webp|avif|gif)\.json$/i;
+  const EXPLICIT_NAMES = new Set([
+    'metadata.json', 'info.json', 'gallery.json', 'comic.json', 'book.json',
+  ]);
+
+  const cacheDir = path.join(config.DATA_PATH, 'metadata-cache');
+  const cacheTargets = [
+    { source: 'anilist',      column: 'anilist_id'      },
+    { source: 'myanimelist',  column: 'mal_id'          },
+    { source: 'mangaupdates', column: 'mangaupdates_id' },
+    { source: 'doujinshi',    column: 'doujinshi_id'    },
+  ];
+
+  let titlesReset        = 0;
+  let jsonFilesDeleted   = 0;
+  let cacheFilesDeleted  = 0;
+  let thumbnailsRebuilt  = 0;
+  let thumbnailsRegenerated = 0;
+
+  // The DB update also flips title back to cleanTitle(folder_name) and clears
+  // the third-party cover pointers + user-set flag so the cover-resolver below
+  // is free to fall back to original_cover.
+  const updateStmt = db.prepare(`
+    UPDATE manga SET
+      title                          = ?,
+      anilist_id                     = NULL,
+      mal_id                         = NULL,
+      mangaupdates_id                = NULL,
+      doujinshi_id                   = NULL,
+      anilist_cover                  = NULL,
+      mal_cover                      = NULL,
+      mangaupdates_cover             = NULL,
+      doujinshi_cover                = NULL,
+      cover_user_set                 = 0,
+      metadata_source                = 'none',
+      description                    = NULL,
+      status                         = NULL,
+      year                           = NULL,
+      genres                         = NULL,
+      score                          = NULL,
+      author                         = NULL,
+      last_metadata_fetch_attempt_at = NULL,
+      updated_at                     = unixepoch()
+    WHERE id = ?
+  `);
+
+  for (const manga of allManga) {
+    // Per-manga JSON sidecars at the top of the folder.
+    if (manga.path) {
+      let entries = [];
+      try { entries = fs.readdirSync(manga.path); } catch { /* unreadable */ }
+      for (const name of entries) {
+        const lower = name.toLowerCase();
+        if (EXPLICIT_NAMES.has(lower) || IMAGE_SIDECAR_RE.test(lower)) {
+          try {
+            fs.unlinkSync(path.join(manga.path, name));
+            jsonFilesDeleted++;
+          } catch (err) {
+            console.warn(`[ResetMetadata] Failed to delete ${name} in "${manga.path}": ${err.message}`);
+          }
+        }
+      }
+    }
+
+    // Per-source metadata-cache files.
+    for (const { source, column } of cacheTargets) {
+      const id = manga[column];
+      if (id === null || id === undefined) continue;
+      const file = path.join(cacheDir, source, `${id}.json`);
+      try {
+        fs.unlinkSync(file);
+        cacheFilesDeleted++;
+      } catch (err) {
+        if (err.code !== 'ENOENT') {
+          console.warn(`[ResetMetadata] Failed to delete cache ${source}/${id}.json: ${err.message}`);
+        }
+      }
+    }
+
+    const newTitle = cleanTitle(manga.folder_name || '') || manga.folder_name || 'Untitled';
+    updateStmt.run(newTitle, manga.id);
+    titlesReset++;
+
+    // Rebuild the active thumbnail. Preferred path: copy from the
+    // scanner-generated original. Fallback: regenerate from the lowest-
+    // numbered chapter's first page when the original is missing.
+    const activeName = `${manga.id}.webp`;
+    const activePath = thumbPathFor(activeName);
+    let restoredFromOriginal = false;
+
+    if (manga.original_cover) {
+      const originalPath = thumbPathFor(manga.original_cover);
+      try {
+        if (fs.existsSync(originalPath)) {
+          ensureThumbShard(activeName);
+          fs.copyFileSync(originalPath, activePath);
+          restoredFromOriginal = true;
+          thumbnailsRebuilt++;
+        }
+      } catch (err) {
+        console.warn(`[ResetMetadata] Failed to restore original cover for manga ${manga.id}: ${err.message}`);
+      }
+    }
+
+    if (!restoredFromOriginal) {
+      // Regenerate from disk: take the first page of the lowest-numbered
+      // chapter (folder name fallback when no chapter has a parsed number).
+      const firstChapter = db.prepare(`
+        SELECT c.id, c.path AS chapter_path, c.type
+          FROM chapters c
+         WHERE c.manga_id = ?
+         ORDER BY (CASE WHEN c.number IS NULL THEN 1 ELSE 0 END) ASC,
+                  c.number ASC,
+                  c.folder_name ASC
+         LIMIT 1
+      `).get(manga.id);
+
+      if (firstChapter) {
+        const firstPage = db.prepare(`
+          SELECT path FROM pages WHERE chapter_id = ?
+           ORDER BY page_index ASC LIMIT 1
+        `).get(firstChapter.id);
+
+        if (firstPage) {
+          try {
+            const out = await generateThumbnail(
+              { type: firstChapter.type, chapterPath: firstChapter.chapter_path, entry: firstPage.path },
+              manga.id,
+            );
+            if (out) {
+              // Persist as the new "original" so future resets are cheap.
+              const originalName = `${manga.id}_original.webp`;
+              try {
+                ensureThumbShard(originalName);
+                fs.copyFileSync(out, thumbPathFor(originalName));
+                db.prepare('UPDATE manga SET original_cover = ? WHERE id = ?')
+                  .run(originalName, manga.id);
+              } catch (err) {
+                console.warn(`[ResetMetadata] Failed to persist new original_cover for manga ${manga.id}: ${err.message}`);
+              }
+              thumbnailsRegenerated++;
+            }
+          } catch (err) {
+            console.warn(`[ResetMetadata] Thumbnail regen failed for manga ${manga.id}: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?').run(activeName, manga.id);
+  }
+
+  console.log(
+    `[ResetMetadata] "${library.name}": reset ${titlesReset} titles, ` +
+    `deleted ${jsonFilesDeleted} local JSON sidecar(s), ` +
+    `${cacheFilesDeleted} metadata-cache file(s); ` +
+    `restored ${thumbnailsRebuilt} thumbnails from original, ` +
+    `regenerated ${thumbnailsRegenerated} from first page.`
+  );
+
+  res.json({
+    data: {
+      total: allManga.length,
+      titles_reset: titlesReset,
+      json_files_deleted: jsonFilesDeleted,
+      cache_files_deleted: cacheFilesDeleted,
+      thumbnails_restored: thumbnailsRebuilt,
+      thumbnails_regenerated: thumbnailsRegenerated,
+    },
+  });
+}));
+
 // Filename helpers — generated chapter covers use a deterministic name so
 // re-running Generate Covers is idempotent, and we can split them out from
 // manually-saved history entries (which use a timestamp suffix) at read time.

@@ -17,7 +17,14 @@ import './ArtGalleryRibbon.css';
 // entirely when the ribbon is not on-screen, keeping a background tab's GPU
 // cost at zero.
 
-export default function ArtGalleryRibbon({ items, title = 'Art Gallery' }) {
+// Props:
+//   items     — gallery item objects (see /api/home or /api/gallery/all)
+//   title     — section heading
+//   fullSize  — when true, tiles use the page's natural aspect ratio
+//               (`object-fit: contain`, fixed height + auto width). Used by
+//               the Art Gallery page so landscape pages aren't cropped.
+//   titleHref — optional Link target for the heading
+export default function ArtGalleryRibbon({ items, title = 'Art Gallery', fullSize = false, titleHref = null }) {
   const rootRef = useRef(null);
   const [inView, setInView]     = useState(false);
   const [touching, setTouching] = useState(false);
@@ -48,10 +55,12 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery' }) {
   return (
     <section
       ref={rootRef}
-      className={`gallery-ribbon${paused ? ' is-paused' : ''}`}
+      className={`gallery-ribbon${paused ? ' is-paused' : ''}${fullSize ? ' fullsize' : ''}`}
     >
       <header className="gallery-ribbon-head">
-        <h2 className="ribbon-title">{title}</h2>
+        {titleHref
+          ? <Link to={titleHref} className="ribbon-title gallery-ribbon-title-link">{title}</Link>
+          : <h2 className="ribbon-title">{title}</h2>}
       </header>
       <div
         className="gallery-ribbon-viewport"
@@ -64,29 +73,38 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery' }) {
           style={{ animationDuration: `${durationSeconds}s` }}
         >
           {/* Duplicate the list so the keyframe loop can seamlessly wrap. */}
-          {[...items, ...items].map((g, idx) => (
-            <Link
-              key={`${g.id}-${idx}`}
-              to={`/read/${g.chapter_id}?page=${g.page_index}&mangaId=${g.manga_id}`}
-              className="gallery-ribbon-tile"
-              aria-label={`Open page ${g.page_index + 1} of ${g.manga_title}`}
-              // Duplicated items shouldn't all be Tab-stops — only the first
-              // copy of each entry is keyboard-reachable.
-              tabIndex={idx < items.length ? 0 : -1}
-            >
-              <img
-                src={g.page_image_url}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                draggable={false}
-              />
-              <span className="gallery-ribbon-tile-meta">
-                <span className="gallery-ribbon-tile-manga">{g.manga_title}</span>
-                <span className="gallery-ribbon-tile-page">p.{g.page_index + 1}</span>
-              </span>
-            </Link>
-          ))}
+          {[...items, ...items].map((g, idx) => {
+            // In fullSize mode each tile sizes itself to the page's natural
+            // aspect ratio so landscape spreads aren't cropped. Fall back to
+            // a 2:3 portrait when dimensions aren't known yet.
+            const tileStyle = fullSize
+              ? { aspectRatio: `${g.width || 2} / ${g.height || 3}` }
+              : undefined;
+            return (
+              <Link
+                key={`${g.id}-${idx}`}
+                to={`/read/${g.chapter_id}?page=${g.page_index}&mangaId=${g.manga_id}`}
+                className="gallery-ribbon-tile"
+                style={tileStyle}
+                aria-label={`Open page ${g.page_index + 1} of ${g.manga_title}`}
+                // Duplicated items shouldn't all be Tab-stops — only the first
+                // copy of each entry is keyboard-reachable.
+                tabIndex={idx < items.length ? 0 : -1}
+              >
+                <img
+                  src={g.page_image_url}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  draggable={false}
+                />
+                <span className="gallery-ribbon-tile-meta">
+                  <span className="gallery-ribbon-tile-manga">{g.manga_title}</span>
+                  <span className="gallery-ribbon-tile-page">p.{g.page_index + 1}</span>
+                </span>
+              </Link>
+            );
+          })}
         </div>
       </div>
     </section>

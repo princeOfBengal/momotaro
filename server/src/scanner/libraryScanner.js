@@ -550,4 +550,4 @@ function cleanTitle(folderName) {
     .trim();
 }
 
-module.exports = { runFullScan, scanLibrary, scanMangaDirectory, getScanStatus };
+module.exports = { runFullScan, scanLibrary, scanMangaDirectory, getScanStatus, cleanTitle };

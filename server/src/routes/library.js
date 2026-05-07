@@ -872,6 +872,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     SELECT m.id, m.title, m.cover_image, m.track_volumes,
            p.current_chapter_id, p.current_page, p.last_read_at,
            c.number AS cur_number, c.volume AS cur_volume, c.folder_name AS cur_folder,
+           c.page_count AS cur_page_count,
            (SELECT COUNT(*) FROM chapters ch WHERE ch.manga_id = m.id) AS total_chapters,
            json_array_length(p.completed_chapters) AS completed_count
     FROM progress p
@@ -894,6 +895,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       folder_name: r.cur_folder,
       number:      r.cur_number,
       volume:      r.cur_volume,
+      page_count:  r.cur_page_count,
     } : null,
     current_page:      r.current_page,
     total_chapters:    r.total_chapters,

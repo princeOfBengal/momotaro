@@ -235,6 +235,22 @@ export default function AppSidebar({
         </svg>
         Browse By Genre
       </Link>
+
+      <Link
+        to="/art-gallery"
+        className="library-sidebar-item library-sidebar-home"
+        onClick={closeDrawer}
+      >
+        <svg
+          className="library-sidebar-home-icon"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm2 0v8.586l3.293-3.293a1 1 0 011.414 0L11 12.586l1.293-1.293a1 1 0 011.414 0L16 13.586V5H4zm9 3a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" clipRule="evenodd" />
+        </svg>
+        Art Gallery
+      </Link>
     </aside>
   );
 }

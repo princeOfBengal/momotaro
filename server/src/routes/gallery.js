@@ -16,6 +16,59 @@ const SELECT_ITEM_SQL = `
   JOIN chapters c ON c.id = g.chapter_id
 `;
 
+// GET /api/gallery/all — every saved page in the art gallery, grouped by
+// series. Each group is `{ manga_id, manga_title, items: [...] }` ordered by
+// title; items inside a group are newest-first. Each item carries the page's
+// stored width/height so the dedicated Art Gallery page can render landscape
+// pages at their natural aspect ratio without cropping.
+router.get('/gallery/all', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT ag.id, ag.manga_id, m.title AS manga_title,
+           ag.chapter_id,
+           c.folder_name AS chapter_folder_name,
+           c.number AS chapter_number,
+           c.volume AS chapter_volume,
+           c.title  AS chapter_title,
+           ag.page_id, p.page_index, p.width, p.height,
+           ag.created_at
+    FROM art_gallery ag
+    JOIN manga m    ON m.id = ag.manga_id
+    JOIN chapters c ON c.id = ag.chapter_id
+    JOIN pages p    ON p.id = ag.page_id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+    ORDER BY m.title COLLATE NOCASE ASC, ag.created_at DESC, ag.id DESC
+  `).all();
+
+  const groups = new Map();
+  for (const r of rows) {
+    let g = groups.get(r.manga_id);
+    if (!g) {
+      g = { manga_id: r.manga_id, manga_title: r.manga_title, items: [] };
+      groups.set(r.manga_id, g);
+    }
+    g.items.push({
+      id:                  r.id,
+      manga_id:            r.manga_id,
+      manga_title:         r.manga_title,
+      chapter_id:          r.chapter_id,
+      chapter_folder_name: r.chapter_folder_name,
+      chapter_number:      r.chapter_number,
+      chapter_volume:      r.chapter_volume,
+      chapter_title:       r.chapter_title,
+      page_id:             r.page_id,
+      page_index:          r.page_index,
+      width:               r.width,
+      height:              r.height,
+      page_image_url:      `/api/pages/${r.page_id}/image`,
+      created_at:          r.created_at,
+    });
+  }
+
+  res.json({ data: Array.from(groups.values()) });
+}));
+
 // GET /api/manga/:id/gallery — list art gallery items, newest first
 router.get('/manga/:id/gallery', asyncWrapper(async (req, res) => {
   const db = getDb();

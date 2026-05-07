@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useDeferredValue, useRef } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import AppSidebar from '../components/AppSidebar';
@@ -65,6 +65,14 @@ export default function Library() {
   const [searchError, setSearchError] = useState(null);
 
   const [search, setSearch] = useState(location.state?.search ?? '');
+  // `search` is the source of truth bound to the input value (must update
+  // synchronously so typing feels responsive). `deferredSearch` is what
+  // *derived* renders read from — most importantly the search-mode/browse-
+  // mode discriminator (`isSearching` below) and the empty-state message —
+  // so React can defer the mode-switch render under load. The 300 ms search
+  // debounce still keys off `search` directly so the network timer starts
+  // immediately on keystroke.
+  const deferredSearch = useDeferredValue(search);
   const [sort, setSort] = useState(() => {
     const saved = localStorage.getItem('home_default_sort');
     return ['title', 'updated', 'year', 'rating'].includes(saved) ? saved : 'title';
@@ -291,7 +299,10 @@ export default function Library() {
   //     content fully changes ⇒ start at top by virtue of having no entry).
   // The search query itself is NOT in the key — it changes on every
   // keystroke, which would otherwise snap the user to top mid-type.
-  const isSearching = search.trim().length > 0;
+  // Drives the mode discriminator off the deferred value so the mode-switch
+  // render (which unmounts the browse grid + mounts the search grid, or
+  // vice versa) happens at low priority and never blocks the keystroke.
+  const isSearching = deferredSearch.trim().length > 0;
   const scrollKey = isSearching
     ? `${location.key || 'default'}|mode:search`
     : `${location.key || 'default'}|mode:browse|lib:${activeLibrary ?? ''}|list:${activeList ?? ''}|sort:${sort}`;
@@ -440,9 +451,9 @@ export default function Library() {
                 searchResults.length === 0 ? (
                   <div className="library-empty">
                     <div className="library-empty-icon">🔍</div>
-                    <h2>No results for "{search.trim()}"</h2>
+                    <h2>No results for "{deferredSearch.trim()}"</h2>
                     <p>
-                      {search.includes(',')
+                      {deferredSearch.includes(',')
                         ? 'Try fewer genres or check spelling.'
                         : 'Try a different keyword, or clear the search to browse the full library.'}
                     </p>

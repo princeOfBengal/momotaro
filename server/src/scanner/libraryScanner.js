@@ -7,6 +7,7 @@ const { generateThumbnail } = require('./thumbnailGenerator');
 const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
 const { reinforceAllCovers } = require('./coverResolver');
+const { enforceMetadataPriorityForLibrary } = require('../routes/metadata');
 
 // Concurrency knobs.
 //   MANGA_CONCURRENCY — how many manga directories we walk in parallel. Sharp
@@ -261,6 +262,27 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
     if (rootMtimeMs !== null) {
       db.prepare('UPDATE libraries SET last_scan_mtime_ms = ? WHERE id = ?')
         .run(rootMtimeMs, library.id);
+    }
+
+    // Enforce metadata priority across the library *before* cover
+    // reinforcement. For each manga whose displayed source isn't the
+    // highest-priority remaining linkage (local > anilist > mal >
+    // mangaupdates > doujinshi), re-apply from the on-disk per-source
+    // cache. Cache hits avoid an upstream ping; if the cache is missing for
+    // the chosen source, applyFallbackMetadata falls through to a network
+    // fetch as a last resort. The cover reinforce pass below then sees the
+    // post-enforcement metadata_source and picks the right active cover.
+    try {
+      const metaCounters = await enforceMetadataPriorityForLibrary(db, library.id);
+      console.log(
+        `[Scanner] Metadata priority enforced for "${library.name}": ` +
+        `${metaCounters.switched} switched, ` +
+        `${metaCounters.skipped} unchanged, ` +
+        `${metaCounters.failed} failed ` +
+        `(${metaCounters.checked} checked).`
+      );
+    } catch (err) {
+      console.warn(`[Scanner] Metadata priority enforcement failed: ${err.message}`);
     }
 
     // Reinforce cover priority across the library — equivalent to running

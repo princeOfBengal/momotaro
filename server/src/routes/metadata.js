@@ -261,6 +261,167 @@ async function applyMetadataToManga(db, manga, result, source) {
   return { becameDisplay };
 }
 
+// Re-populate displayed metadata from the next-priority linked source after
+// the currently-displayed one was just broken. Used by the reset-metadata
+// route below and the scan-end priority enforcement pass.
+//
+// Walks third-party linkages in display priority (anilist > mal >
+// mangaupdates > doujinshi), skipping the broken source and any whose ID
+// column is already NULL. For each candidate it tries the on-disk
+// per-source metadata cache first (populated whenever any fetch-by-id call
+// runs against that source) and only falls back to a live upstream fetch
+// when there's no cached record. This is what lets a fallback complete
+// without a network round-trip whenever the user has previously linked the
+// manga to that source: the normalized record we wrote at apply time is
+// still on disk under data/metadata-cache/<source>/<id>.json.
+//
+// `applyMetadataToManga` overwrites display fields because the freshly-
+// reset row has metadata_source='none', which has the lowest priority.
+//
+// Local metadata is intentionally not handled here: at apply time, local
+// (priority 4) outranks every third-party source, so the only way for the
+// displayed source to be a third party is for `metadata.json` to not exist.
+// If a user later drops a `metadata.json` it will be picked up by the next
+// scan; nothing to read at reset time.
+//
+// Returns the source name that was applied, or null when no fallback was
+// possible. Best-effort — never throws so the reset still completes if the
+// upstream is unreachable; the caller has already committed the SQL reset
+// and the manga lands at metadata_source='none' if every fetch fails.
+async function applyFallbackMetadata(db, mangaId, brokenSource) {
+  const fresh = db.prepare('SELECT * FROM manga WHERE id = ?').get(mangaId);
+  if (!fresh) return null;
+
+  const candidates = [
+    {
+      source: 'anilist',
+      id: fresh.anilist_id,
+      cacheKey: () => Number(fresh.anilist_id),
+      networkFetch: () => fetchByAniListId(Number(fresh.anilist_id), getToken(db)),
+    },
+    {
+      source: 'myanimelist',
+      id: fresh.mal_id,
+      cacheKey: () => Number(fresh.mal_id),
+      networkFetch: () => {
+        const clientId = getMalClientId(db);
+        // Without a configured Client ID we can't talk to MAL at all; skip
+        // rather than throw, so the loop tries the next candidate.
+        if (!clientId) return null;
+        return fetchByMALId(Number(fresh.mal_id), clientId);
+      },
+    },
+    {
+      source: 'mangaupdates',
+      id: fresh.mangaupdates_id,
+      cacheKey: () => Number(fresh.mangaupdates_id),
+      networkFetch: () => fetchByMangaUpdatesId(Number(fresh.mangaupdates_id)),
+    },
+    {
+      source: 'doujinshi',
+      // doujinshi_id is a slug (TEXT), not an integer — don't Number()-cast it.
+      id: fresh.doujinshi_id,
+      cacheKey: () => fresh.doujinshi_id,
+      networkFetch: () => fetchByDoujinshiSlug(fresh.doujinshi_id, getDoujinshiToken(db)),
+    },
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate.source === brokenSource) continue;
+    if (!candidate.id) continue;
+
+    // Cache-first: a successful prior apply for this source wrote the
+    // normalized record to disk, so we can flip the display source
+    // immediately without a network call.
+    let result = getCachedMetadata(candidate.source, candidate.cacheKey());
+
+    if (!result) {
+      try {
+        result = await candidate.networkFetch();
+      } catch (err) {
+        console.warn(
+          `[FallbackMetadata] Manga ${mangaId}: network fallback to ${candidate.source} failed: ${err.message}`
+        );
+        continue;
+      }
+    }
+
+    if (!result) continue;
+
+    await applyMetadataToManga(db, fresh, result, candidate.source);
+    const action = brokenSource ? `fell back from ${brokenSource}` : 'enforced priority';
+    console.log(`[FallbackMetadata] Manga ${mangaId}: ${action} → ${candidate.source}`);
+    return candidate.source;
+  }
+  return null;
+}
+
+// Choose the metadata source a manga *should* be displaying based on its
+// current linkages, in display priority order (local > anilist > mal >
+// mangaupdates > doujinshi). Returns the source name or null if the manga
+// has no linkages at all (in which case no enforcement is needed).
+//
+// `local` is treated as already-correct: when local metadata.json exists,
+// the scanner sets `metadata_source = 'local'` per-manga before this pass
+// runs, so any row landing here with metadata_source='local' is in the
+// right state regardless of linkages.
+function desiredMetadataSource(row) {
+  if (row.metadata_source === 'local') return 'local';
+  if (row.anilist_id)           return 'anilist';
+  if (row.mal_id)               return 'myanimelist';
+  if (row.mangaupdates_id)      return 'mangaupdates';
+  if (row.doujinshi_id)         return 'doujinshi';
+  return null;
+}
+
+// Bulk-enforce display priority for every manga in a library. For each row
+// where the displayed metadata source isn't the highest-priority remaining
+// linkage, re-apply from the on-disk per-source cache (network only as a
+// last-resort fallback). Local-metadata manga are skipped — they were
+// already set by the scanner. Returns a counter object the caller can log.
+//
+// This pass is fast in the common steady-state case: one SELECT lists every
+// manga in the library, the per-row desired-source check is a few field
+// reads, and only manga whose state actually needs to change incur an
+// apply. The cache hit path is purely on-disk: applyFallbackMetadata reads
+// the cached normalized record, runs the standard apply path (which
+// rewrites display fields, copies the source-specific cover into the
+// active slot, and re-runs reinforceActiveCover), and returns. No upstream
+// pings unless the cache is missing for the chosen source.
+async function enforceMetadataPriorityForLibrary(db, libraryId) {
+  const rows = db.prepare(`
+    SELECT id, metadata_source, anilist_id, mal_id, mangaupdates_id, doujinshi_id
+    FROM manga
+    WHERE library_id = ?
+  `).all(libraryId);
+
+  let checked = 0;
+  let switched = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    checked++;
+    const desired = desiredMetadataSource(row);
+    if (!desired || desired === row.metadata_source) {
+      skipped++;
+      continue;
+    }
+    try {
+      const applied = await applyFallbackMetadata(db, row.id, null);
+      if (applied) {
+        switched++;
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      failed++;
+      console.warn(`[EnforcePriority] Manga ${row.id} apply failed: ${err.message}`);
+    }
+  }
+  return { checked, switched, skipped, failed };
+}
+
 // POST /api/manga/:id/refresh-metadata — auto-fetch by title
 router.post('/manga/:id/refresh-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
@@ -1152,13 +1313,20 @@ router.post('/manga/:id/export-metadata', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/manga/:id/reset-metadata — break external linkage and clear sourced metadata fields
-// Body: { source?: 'anilist' | 'myanimelist' | 'doujinshi' }
+// Body: { source?: 'anilist' | 'myanimelist' | 'mangaupdates' | 'doujinshi' }
 //   omitted → full reset: clears all IDs, metadata fields, sets metadata_source to 'none'
 //   given  → break only that source's linkage:
 //            - always NULLs the corresponding *_id (and source cover column, if any)
-//            - when metadata_source matches source: also clears metadata fields and sets to 'none'
-//            - when metadata_source is 'local' or another third-party: preserves fields so that
-//              local JSON / other-source data remains the display source
+//            - when metadata_source matches source AND another linked source
+//              exists: re-fetches the next-priority remaining source
+//              (anilist > mal > mangaupdates > doujinshi) and switches the
+//              displayed title/description/cover/etc. to that source.
+//            - when metadata_source matches source AND no other linkage
+//              exists: clears displayed fields and sets metadata_source to
+//              'none'.
+//            - when metadata_source is 'local' or another third-party that
+//              isn't the one being broken: preserves displayed fields so the
+//              active source stays in place.
 router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
@@ -1178,6 +1346,9 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
     const fullReset = manga.metadata_source === source;
 
     if (fullReset) {
+      // Step 1: NULL the broken source's ID/cover and put the row in the
+      // 'none' state. This commits unconditionally so the linkage really is
+      // broken even if every fallback fetch below fails.
       db.prepare(`
         UPDATE manga SET
           ${idField}                     = NULL,
@@ -1193,6 +1364,12 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
           updated_at                     = unixepoch()
         WHERE id = ?
       `).run(manga.id);
+
+      // Step 2: try the next-priority remaining linkage. The helper reads
+      // the post-reset row, so candidate IDs reflect the NULL we just
+      // wrote, and any fetch that succeeds overwrites display fields
+      // because metadata_source='none' has the lowest priority.
+      await applyFallbackMetadata(db, manga.id, source);
     } else {
       db.prepare(`
         UPDATE manga SET
@@ -1730,4 +1907,9 @@ router.get('/manga/:id/anilist-status', asyncWrapper(async (req, res) => {
   });
 }));
 
+// Express-router as the default shape, with helper functions attached for
+// non-route consumers (the scanner calls enforceMetadataPriorityForLibrary
+// at end-of-scan, before cover priority is reinforced).
 module.exports = router;
+module.exports.applyFallbackMetadata = applyFallbackMetadata;
+module.exports.enforceMetadataPriorityForLibrary = enforceMetadataPriorityForLibrary;

@@ -124,7 +124,7 @@ Local JSON sidecars (`metadata_source = 'local'`) **don't enter the cover priori
 The flag is cleared (and the active cover re-aligned to the priority order) by `reinforceAllCovers(force = true)` in `coverResolver.js`. Two callers invoke it:
 
 1. **`POST /api/admin/reset-thumbnails`** — explicit user action from Settings → Database. Synchronous.
-2. **End of every `scanLibrary` run** — runs after the per-library rollup queries finish, before the watcher / runFullScan loop moves on. Logs per-source counts:
+2. **End of every `scanLibrary` run** — runs after the per-library rollup queries finish and after the metadata-priority enforcement pass (see [End-of-scan metadata priority enforcement](#end-of-scan-metadata-priority-enforcement) below), before the watcher / runFullScan loop moves on. Logs per-source counts:
 
    ```text
    [Scanner] Cover priority reinforced for "library name": 301 → AniList,
@@ -133,6 +133,28 @@ The flag is cleared (and the active cover re-aligned to the priority order) by `
    ```
 
 Both call sites use `force = true`. **Neither pings any upstream** — the resolver only re-uses cover files already on disk from earlier metadata fetches. A soft variant (`force = false`) exists in the helper but is not currently called from anywhere; it would skip user-set manga while still re-aligning everything else.
+
+## End-of-scan metadata priority enforcement
+
+Right before the cover-reinforcement pass, `scanLibrary` calls `enforceMetadataPriorityForLibrary(db, libraryId)` (exported from [server/src/routes/metadata.js](../server/src/routes/metadata.js)). This pass realigns the **displayed metadata source** of every manga in the library to the highest-priority linkage that still exists, in the order:
+
+```text
+local > anilist > myanimelist > mangaupdates > doujinshi
+```
+
+**Why this exists.** Linkage IDs and `metadata_source` can drift apart over time: a manga that displayed AniList might have its AniList linkage broken via Reset Metadata, leaving `mal_id` populated but the row still flagged something else. The enforcement pass guarantees that the on-disk state and the displayed text fields agree with the priority rule on every full scan, without needing the user to click anything.
+
+**Cache-first apply.** For each row whose `metadata_source` doesn't match the highest-priority remaining linkage, the helper calls `applyFallbackMetadata` (also in `routes/metadata.js`). That function reads the previously-saved normalized record from the on-disk per-source JSON cache (`data/metadata-cache/<source>/<id>.json`) and re-runs the standard apply path — no upstream ping when the cache hit succeeds. A live network fetch only happens as a last-resort fallback when the cache has no record for the chosen source. Local-displayed manga (`metadata_source = 'local'`) are skipped: the per-manga local-sidecar pass earlier in the scan already set them correctly, and local always outranks every third-party source.
+
+**Logged counters.** Per-library log line written at the end of the pass:
+
+```text
+[Scanner] Metadata priority enforced for "library name": 4 switched, 1240 unchanged, 0 failed (1244 checked).
+```
+
+`switched` counts rows whose displayed source actually changed; `unchanged` counts rows already at the correct source (the steady-state majority); `failed` counts rows where neither the cache nor the network produced a usable record (logged separately). Errors here are non-fatal — `scanLibrary` continues into the cover-reinforcement pass even if enforcement throws.
+
+**Ordering matters.** Enforcement runs *before* cover reinforcement so the cover resolver sees the post-enforcement `metadata_source` and picks the active cover that matches the freshly-chosen display source. Running them in the opposite order would briefly point `<mangaId>.webp` at the wrong source before the next scan caught up.
 
 The same flow makes the `applyMetadataToManga` path (single refresh, single apply, bulk metadata) safe: it stores the fetched cover into the source-specific column and then calls `reinforceActiveCover` (force=false), which respects `cover_user_set` so a fresh AniList apply on a user-picked manga downloads the new AniList cover into `anilist_cover` without touching the visible `<mangaId>.webp`.
 

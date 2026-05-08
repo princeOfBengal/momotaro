@@ -4,14 +4,23 @@ const config = require('../config');
 
 const CACHE_DIR = path.join(config.DATA_PATH, 'metadata-cache');
 
-const VALID_SOURCES = new Set(['anilist', 'myanimelist', 'mangaupdates']);
+// `doujinshi` IDs are slugs (TEXT) rather than integers, but the cache file
+// path encoding is just `${id}.json` either way — caller passes the slug
+// string and the resulting filename remains a valid filesystem name because
+// the slugs are URL-safe.
+const VALID_SOURCES = new Set(['anilist', 'myanimelist', 'mangaupdates', 'doujinshi']);
 
 function sourceDir(source) {
   return path.join(CACHE_DIR, source);
 }
 
+// Anilist / MAL / MangaUpdates IDs are integers — already filesystem-safe.
+// Doujinshi IDs are URL slugs which in practice are `[a-z0-9-]+`, but we
+// strip anything that could escape the cache directory (slashes, dots,
+// traversal sequences) to guarantee the filename stays inside `sourceDir`.
 function cachePath(source, id) {
-  return path.join(sourceDir(source), `${id}.json`);
+  const safe = String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(sourceDir(source), `${safe}.json`);
 }
 
 function ensureDir(source) {

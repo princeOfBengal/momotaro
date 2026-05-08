@@ -132,7 +132,7 @@ Establishing a MangaUpdates linkage on a manga that's already AniList-displayed 
 ## Relevant Files
 
 - [server/src/metadata/mangaupdates.js](../server/src/metadata/mangaupdates.js) — All MangaUpdates fetch / search / normalize logic
-- [server/src/metadata/cache.js](../server/src/metadata/cache.js) — Shared write-through JSON cache (`anilist`, `myanimelist`, `mangaupdates`)
+- [server/src/metadata/cache.js](../server/src/metadata/cache.js) — Shared write-through JSON cache (`anilist`, `myanimelist`, `mangaupdates`, `doujinshi`)
 - [server/src/routes/metadata.js](../server/src/routes/metadata.js) — API endpoints (search / refresh / apply / bulk / reset / export)
 - [client/src/pages/MangaDetail.jsx](../client/src/pages/MangaDetail.jsx) — `MangaUpdatesSearchModal` component and Metadata modal integration
 - [client/src/api/client.js](../client/src/api/client.js) — `searchMangaUpdates`, `applyMangaUpdatesMetadata`, `refreshMangaUpdatesMetadata`

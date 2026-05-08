@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { setCached } = require('./cache');
 
 const DOUJINSHI_BASE = 'https://api.doujinshi.info/v1';
 
@@ -201,7 +202,11 @@ async function fetchByDoujinshiSlug(slug, token) {
   });
   const json = await readJson(resp);
   if (!resp.ok || !json.data) return null;
-  return normalizeBook(json.data);
+  const record = normalizeBook(json.data);
+  // Persist the normalized record so a future linkage break can fall back
+  // to this source without re-pinging doujinshi.info.
+  if (record?.doujinshi_id) setCached('doujinshi', record.doujinshi_id, record);
+  return record;
 }
 
 module.exports = {

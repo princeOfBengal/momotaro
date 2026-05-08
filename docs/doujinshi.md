@@ -54,6 +54,21 @@ The `normalizeBook()` function maps a doujinshi.info book object to Momotaro's s
 
 **Tags are only returned on full book fetches** (`GET /book/{slug}`), not on search results. When a user selects a result from the search modal or the auto-fetch resolves the top result, a full book fetch is always performed first so that genres and author are populated.
 
+## Caching
+
+Every successful slug fetch (`fetchByDoujinshiSlug`) writes the normalized record to the shared per-source JSON cache at:
+
+```text
+{DATA_PATH}/metadata-cache/doujinshi/{slug}.json
+```
+
+via the same cache module the other three sources use ([server/src/metadata/cache.js](../server/src/metadata/cache.js)). Slug values are sanitized (`[^a-zA-Z0-9_-]` is replaced with `_`) before being used as a filename so a malformed slug can never escape the cache directory; in practice the upstream slugs are already URL-safe so the sanitization is a no-op.
+
+Two consumers read this cache:
+
+- **Bulk Export Metadata** — `POST /api/libraries/:id/export-metadata` and the per-manga variant emit the cached doujinshi record without re-pinging doujinshi.info.
+- **Break Linkage fallback** — when the user breaks the currently-displayed source on a manga that's also linked to doujinshi.info, the [Break Linkage fallback path](./api.md#fallback-after-break-linkage) reads the cached doujinshi record and re-applies it without a network call. The same path runs at the end of every library scan via the [metadata-priority enforcement pass](./scanner.md#end-of-scan-metadata-priority-enforcement).
+
 ## API Functions
 
 All in [server/src/metadata/doujinshi.js](../server/src/metadata/doujinshi.js):

@@ -488,23 +488,35 @@ The `source` field is only present in the per-source mode response.
 
 Behavior depends on whether `source` is supplied:
 
-- **`source` omitted** — full reset. Clears `anilist_id`, `mal_id`, `mangaupdates_id`, `doujinshi_id`, all sourced metadata fields (`description`, `status`, `year`, `genres`, `score`, `author`), sets `metadata_source = 'none'`, and clears `last_metadata_fetch_attempt_at`.
-- **`source` supplied, matches `metadata_source`** — full reset as above, but only the specified source's ID (`anilist_id` / `mal_id` / `mangaupdates_id` / `doujinshi_id`) and cover column (`anilist_cover` / `mal_cover` / `mangaupdates_cover` / `doujinshi_cover`) are cleared.
-- **`source` supplied, does *not* match `metadata_source`** (e.g. source is `'anilist'` but the manga displays `'local'` or `'myanimelist'`) — **link-only break**. Only the specified source's `*_id` and `*_cover` are nulled. All metadata fields, `metadata_source`, and any other linkage IDs are preserved. This is the common case now that linkages persist independently of the display source.
+- **`source` omitted** — full reset. Clears `anilist_id`, `mal_id`, `mangaupdates_id`, `doujinshi_id`, all sourced metadata fields (`description`, `status`, `year`, `genres`, `score`, `author`), sets `metadata_source = 'none'`, and clears `last_metadata_fetch_attempt_at`. No fallback fetch — every linkage is gone.
+- **`source` supplied, matches `metadata_source`** — the broken source's ID (`anilist_id` / `mal_id` / `mangaupdates_id` / `doujinshi_id`) and cover column (`anilist_cover` / `mal_cover` / `mangaupdates_cover` / `doujinshi_cover`) are nulled, the row is committed at `metadata_source = 'none'`, **and then a priority-ordered fallback fetch runs** (see [Fallback after Break Linkage](#fallback-after-break-linkage) below). If a remaining linkage produces a usable record, the displayed fields are repopulated from that source and `metadata_source` is updated accordingly. If none does, the row stays at `'none'` with cleared fields.
+- **`source` supplied, does *not* match `metadata_source`** (e.g. source is `'anilist'` but the manga displays `'local'` or `'myanimelist'`) — **link-only break**. Only the specified source's `*_id` and `*_cover` are nulled. All metadata fields, `metadata_source`, and any other linkage IDs are preserved. No fallback fetch is needed because the displayed source wasn't the one being broken. This is the common case now that linkages persist independently of the display source.
 
 Per-field summary:
 
-| Field                            | Full reset | Link-only break |
-| -------------------------------- | ---------- | --------------- |
-| `<source>_id`                    | `NULL`     | `NULL`          |
-| `<source>_cover`                 | `NULL`     | `NULL`          |
-| `metadata_source`                | `'none'`   | unchanged       |
-| sourced fields (desc / status / year / genres / score / author) | `NULL` | unchanged |
-| `last_metadata_fetch_attempt_at` | `NULL`     | unchanged       |
+| Field | Full reset | Match-source break (with fallback) | Link-only break |
+| --- | --- | --- | --- |
+| `<source>_id` | `NULL` | `NULL` | `NULL` |
+| `<source>_cover` | `NULL` | `NULL` | `NULL` |
+| `metadata_source` | `'none'` | next-priority remaining source, or `'none'` if no fallback succeeds | unchanged |
+| sourced fields (desc / status / year / genres / score / author) | `NULL` | rewritten from the fallback source, or `NULL` if no fallback succeeds | unchanged |
+| `last_metadata_fetch_attempt_at` | `NULL` | `NULL`, then re-stamped if the fallback fetch hits the network | unchanged |
 
-**Reset Metadata does not change the active cover.** Once a `*_cover` column is nulled the priority resolver (run on next scan or via Reset Thumbnails) will fall through to the next available source.
+**Reset Metadata does not change the active cover directly.** The fallback path (when one applies) calls `reinforceActiveCover` after writing fields, so a successful fallback realigns the active cover to the new displayed source. When no fallback applies (link-only break, or full reset with no remaining linkages), the cover is left untouched and the priority resolver picks up the change on the next scan or `POST /api/admin/reset-thumbnails`.
 
-Returns the updated manga row. Use the full-reset form when the wrong title was auto-matched; use the link-only form to detach an AniList / MAL / MangaUpdates / Doujinshi link from a manga that's displaying local-JSON metadata or a different source.
+Returns the updated manga row reflecting the post-fallback state. Use the full-reset form when the wrong title was auto-matched; use the per-source form to detach a single source while keeping the rest of the manga's metadata in place.
+
+#### Fallback after Break Linkage
+
+When the broken source matches `metadata_source` and another linked source still exists, `applyFallbackMetadata` (in [server/src/routes/metadata.js](../server/src/routes/metadata.js)) runs the priority order — `anilist > myanimelist > mangaupdates > doujinshi`, skipping the source being broken — and stops at the first remaining linkage that produces a normalized record:
+
+1. **Cache hit** — reads the previously-saved record from `data/metadata-cache/<source>/<id>.json` and re-applies it without any network call. Every successful prior fetch (refresh, apply, bulk, single-source pull) writes its normalized result here, so the common case is cache-hit and the break completes synchronously with no upstream ping.
+2. **Network fallback** — if the cache has no record for the chosen source, the helper makes one live request to that source (AniList by ID, MAL by ID with the configured Client ID, MangaUpdates by ID, Doujinshi by slug). Failures fall through to the next candidate.
+3. **No fallback possible** — if every remaining candidate is empty or fails, the row stays at `metadata_source = 'none'` with cleared fields. The original break is *not* rolled back; the linkage really is gone.
+
+Local metadata is intentionally not handled by the fallback path. At apply time `local` outranks every third-party source, so the only way for the displayed source to be a third party is for `metadata.json` not to exist; there's nothing to read at reset time. If a user later drops a `metadata.json`, the next scan picks it up.
+
+The same `applyFallbackMetadata` helper drives the [end-of-scan metadata-priority enforcement pass](./scanner.md#end-of-scan-metadata-priority-enforcement) (with `brokenSource = null`), so the apply behaviour and ID-coalesce semantics are identical to a Break Linkage fallback.
 
 ### Bulk Metadata Pull
 

@@ -913,6 +913,460 @@ function AnilistStatusPanel({ status, onEntryChange, onBreakLinkage, mangaId }) 
   );
 }
 
+// ── Schedule editor (lives inside SourceUrlsModal) ─────────────────────────────
+//
+// A schedule fires the per-manga auto-check that walks every recorded source
+// URL, diffs against the local folder by chapter number, and enqueues
+// anything missing. The poll cadence on the server is once per minute, so
+// the schedule's effective resolution is the minute set in `time_of_day`.
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function ScheduleEditor({ mangaId, hasUrls }) {
+  const [schedule, setSchedule] = useState(null); // server row, or `null` if unset
+  const [loading,  setLoading]  = useState(true);
+
+  // Local form state — populated from `schedule` once it loads.
+  const [enabled,   setEnabled]   = useState(true);
+  const [frequency, setFrequency] = useState('daily');
+  const [dayOfWeek, setDayOfWeek] = useState(0);
+  const [timeOfDay, setTimeOfDay] = useState('09:00');
+
+  const [saving,    setSaving]    = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [savedFlash, setSavedFlash] = useState(null);
+
+  const [running,   setRunning]   = useState(false);
+  const [runResult, setRunResult] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getMangaSchedule(mangaId);
+      setSchedule(data);
+      if (data) {
+        setEnabled(!!data.enabled);
+        setFrequency(data.frequency);
+        setDayOfWeek(data.day_of_week ?? 0);
+        setTimeOfDay(data.time_of_day);
+      }
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [mangaId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleSave() {
+    setSaving(true);
+    setSaveError(null);
+    setSavedFlash(null);
+    try {
+      const body = {
+        enabled,
+        frequency,
+        time_of_day: timeOfDay,
+        day_of_week: frequency === 'weekly' ? dayOfWeek : null,
+      };
+      const updated = await api.saveMangaSchedule(mangaId, body);
+      setSchedule(updated);
+      setSavedFlash('Saved.');
+      setTimeout(() => setSavedFlash(null), 2000);
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api.deleteMangaSchedule(mangaId);
+      setSchedule(null);
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRunNow() {
+    setRunning(true);
+    setRunResult(null);
+    try {
+      const result = await api.runMangaScheduleNow(mangaId);
+      setRunResult(result);
+      // Refresh schedule so last_checked_at + last_result are up to date.
+      load();
+    } catch (err) {
+      setRunResult({ ok: false, summary: err.message, enqueued: 0 });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="loading-center" style={{ minHeight: 80 }}><div className="spinner" /></div>;
+  }
+
+  return (
+    <div>
+      {!hasUrls && (
+        <p className="settings-hint" style={{ margin: '0 0 10px' }}>
+          Add at least one source URL above before scheduling — the scheduler
+          checks each recorded URL for new chapters.
+        </p>
+      )}
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={e => setEnabled(e.target.checked)}
+          />
+          Enabled
+        </label>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <label style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+            Frequency
+          </label>
+          <select
+            className="setting-select"
+            value={frequency}
+            onChange={e => setFrequency(e.target.value)}
+            style={{ minWidth: 110 }}
+          >
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+        </div>
+
+        {frequency === 'weekly' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+              Day
+            </label>
+            <select
+              className="setting-select"
+              value={dayOfWeek}
+              onChange={e => setDayOfWeek(parseInt(e.target.value, 10))}
+              style={{ minWidth: 130 }}
+            >
+              {DAY_NAMES.map((name, i) => (
+                <option key={i} value={i}>{name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <label style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+            Time (server local)
+          </label>
+          <input
+            className="setting-select"
+            type="time"
+            value={timeOfDay}
+            onChange={e => setTimeOfDay(e.target.value)}
+            style={{ minWidth: 110 }}
+          />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={handleSave}
+          disabled={saving || !hasUrls}
+        >
+          {saving ? 'Saving…' : (schedule ? 'Update schedule' : 'Save schedule')}
+        </button>
+
+        {schedule && (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={handleDelete}
+            disabled={saving}
+          >
+            Remove schedule
+          </button>
+        )}
+
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={handleRunNow}
+          disabled={running || !hasUrls}
+          title="Check for new chapters right now, regardless of the schedule"
+        >
+          {running ? 'Checking…' : 'Run check now'}
+        </button>
+
+        {savedFlash && <span className="sp-status sp-status-ok">{savedFlash}</span>}
+        {saveError && <span className="sp-status sp-status-error">{saveError}</span>}
+      </div>
+
+      {runResult && (
+        <p
+          className="settings-hint"
+          style={{
+            marginTop: 8,
+            color: runResult.ok ? 'var(--success, #6c6)' : 'var(--danger, #f55)',
+          }}
+        >
+          Run result: {runResult.summary}
+          {runResult.enqueued > 0 && ' — see Downloads in Third Party Sourcing.'}
+        </p>
+      )}
+
+      {schedule && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+          {schedule.next_run_at && schedule.enabled && (
+            <div>Next run: {new Date(schedule.next_run_at * 1000).toLocaleString()}</div>
+          )}
+          {schedule.last_checked_at && (
+            <div>
+              Last run: {new Date(schedule.last_checked_at * 1000).toLocaleString()}
+              {schedule.last_result && ` — ${schedule.last_result}`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Third Party Source URLs modal ──────────────────────────────────────────────
+//
+// Manages the per-manga record of source URLs that drives both manual
+// re-downloads and the future scheduler. The list is auto-populated by the
+// download flow; this modal lets the user paste a new URL, fix one whose
+// slug changed, or remove a dead link.
+function SourceUrlsModal({ manga, onClose }) {
+  const navigate = useNavigate();
+  const [urls, setUrls] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+
+  const [newUrl, setNewUrl] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState(null);
+
+  const [editingId, setEditingId] = useState(null);
+  const [editingValue, setEditingValue] = useState('');
+  const [editError, setEditError] = useState(null);
+
+  const [pendingDelete, setPendingDelete] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoadError(null);
+    try {
+      const data = await api.getMangaSourceUrls(manga.id);
+      setUrls(data);
+    } catch (err) {
+      setLoadError(err.message);
+    }
+  }, [manga.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleAdd(e) {
+    e?.preventDefault?.();
+    if (!newUrl.trim() || adding) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await api.addMangaSourceUrl(manga.id, { url: newUrl.trim() });
+      setNewUrl('');
+      load();
+    } catch (err) {
+      setAddError(err.message);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleSaveEdit(row) {
+    if (!editingValue.trim()) {
+      setEditError('URL cannot be empty.');
+      return;
+    }
+    setEditError(null);
+    try {
+      await api.updateMangaSourceUrl(manga.id, row.id, { url: editingValue.trim() });
+      setEditingId(null);
+      setEditingValue('');
+      load();
+    } catch (err) {
+      setEditError(err.message);
+    }
+  }
+
+  async function handleDelete(row) {
+    try {
+      await api.deleteMangaSourceUrl(manga.id, row.id);
+      setPendingDelete(null);
+      load();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  function handleSearchNew() {
+    onClose?.();
+    navigate(`/third-party-sourcing?manga_id=${manga.id}`);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Third Party Sources</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div style={{ padding: '0 4px 12px' }}>
+          <button
+            className="btn btn-primary"
+            onClick={handleSearchNew}
+            style={{ width: '100%' }}
+          >
+            Search third-party sources for "{manga.title}"
+          </button>
+          <p className="settings-hint" style={{ marginTop: 8 }}>
+            Pre-fills the search and locks the destination to this series so any
+            chapters you queue land in the right folder.
+          </p>
+        </div>
+
+        <div className="modal-results" style={{ paddingTop: 6 }}>
+          <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 8px', opacity: 0.75 }}>
+            Known URLs
+          </h3>
+
+          {loadError && <p className="modal-error">{loadError}</p>}
+          {!loadError && urls === null && (
+            <div className="loading-center" style={{ minHeight: 80 }}><div className="spinner" /></div>
+          )}
+          {urls && urls.length === 0 && (
+            <p className="settings-hint" style={{ margin: '0 0 12px' }}>
+              No URLs recorded yet. Search for this title above and any chapters
+              you download will register the URL here automatically.
+            </p>
+          )}
+
+          {urls && urls.length > 0 && (
+            <ul style={{ listStyle: 'none', margin: '0 0 12px', padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {urls.map(row => (
+                <li
+                  key={row.id}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 8,
+                    padding: '8px 10px', border: '1px solid var(--border)',
+                    borderRadius: 6, background: 'var(--bg)',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>
+                      {row.source}
+                    </div>
+                    {editingId === row.id ? (
+                      <input
+                        className="modal-search-input"
+                        value={editingValue}
+                        onChange={e => setEditingValue(e.target.value)}
+                        autoFocus
+                      />
+                    ) : (
+                      <a
+                        href={row.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ wordBreak: 'break-all' }}
+                      >{row.url}</a>
+                    )}
+                    {editingId === row.id && editError && (
+                      <p className="modal-error" style={{ margin: '4px 0 0' }}>{editError}</p>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                    {editingId === row.id ? (
+                      <>
+                        <button className="btn btn-primary btn-sm" onClick={() => handleSaveEdit(row)}>Save</button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => { setEditingId(null); setEditError(null); }}>Cancel</button>
+                      </>
+                    ) : pendingDelete === row.id ? (
+                      <>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setPendingDelete(null)}>Cancel</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => handleDelete(row)}>Confirm delete</button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => { setEditingId(row.id); setEditingValue(row.url); setEditError(null); }}
+                        >Edit</button>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setPendingDelete(row.id)}
+                        >Remove</button>
+                      </>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <form onSubmit={handleAdd} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginTop: 8 }}>
+            <input
+              className="modal-search-input"
+              type="url"
+              placeholder="https://mangadex.org/title/{uuid}"
+              value={newUrl}
+              onChange={e => setNewUrl(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={adding || !newUrl.trim()}
+            >
+              {adding ? 'Adding…' : 'Add URL'}
+            </button>
+          </form>
+          {addError && <p className="modal-error" style={{ marginTop: 6 }}>{addError}</p>}
+          <p className="settings-hint" style={{ marginTop: 6 }}>
+            Currently recognised: <code>https://mangadex.org/title/&#123;uuid&#125;</code>.
+          </p>
+
+          <div style={{
+            borderTop: '1px solid var(--border)',
+            marginTop: 18,
+            paddingTop: 14,
+          }}>
+            <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 8px', opacity: 0.75 }}>
+              Auto-check schedule
+            </h3>
+            <p className="settings-hint" style={{ margin: '0 0 10px' }}>
+              Picks up where the recorded URLs leave off — runs daily or weekly,
+              detects which chapters this folder is missing (numbers parsed
+              from your existing files), and downloads anything new.
+            </p>
+            <ScheduleEditor
+              mangaId={manga.id}
+              hasUrls={(urls || []).length > 0}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function MangaDetail() {
   const { id } = useParams();
@@ -944,6 +1398,7 @@ export default function MangaDetail() {
   const [togglingList, setTogglingList] = useState(null);
   const [showListDropdown, setShowListDropdown] = useState(false);
   const [showMetaModal, setShowMetaModal] = useState(false);
+  const [showSourceUrlsModal, setShowSourceUrlsModal] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [markingChapters, setMarkingChapters] = useState(new Set());
   const [showAllChapters, setShowAllChapters] = useState(false);
@@ -1447,6 +1902,16 @@ export default function MangaDetail() {
           </svg>
         </button>
         <button
+          className="detail-source-btn"
+          onClick={() => setShowSourceUrlsModal(true)}
+          title="Search third-party sources"
+          aria-label="Search third-party sources"
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M5.5 4a4.5 4.5 0 014.473 4.072A3.5 3.5 0 0114.5 14H5.5a4.5 4.5 0 010-9zm5.146 5.354a.5.5 0 01.708 0l1.5 1.5a.5.5 0 01-.708.708L11.5 10.707V13.5a.5.5 0 01-1 0v-2.793l-.646.647a.5.5 0 11-.708-.708l1.5-1.5z" clipRule="evenodd" />
+          </svg>
+        </button>
+        <button
           className="detail-edit-btn"
           onClick={() => navigate(`/manga/${manga.id}/edit`)}
           title="Edit manga"
@@ -1548,7 +2013,8 @@ export default function MangaDetail() {
                   <span className="detail-action-label">Reset Progress</span>
                 </button>
               )}
-              {/* Desktop: individual buttons */}
+              {/* Desktop: individual buttons. Third Party Sources lives in
+                  the navbar icon next to Optimize, so it's not duplicated here. */}
               <button className="btn btn-ghost detail-desktop-only" onClick={() => setShowMetaModal(true)}>
                 Metadata
               </button>
@@ -1582,6 +2048,9 @@ export default function MangaDetail() {
                     </button>
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openOptimizeModal(); }}>
                       Optimize
+                    </button>
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); setShowSourceUrlsModal(true); }}>
+                      Third Party Sources
                     </button>
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); handleOpenInfo(); }}>
                       More Info
@@ -2308,6 +2777,13 @@ export default function MangaDetail() {
             setShowThumbPicker(false);
           }}
           onClose={() => setShowThumbPicker(false)}
+        />
+      )}
+
+      {showSourceUrlsModal && (
+        <SourceUrlsModal
+          manga={manga}
+          onClose={() => setShowSourceUrlsModal(false)}
         />
       )}
 

@@ -12,6 +12,8 @@ const { runFullScan } = require('./scanner/libraryScanner');
 const { migrateToSharded } = require('./scanner/thumbnailPaths');
 const cbzCache = require('./scanner/cbzCache');
 const cbzCacheSchedule = require('./scanner/cbzCacheSchedule');
+const downloader = require('./downloader/queue');
+const scheduler = require('./scheduler');
 const { startWatcher } = require('./watcher');
 const { errorHandler } = require('./middleware/errorHandler');
 
@@ -25,6 +27,7 @@ const optimizeRoutes = require('./routes/optimize');
 const adminRoutes = require('./routes/admin');
 const galleryRoutes = require('./routes/gallery');
 const configRoutes = require('./routes/config');
+const sourcesRoutes = require('./routes/sources');
 
 const app = express();
 
@@ -59,6 +62,7 @@ app.use('/api', optimizeRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', galleryRoutes);
 app.use('/api', configRoutes);
+app.use('/api', sourcesRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
@@ -106,6 +110,16 @@ async function start() {
 
   // Start the cache auto-clear scheduler (no-op if mode is 'off').
   cbzCacheSchedule.reschedule();
+
+  // Initialise the Third Party Sourcing download queue. Re-queues any jobs
+  // that were 'running' when the previous process died and starts pumping
+  // immediately if there's outstanding work.
+  downloader.init();
+
+  // Per-manga scheduled auto-checks. Polls `manga_schedules` once a minute,
+  // fires due rows, and enqueues missing chapters through the download
+  // queue. No-op when no schedules exist.
+  scheduler.start();
 
   // One-time migration: relocate any flat thumbnails into shard subdirs.
   // No-op once the tree is fully sharded.

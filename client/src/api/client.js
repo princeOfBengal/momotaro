@@ -318,6 +318,86 @@ export const api = {
     return apiFetch(`/api/stats${q}`);
   },
 
+  // Third Party Sourcing — search and download chapters from external sources
+  // (MangaDex today; comix.to + scheduler are explicit follow-ups). All
+  // download work happens server-side via the queue in
+  // server/src/downloader/queue.js — these endpoints just enqueue and report.
+  listSources: () => apiFetch('/api/sources'),
+  searchSource: (source, q) =>
+    apiFetch(`/api/sources/${source}/search?${new URLSearchParams({ q })}`),
+  getSourceSeries: (source, id) =>
+    apiFetch(`/api/sources/${source}/series/${encodeURIComponent(id)}`),
+  // Pass `mangaId` to also flag chapters whose chapter-number matches one
+  // already in that local manga folder (so the picker can pre-uncheck them).
+  getSourceChapters: (source, id, { lang = 'en', mangaId } = {}) => {
+    const params = new URLSearchParams({ lang });
+    if (mangaId) params.set('manga_id', String(mangaId));
+    return apiFetch(`/api/sources/${source}/series/${encodeURIComponent(id)}/chapters?${params}`);
+  },
+  enqueueSourceDownload: (source, body) =>
+    apiFetch(`/api/sources/${source}/download`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listSourceDownloads: (limit = 50) =>
+    apiFetch(`/api/sources/downloads?limit=${limit}`),
+  cancelSourceDownload: (id) =>
+    apiFetch(`/api/sources/downloads/${id}`, { method: 'DELETE' }),
+  clearFinishedDownloads: () =>
+    apiFetch('/api/sources/downloads/clear-finished', { method: 'POST' }),
+  matchExistingManga: (title) =>
+    apiFetch(`/api/sources/match-existing?${new URLSearchParams({ title })}`),
+  linkMangaToSource: (mangaId, source, sourceId) =>
+    apiFetch(`/api/manga/${mangaId}/link-source`, {
+      method: 'POST',
+      body: JSON.stringify({ source, source_id: sourceId }),
+    }),
+  unlinkMangaFromSource: (mangaId, source) =>
+    apiFetch(`/api/manga/${mangaId}/link-source/${source}`, { method: 'DELETE' }),
+
+  // Per-manga record of known source URLs. The download flow auto-inserts
+  // these whenever a chapter is queued for the manga, and the user can also
+  // add/edit/remove via the MangaDetail Third Party Sources modal.
+  getMangaSourceUrls: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/source-urls`),
+  addMangaSourceUrl: (mangaId, body) =>
+    apiFetch(`/api/manga/${mangaId}/source-urls`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateMangaSourceUrl: (mangaId, urlId, body) =>
+    apiFetch(`/api/manga/${mangaId}/source-urls/${urlId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteMangaSourceUrl: (mangaId, urlId) =>
+    apiFetch(`/api/manga/${mangaId}/source-urls/${urlId}`, { method: 'DELETE' }),
+
+  // Per-manga schedule for auto-checking the recorded source URLs and
+  // downloading any new chapters. Server poll cadence is one minute, so the
+  // schedule's effective resolution is "the minute you set in time_of_day,
+  // give or take 60s".
+  listSchedules: () => apiFetch('/api/schedules'),
+  getMangaSchedule: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/schedule`),
+  saveMangaSchedule: (mangaId, body) =>
+    apiFetch(`/api/manga/${mangaId}/schedule`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteMangaSchedule: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/schedule`, { method: 'DELETE' }),
+  // Triggers an immediate check, independent of the schedule. Returns the
+  // same { ok, summary, enqueued } shape the poll loop writes to last_result.
+  runMangaScheduleNow: (mangaId) =>
+    apiFetch(`/api/manga/${mangaId}/schedule/run-now`, {
+      method: 'POST',
+      // The check fetches one HTTP request per linked URL plus inserts; on a
+      // slow network with several mirrors this can take longer than the
+      // default 15s budget.
+      timeoutMs: 60_000,
+    }),
+
   // Helpers
   pageImageUrl: (pageId) => `${BASE}/api/pages/${pageId}/image`,
   thumbnailUrl,

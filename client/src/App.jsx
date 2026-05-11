@@ -23,6 +23,7 @@ const Settings        = lazy(() => import('./pages/Settings'));
 const Libraries       = lazy(() => import('./pages/Libraries'));
 const Genres          = lazy(() => import('./pages/Genres'));
 const ArtGallery      = lazy(() => import('./pages/ArtGallery'));
+const ThirdPartySourcing = lazy(() => import('./pages/ThirdPartySourcing'));
 const AnilistCallback = lazy(() => import('./pages/AnilistCallback'));
 
 function RouteFallback() {
@@ -41,6 +42,7 @@ export default function App() {
           <Route path="/" element={<Home />} />
           <Route path="/genres" element={<Genres />} />
           <Route path="/art-gallery" element={<ArtGallery />} />
+          <Route path="/third-party-sourcing" element={<ThirdPartySourcing />} />
           <Route path="/library" element={<Library />} />
           <Route path="/manga/:id" element={<MangaDetail />} />
           <Route path="/manga/:id/edit" element={<EditManga />} />

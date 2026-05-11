@@ -133,6 +133,29 @@
   background: var(--accent-dim);
 }
 
+.detail-source-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.detail-source-btn svg {
+  width: 16px;
+  height: 16px;
+}
+.detail-source-btn:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
 .detail-edit-btn {
   width: 32px;
   height: 32px;

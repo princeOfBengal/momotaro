@@ -173,6 +173,7 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'author',            'TEXT');
   addColumnIfMissing(db, 'manga',     'doujinshi_id',      'TEXT');
   addColumnIfMissing(db, 'manga',     'mangaupdates_id',   'INTEGER');
+  addColumnIfMissing(db, 'manga',     'mangadex_id',       'TEXT');
   addColumnIfMissing(db, 'manga',     'anilist_cover',     'TEXT');
   addColumnIfMissing(db, 'manga',     'original_cover',    'TEXT');
   addColumnIfMissing(db, 'manga',     'mal_cover',         'TEXT');
@@ -193,6 +194,119 @@ function migrate(db) {
 
   migrateSearchIndex(db);
   backfillDoujinshiCover(db);
+  createDownloadJobsTable(db);
+  createMangaSourceUrlsTable(db);
+  createMangaSchedulesTable(db);
+}
+
+/**
+ * One row per manga that the user has opted into auto-checking against its
+ * recorded source URLs. Driven by [server/src/scheduler/index.js], which
+ * polls this table once a minute, finds rows where `next_run_at <= now`,
+ * fetches each URL's chapter list, and enqueues whatever the local folder is
+ * missing into the existing download queue.
+ *
+ * `frequency='daily'`  → fires every day at `time_of_day` (server local).
+ * `frequency='weekly'` → fires once a week on `day_of_week` (0=Sunday).
+ *
+ * `next_run_at` is recomputed by the scheduler after every fire, and by the
+ * route handler whenever the schedule is created or edited — so the poll
+ * loop only ever has to do an indexed `WHERE next_run_at <= ?` lookup.
+ *
+ * `last_result` is a short user-facing string (e.g. "Queued 3 new chapters",
+ * "No new chapters", "error: Network timeout") so the UI can show what
+ * happened on the most recent run without needing a separate log table.
+ */
+function createMangaSchedulesTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS manga_schedules (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      manga_id        INTEGER NOT NULL UNIQUE REFERENCES manga(id) ON DELETE CASCADE,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      frequency       TEXT    NOT NULL,
+      day_of_week     INTEGER,
+      time_of_day     TEXT    NOT NULL,
+      last_checked_at INTEGER,
+      last_result     TEXT,
+      next_run_at     INTEGER,
+      created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_manga_schedules_due ON manga_schedules(next_run_at) WHERE enabled = 1;
+  `);
+}
+
+/**
+ * Per-manga record of known third-party source URLs. Multiple URLs per manga
+ * are allowed (different source, mirror, or replacement after a dead link).
+ *
+ * Layered on top of `manga.mangadex_id` (etc.) — the per-source columns stay
+ * as denormalized "active" pointers used by the cover/metadata pipelines, and
+ * are kept in sync with the most recent matching URL row by triggers below.
+ *
+ * `last_used_at` is touched whenever a download succeeds against the URL, so
+ * a future scheduler can sort series by recency-of-use to pace its checks.
+ */
+function createMangaSourceUrlsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS manga_source_urls (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      manga_id      INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+      source        TEXT    NOT NULL,
+      source_id     TEXT,
+      url           TEXT    NOT NULL,
+      label         TEXT,
+      created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_used_at  INTEGER,
+      UNIQUE (manga_id, url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_manga_source_urls_manga  ON manga_source_urls(manga_id);
+    CREATE INDEX IF NOT EXISTS idx_manga_source_urls_source ON manga_source_urls(source);
+  `);
+}
+
+/**
+ * Background download queue used by the Third Party Sourcing feature. One row
+ * per chapter the user asked the app to fetch from MangaDex (or any future
+ * source). Rows survive process restarts so a kill mid-download leaves a clear
+ * record of what was queued — the queue rehydrates on startup and skips
+ * anything already in `done` / `failed` / `cancelled`.
+ *
+ * `target_*` columns describe where the resulting CBZ should land:
+ *   - target_mode = 'new'       → create folder named target_folder_name in target_library_id
+ *   - target_mode = 'existing'  → write into manga(id = target_manga_id)
+ *
+ * Self-contained — no FK to manga / libraries because the destination might
+ * not exist yet (mode='new'), and we want the record to survive a manga
+ * deletion so the user can still see the history.
+ */
+function createDownloadJobsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS download_jobs (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      source               TEXT    NOT NULL,
+      source_series_id     TEXT    NOT NULL,
+      source_series_title  TEXT,
+      source_chapter_id    TEXT    NOT NULL,
+      chapter_number       REAL,
+      chapter_volume       REAL,
+      chapter_title        TEXT,
+      target_mode          TEXT    NOT NULL,
+      target_library_id    INTEGER,
+      target_manga_id      INTEGER,
+      target_folder_name   TEXT,
+      target_chapter_filename TEXT,
+      status               TEXT    NOT NULL DEFAULT 'queued',
+      error                TEXT,
+      pages_downloaded     INTEGER NOT NULL DEFAULT 0,
+      pages_total          INTEGER NOT NULL DEFAULT 0,
+      created_at           INTEGER NOT NULL DEFAULT (unixepoch()),
+      started_at           INTEGER,
+      finished_at          INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_download_jobs_status     ON download_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_download_jobs_created_at ON download_jobs(created_at DESC);
+  `);
 }
 
 /**

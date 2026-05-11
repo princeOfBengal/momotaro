@@ -4,6 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { getViewer } = require('../metadata/anilist');
 const { loginDoujinshi } = require('../metadata/doujinshi');
+const downloader = require('../downloader/queue');
 
 const router = express.Router();
 
@@ -68,6 +69,8 @@ router.get('/settings', asyncWrapper(async (req, res) => {
       anilist_avatar:            session?.anilist_avatar   || null,
       doujinshi_logged_in:       !!(raw['doujinshi_token']),
       mal_client_id_set:         !!(raw['mal_client_id']),
+      tps_max_concurrent_chapters: downloader.getSettings().max_concurrent,
+      tps_page_delay_ms:           downloader.getSettings().page_delay_ms,
     },
   });
 }));
@@ -79,6 +82,28 @@ router.put('/settings', asyncWrapper(async (req, res) => {
   for (const key of allowed) {
     if (key in req.body) setSetting(db, key, req.body[key]);
   }
+
+  // Third Party Sourcing — concurrency + per-page delay. Validate before
+  // writing so a bad value can't disable the downloader.
+  let tpsChanged = false;
+  if ('tps_max_concurrent_chapters' in req.body) {
+    const n = parseInt(req.body.tps_max_concurrent_chapters, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 8) {
+      return res.status(400).json({ error: 'tps_max_concurrent_chapters must be an integer in [1, 8]' });
+    }
+    setSetting(db, 'tps_max_concurrent_chapters', String(n));
+    tpsChanged = true;
+  }
+  if ('tps_page_delay_ms' in req.body) {
+    const n = parseInt(req.body.tps_page_delay_ms, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 60_000) {
+      return res.status(400).json({ error: 'tps_page_delay_ms must be an integer in [0, 60000]' });
+    }
+    setSetting(db, 'tps_page_delay_ms', String(n));
+    tpsChanged = true;
+  }
+  if (tpsChanged) downloader.applySettings();
+
   res.json({ message: 'Settings saved' });
 }));
 

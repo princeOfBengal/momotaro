@@ -1,0 +1,462 @@
+/* Third Party Sourcing page — search results, chapter picker, target picker,
+   and live downloads queue. Reuses the home/library layout primitives so the
+   sidebar and navbar match the rest of the app. */
+
+.tps-main {
+  padding-bottom: 80px;
+}
+
+/* Search row */
+
+.tps-search-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 16px 0 24px;
+}
+
+.tps-search-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.tps-source-select,
+.tps-target-select,
+.tps-target-input,
+.tps-search-input {
+  background: var(--bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  outline: none;
+}
+.tps-source-select:focus,
+.tps-target-select:focus,
+.tps-target-input:focus,
+.tps-search-input:focus {
+  border-color: var(--accent, #6aa6ff);
+}
+
+.tps-search-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.tps-error {
+  color: var(--danger, #f55);
+  margin: 10px 0 0;
+}
+
+.tps-info {
+  color: var(--success, #6c6);
+  margin: 0;
+}
+
+/* Search results */
+
+.tps-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.tps-result-row {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background 0.12s, border-color 0.12s;
+}
+.tps-result-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent, #6aa6ff);
+}
+
+.tps-result-cover {
+  width: 64px;
+  height: 92px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.tps-result-cover-empty {
+  background: var(--border);
+}
+
+.tps-result-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tps-result-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.tps-result-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 10px;
+}
+
+.tps-result-genres {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tps-result-cta {
+  align-self: center;
+  color: var(--accent, #6aa6ff);
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* Series detail pane */
+
+.tps-series-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.tps-series-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.tps-series-cover {
+  width: 110px;
+  height: 158px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.tps-series-headinfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.tps-series-title {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.tps-series-meta {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.tps-series-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+.tps-back-btn {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+/* Target picker */
+
+.tps-target-card,
+.tps-chapters-card,
+.tps-downloads {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.tps-target-heading {
+  margin: 0 0 12px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.tps-target-modes {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.tps-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.tps-radio-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tps-locked-pill {
+  display: inline-block;
+  margin-left: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--accent, #6aa6ff);
+  color: var(--accent, #6aa6ff);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  vertical-align: middle;
+}
+
+.tps-target-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.tps-field-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tps-field-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Chapters list */
+
+.tps-chapters-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tps-chapters-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tps-chapter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.tps-chapter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.tps-chapter-row-already {
+  opacity: 0.55;
+}
+
+.tps-chapter-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+.tps-chapter-row-already .tps-chapter-label {
+  cursor: not-allowed;
+}
+
+.tps-chapter-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tps-chapter-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tps-chapter-group {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tps-chapter-badge {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.tps-chapter-badge-warn {
+  border-color: var(--warning, #c80);
+  color: var(--warning, #c80);
+}
+
+/* Submit row */
+
+.tps-submit-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 0 4px;
+}
+
+.tps-selected-count {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-right: auto;
+}
+
+/* Downloads panel */
+
+.tps-downloads {
+  margin-top: 24px;
+}
+
+.tps-downloads-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 10px;
+}
+
+.tps-downloads-title {
+  margin: 0;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.tps-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tps-job-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.tps-job-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.tps-job-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tps-job-meta {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tps-job-meta code {
+  background: var(--bg-elev);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.tps-job-progress {
+  white-space: nowrap;
+}
+
+.tps-job-error {
+  margin: 4px 0 0;
+  color: var(--danger, #f55);
+  font-size: 12px;
+}
+
+.tps-status {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.tps-status-queued    { color: var(--text-muted); }
+.tps-status-running   { color: var(--accent, #6aa6ff); border-color: var(--accent, #6aa6ff); }
+.tps-status-done      { color: var(--success, #6c6); border-color: var(--success, #6c6); }
+.tps-status-failed    { color: var(--danger,  #f55); border-color: var(--danger,  #f55); }
+.tps-status-cancelled { color: var(--text-muted); border-style: dashed; }

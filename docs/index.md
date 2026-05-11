@@ -17,6 +17,7 @@ Quick-reference documentation for the Momotaro self-hosted manga server.
 | [myanimelist.md](./myanimelist.md) | Client-ID auth, search/refresh/apply, bulk concurrency pool, NSFW handling, status mapping |
 | [mangaupdates.md](./mangaupdates.md) | Public read API (no auth), search/refresh/apply, conservative pacing, status / rating / author normalization |
 | [doujinshi.md](./doujinshi.md) | Email/password auth, search mechanics (space→underscore workaround), normalization, metadata priority |
+| [sources.md](./sources.md) | Third Party Sourcing — MangaDex search, CBZ download queue, source linkage, scheduled-check follow-up plan |
 
 ## Quick Start
 

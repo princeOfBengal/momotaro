@@ -251,6 +251,23 @@ export default function AppSidebar({
         </svg>
         Art Gallery
       </Link>
+
+      <Link
+        to="/third-party-sourcing"
+        className="library-sidebar-item library-sidebar-home"
+        onClick={closeDrawer}
+      >
+        <svg
+          className="library-sidebar-home-icon"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M10 3a1 1 0 011 1v6.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 111.414-1.414L9 10.586V4a1 1 0 011-1z" />
+          <path d="M3 14a1 1 0 011 1v1a1 1 0 001 1h10a1 1 0 001-1v-1a1 1 0 112 0v1a3 3 0 01-3 3H5a3 3 0 01-3-3v-1a1 1 0 011-1z" />
+        </svg>
+        Third Party Sourcing
+      </Link>
     </aside>
   );
 }

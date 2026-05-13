@@ -284,6 +284,11 @@ export const api = {
 
   // Config backup (export/import)
   exportConfigUrl: () => `${BASE}/api/admin/export-config`,
+  // CSV download: one row per manga, columns: Library, Series Name
+  // (AniList/MAL/MangaUpdates/Doujinshi.info), Folder path, Number of
+  // chapters, Number of volumes, Author. Used for manually spot-checking
+  // that third-party metadata matches are correct.
+  exportSeriesListUrl: () => `${BASE}/api/admin/export-series-list`,
   importConfig: (payload) =>
     apiFetch('/api/admin/import-config', {
       method: 'POST',

@@ -294,6 +294,108 @@ router.post('/admin/vacuum-db', asyncWrapper(async (req, res) => {
   res.json({ data: { size_before_bytes: sizeBefore, size_after_bytes: sizeAfter } });
 }));
 
+// ── Series List Export ───────────────────────────────────────────────────────
+//
+// GET /api/admin/export-series-list
+//
+// Emits a CSV listing every series in the library with one row per manga
+// and the following columns:
+//
+//   Library, Series Name (AniList), Series Name (MAL),
+//   Series Name (MangaUpdates), Series Name (Doujinshi.info),
+//   Folder path, Number of chapters, Number of volumes, Author
+//
+// Per-source title cells are read from the on-disk metadata cache at
+// `data/metadata-cache/<source>/<id>.json` (the same cache the bulk
+// export, scheduler, and break-linkage fallback use). When a manga has a
+// source ID but the cache is missing, the cell is left empty — the user
+// can refresh the linkage from MangaDetail to repopulate.
+//
+// Designed as a spot-check tool: the user opens the CSV, sorts by
+// library, eyeballs the four source columns side by side, and catches
+// titles that have drifted from the canonical (e.g. the AniList match
+// pointing at the wrong series).
+
+const { getCached: getCachedMetadata } = require('../metadata/cache');
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  // Always quote so embedded commas/newlines/quotes stay correct under
+  // RFC 4180. Quote-doubling per the spec.
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
+router.get('/admin/export-series-list', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT m.id, m.title, m.author, m.path, m.folder_name,
+           m.anilist_id, m.mal_id, m.mangaupdates_id, m.doujinshi_id,
+           l.name AS library_name,
+           (
+             SELECT COUNT(*) FROM chapters c
+              WHERE c.manga_id = m.id
+           ) AS chapter_count,
+           (
+             SELECT COUNT(DISTINCT c.volume) FROM chapters c
+              WHERE c.manga_id = m.id AND c.volume IS NOT NULL
+           ) AS volume_count
+      FROM manga m
+      LEFT JOIN libraries l ON l.id = m.library_id
+     ORDER BY
+       CASE WHEN l.name IS NULL THEN 1 ELSE 0 END,
+       l.name COLLATE NOCASE ASC,
+       m.title COLLATE NOCASE ASC
+  `).all();
+
+  // Header. The order here matches the spec exactly so the user can
+  // diff columns side-by-side without column-juggling.
+  const header = [
+    'Library',
+    'Series Name (AniList)',
+    'Series Name (MAL)',
+    'Series Name (MangaUpdates)',
+    'Series Name (Doujinshi.info)',
+    'Folder path',
+    'Number of chapters',
+    'Number of volumes',
+    'Author',
+  ];
+
+  const lines = [header.map(csvEscape).join(',')];
+
+  for (const r of rows) {
+    const anilistTitle      = r.anilist_id      ? (getCachedMetadata('anilist',      r.anilist_id)?.title      || '') : '';
+    const malTitle          = r.mal_id          ? (getCachedMetadata('myanimelist',  r.mal_id)?.title          || '') : '';
+    const mangaupdatesTitle = r.mangaupdates_id ? (getCachedMetadata('mangaupdates', r.mangaupdates_id)?.title || '') : '';
+    const doujinshiTitle    = r.doujinshi_id    ? (getCachedMetadata('doujinshi',    r.doujinshi_id)?.title    || '') : '';
+
+    lines.push([
+      r.library_name || '(no library)',
+      anilistTitle,
+      malTitle,
+      mangaupdatesTitle,
+      doujinshiTitle,
+      r.path || '',
+      r.chapter_count ?? 0,
+      r.volume_count ?? 0,
+      r.author || '',
+    ].map(csvEscape).join(','));
+  }
+
+  // Excel and Google Sheets read UTF-8 cleanly when the BOM is present —
+  // without it, non-ASCII titles (Japanese, French, etc.) render as
+  // mojibake on Windows Excel. The BOM is invisible in proper UTF-8
+  // readers.
+  const body = '﻿' + lines.join('\r\n') + '\r\n';
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="momotaro-series-list-${stamp}.csv"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+}));
+
 // ── System Logs ───────────────────────────────────────────────────────────────
 
 // GET /api/admin/logs

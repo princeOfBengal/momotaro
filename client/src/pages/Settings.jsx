@@ -1558,6 +1558,12 @@ function DatabaseSection() {
     window.location.href = api.exportConfigUrl();
   }
 
+  function handleExportSeriesList() {
+    // Straight browser download — the server emits a Content-Disposition
+    // header so the filename is momotaro-series-list-<YYYY-MM-DD>.csv.
+    window.location.href = api.exportSeriesListUrl();
+  }
+
   function triggerImportPicker() {
     setImportError(null);
     setImportResult(null);
@@ -1901,6 +1907,32 @@ function DatabaseSection() {
               onChange={handleImportFile}
             />
           </div>
+        </div>
+      </div>
+
+      {/* Series List Export */}
+      <div className="settings-card" style={{ marginBottom: 16 }}>
+        <div className="db-op-row">
+          <div className="db-op-info">
+            <p className="db-op-title">Export Series List</p>
+            <p className="db-op-desc">
+              Download a CSV with one row per series, listing the title as known
+              by each third-party source (AniList, MyAnimeList, MangaUpdates,
+              Doujinshi.info) alongside the folder path, chapter / volume
+              counts, and author. Useful for spot-checking that titles are
+              matched to the right series at each source. Per-source titles are
+              read from the on-disk metadata cache — if a source column is
+              empty for a linked manga, refresh that source from the manga's
+              detail page to repopulate it.
+            </p>
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+            onClick={handleExportSeriesList}
+          >
+            Export Series List
+          </button>
         </div>
       </div>
 

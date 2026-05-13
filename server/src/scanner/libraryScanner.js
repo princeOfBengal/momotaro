@@ -352,7 +352,21 @@ function computeChapterStats(type, chapterPath, pages) {
 async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { skipRollup = false } = {}) {
   const db = getDb();
 
-  const existing = db.prepare('SELECT id, library_id FROM manga WHERE path = ?').get(mangaPath);
+  // `cover_image` and `cover_user_set` are both needed by the thumbnail
+  // regeneration guard at the bottom of this function. Previously this
+  // query only selected `id, library_id`, which meant `existing.cover_image`
+  // was always `undefined` for existing manga — and the guard
+  // `if (coverPage && (!existing || !existing.cover_image))` evaluated to
+  // `true` every single time. Result: every rescan (TPS chapter download,
+  // file watcher event, per-manga refresh, optimize) overwrote the user's
+  // active cover (AniList / MAL / MangaUpdates / Doujinshi.info / manual
+  // pick) with the first page of the lowest-numbered chapter, with no
+  // signal to the user. Reading the two columns now lets the guard
+  // correctly distinguish "new manga, needs a generated cover" from
+  // "existing manga, leave the priority-resolved cover alone".
+  const existing = db.prepare(
+    'SELECT id, library_id, cover_image, cover_user_set FROM manga WHERE path = ?'
+  ).get(mangaPath);
 
   let mangaId;
   if (!existing) {
@@ -550,8 +564,28 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
     `).run(mangaId, mangaId, mangaId);
   }
 
-  // Generate thumbnail if we have a cover candidate and none exists yet.
-  if (coverPage && (!existing || !existing.cover_image)) {
+  // Generate a cover from the first page ONLY when:
+  //   - we have a usable first-page candidate (`coverPage`), AND
+  //   - either the manga row was just inserted (existing === null), or
+  //     the existing row has no active cover at all (cover_image IS NULL)
+  //
+  // A user-picked cover (`cover_user_set = 1`) is sticky and is NEVER
+  // overwritten here. An existing manga whose active cover is already
+  // resolved by the priority pipeline (AniList / MAL / MangaUpdates /
+  // Doujinshi / original) is also left alone — we don't re-derive what's
+  // already correct.
+  //
+  // After a legitimate generation (truly new manga), call
+  // `reinforceActiveCover` so any third-party covers that happen to be on
+  // disk (e.g. carried over from a previous metadata fetch on a
+  // re-imported manga, or written by a parallel apply-metadata call
+  // racing with this scan) still win over the auto-generated one.
+  const needsGeneratedCover =
+    coverPage
+    && (existing === undefined || existing === null || !existing.cover_image)
+    && !(existing && existing.cover_user_set);
+
+  if (needsGeneratedCover) {
     const thumbPath = await generateThumbnail(coverPage, mangaId);
     if (thumbPath) {
       const originalName = `${mangaId}_original.webp`;
@@ -564,6 +598,16 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
       }
       db.prepare('UPDATE manga SET cover_image = ?, original_cover = COALESCE(original_cover, ?) WHERE id = ?')
         .run(path.basename(thumbPath), originalName, mangaId);
+
+      // Defensive: if any higher-priority source cover is already on disk
+      // for this manga, the priority resolver will swap it in over the
+      // just-generated one. No-op when only the original is available.
+      try {
+        const { reinforceActiveCover } = require('./coverResolver');
+        reinforceActiveCover(db, mangaId, { force: false });
+      } catch (err) {
+        console.warn(`[Scanner] post-generate cover reinforce failed for manga ${mangaId}: ${err.message}`);
+      }
     }
   }
 }

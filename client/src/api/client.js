@@ -343,6 +343,10 @@ export const api = {
     apiFetch(`/api/sources/downloads?limit=${limit}`),
   cancelSourceDownload: (id) =>
     apiFetch(`/api/sources/downloads/${id}`, { method: 'DELETE' }),
+  // Re-queues a failed or cancelled job. Server resets run-state and bumps
+  // created_at so the retry lands at the back of the queue.
+  retrySourceDownload: (id) =>
+    apiFetch(`/api/sources/downloads/${id}/retry`, { method: 'POST' }),
   clearFinishedDownloads: () =>
     apiFetch('/api/sources/downloads/clear-finished', { method: 'POST' }),
   matchExistingManga: (title) =>

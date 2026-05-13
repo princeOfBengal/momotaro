@@ -96,13 +96,15 @@ function reinforceActiveCover(db, mangaId, { force = false } = {}) {
  * Run reinforceActiveCover over every manga in the DB (or one library when
  * `libraryId` is given). Used by:
  *
- *   • `POST /api/admin/reset-thumbnails`  (force=true; clobbers user picks)
- *   • End of `scanLibrary` / `runFullScan` (force=true; the user explicitly
- *     wants the priority reinforced after every scan).
+ *   • `POST /api/admin/reset-thumbnails`  (force=true; clobbers user picks
+ *     — the only path that ever does)
+ *   • End of `scanLibrary` / `runFullScan` (force=false; user picks survive
+ *     scans, anything not user-picked re-aligns to the priority order)
  *
- * Returns counters: { total, changed_to_<source>, kept, errors }.
+ * Returns counters: { total, changed_to_<source>, kept_user, kept_no_source,
+ * errors }.
  */
-function reinforceAllCovers(db, { libraryId = null, force = true } = {}) {
+function reinforceAllCovers(db, { libraryId = null, force = false } = {}) {
   const rows = libraryId
     ? db.prepare('SELECT id FROM manga WHERE library_id = ?').all(libraryId)
     : db.prepare('SELECT id FROM manga').all();

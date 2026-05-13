@@ -13,7 +13,11 @@ const router = express.Router();
 // Sources known to the linkage helpers. Mirrors the column map in
 // downloader/queue.js → sourceColumn().
 const LINKAGE_COLUMNS = {
-  mangadex: 'mangadex_id',
+  mangadex:     'mangadex_id',
+  comixto:      'comixto_id',
+  mangakakalot: 'mangakakalot_id',
+  mangafire:    'mangafire_id',
+  weebcentral:  'weebcentral_id',
 };
 
 /**
@@ -237,6 +241,15 @@ router.delete('/sources/downloads/:id', asyncWrapper(async (req, res) => {
   res.json({ message: 'Cancelled' });
 }));
 
+// POST /api/sources/downloads/:id/retry — re-queue a failed or cancelled job.
+// Resets run-state columns and pushes created_at to now so the retry sits at
+// the back of the queue rather than jumping ahead of already-waiting jobs.
+router.post('/sources/downloads/:id/retry', asyncWrapper(async (req, res) => {
+  const ok = downloader.retryJob(parseInt(req.params.id, 10));
+  if (!ok) return res.status(404).json({ error: 'Job not found or not retryable' });
+  res.json({ message: 'Re-queued' });
+}));
+
 // POST /api/sources/downloads/clear-finished — drop done/failed/cancelled rows
 router.post('/sources/downloads/clear-finished', asyncWrapper(async (req, res) => {
   const removed = downloader.clearFinished();
@@ -346,7 +359,13 @@ router.post('/manga/:id/source-urls', asyncWrapper(async (req, res) => {
     if (!resolved) {
       return res.status(400).json({
         error: 'URL does not match any known source pattern',
-        accepted: ['https://mangadex.org/title/{uuid}'],
+        accepted: [
+        'https://mangadex.org/title/{uuid}',
+        'https://comix.to/title/{hid}',
+        'https://www.mangakakalot.gg/manga/{slug}',
+        'https://mangafire.to/manga/{slug}.{hid}',
+        'https://weebcentral.com/series/{ULID}',
+      ],
       });
     }
   } else if (source && source_id) {
@@ -394,7 +413,13 @@ router.patch('/manga/:id/source-urls/:urlId', asyncWrapper(async (req, res) => {
     if (!resolved) {
       return res.status(400).json({
         error: 'URL does not match any known source pattern',
-        accepted: ['https://mangadex.org/title/{uuid}'],
+        accepted: [
+        'https://mangadex.org/title/{uuid}',
+        'https://comix.to/title/{hid}',
+        'https://www.mangakakalot.gg/manga/{slug}',
+        'https://mangafire.to/manga/{slug}.{hid}',
+        'https://weebcentral.com/series/{ULID}',
+      ],
       });
     }
     // Editing to a URL that already exists for this manga would violate the

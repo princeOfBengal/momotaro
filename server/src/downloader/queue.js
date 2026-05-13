@@ -4,7 +4,13 @@ const fetch = require('node-fetch');
 const AdmZip = require('adm-zip');
 const { getDb } = require('../db/database');
 const { getSource } = require('../sources');
-const { scanMangaDirectory } = require('../scanner/libraryScanner');
+// `scanMangaDirectory` is lazily required inside runJob() instead of at the
+// top because there's a load-order cycle: libraryScanner → routes/metadata
+// → routes/settings → downloader/queue. A top-level destructure here
+// captures `module.exports` of libraryScanner *before* it has reached its
+// own module.exports = {...} line, leaving `scanMangaDirectory` permanently
+// undefined and surfacing as "scanMangaDirectory is not a function" in the
+// post-download rescan.
 
 // Background downloader for the Third Party Sourcing feature.
 //
@@ -231,8 +237,12 @@ function touchSourceUrlForManga(db, mangaId, source, sourceSeriesId) {
 
 function sourceColumn(source) {
   switch (source) {
-    case 'mangadex': return 'mangadex_id';
-    default:         return null;
+    case 'mangadex':     return 'mangadex_id';
+    case 'comixto':      return 'comixto_id';
+    case 'mangakakalot': return 'mangakakalot_id';
+    case 'mangafire':    return 'mangafire_id';
+    case 'weebcentral':  return 'weebcentral_id';
+    default:             return null;
   }
 }
 
@@ -325,9 +335,16 @@ async function runJob(job) {
     zip.writeZip(tmpPath);
     fs.renameSync(tmpPath, cbzPath);
 
-    // Re-scan the manga directory so the chapter shows up immediately. For a
-    // brand-new series this also creates the manga row.
+    // Re-scan ONLY the destination manga folder (not the whole library) so
+    // the new chapter is indexed and viewable immediately. scanMangaDirectory
+    // is the per-folder entry point — it walks just `mangaPath`, upserts the
+    // manga row, indexes the new chapters, generates the cover thumbnail if
+    // missing, and returns. A full library scan would be wasteful here.
+    //
+    // Lazy-required (see top-of-file comment) to dodge the libraryScanner ↔
+    // routes/metadata ↔ routes/settings ↔ downloader cycle.
     try {
+      const { scanMangaDirectory } = require('../scanner/libraryScanner');
       const mangaPath = target.folder;
       const folderName = path.basename(mangaPath);
       await scanMangaDirectory(mangaPath, folderName, target.libraryId);
@@ -481,6 +498,19 @@ function cancelJob(id) {
 function listJobs({ limit = 50 } = {}) {
   const db = getDb();
   const cap = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
+  // Display ordering — distinct from the FIFO pick order in pickNextJob().
+  //
+  //   1. running   (what the worker is doing right now — sorted by id ASC so
+  //                 if the user later raises max_concurrent the older job
+  //                 ranks first, matching pick order)
+  //   2. queued    (FIFO — oldest first, so the user can read the list
+  //                 top-to-bottom and see exactly what runs next)
+  //   3. failed / cancelled / done  (most recent first)
+  //
+  // The previous `ORDER BY id DESC` made every new download appear at the
+  // top, burying the in-progress job at the bottom — which read as "the
+  // running download was replaced" even though it was still there. The pick
+  // order (oldest queued first) was always FIFO; only the display lied.
   return db.prepare(`
     SELECT id, source, source_series_id, source_series_title,
            source_chapter_id, chapter_number, chapter_volume, chapter_title,
@@ -488,7 +518,17 @@ function listJobs({ limit = 50 } = {}) {
            target_chapter_filename, status, error,
            pages_downloaded, pages_total, created_at, started_at, finished_at
       FROM download_jobs
-     ORDER BY id DESC
+     ORDER BY
+       CASE status
+         WHEN 'running'   THEN 0
+         WHEN 'queued'    THEN 1
+         ELSE                  2
+       END ASC,
+       CASE
+         WHEN status IN ('running', 'queued') THEN created_at
+         ELSE -created_at
+       END ASC,
+       id ASC
      LIMIT ?
   `).all(cap);
 }
@@ -500,12 +540,42 @@ function clearFinished() {
   ).run().changes;
 }
 
+/**
+ * Re-queue a failed or cancelled job. Resets the run-state columns
+ * (`error`, `started_at`, `finished_at`, `pages_downloaded`) so the worker
+ * starts the chapter over from page 1, and bumps `created_at` to now so the
+ * retry lands at the *back* of the queue rather than jumping ahead of jobs
+ * that were already waiting — keeps FIFO honest from the user's POV.
+ *
+ * No-op for jobs in `queued`, `running`, or `done` — there's nothing to retry.
+ * Returns true on success, false if the job is missing or not retryable.
+ */
+function retryJob(id) {
+  const db = getDb();
+  const job = db.prepare('SELECT id, status FROM download_jobs WHERE id = ?').get(id);
+  if (!job) return false;
+  if (job.status !== 'failed' && job.status !== 'cancelled') return false;
+  db.prepare(`
+    UPDATE download_jobs
+       SET status            = 'queued',
+           error             = NULL,
+           started_at        = NULL,
+           finished_at       = NULL,
+           pages_downloaded  = 0,
+           created_at        = unixepoch()
+     WHERE id = ?
+  `).run(id);
+  setImmediate(pump);
+  return true;
+}
+
 module.exports = {
   init,
   applySettings,
   getSettings,
   enqueueJob,
   cancelJob,
+  retryJob,
   listJobs,
   clearFinished,
   // Exposed for tests / introspection

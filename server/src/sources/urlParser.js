@@ -9,6 +9,10 @@
 // and `build`. The first entry whose `match` returns true wins.
 
 const MANGADEX_SLUG = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// comix.to series ids ("hid") are short base36-ish slugs the site uses in
+// URLs of the form `/title/{hid}-{seo-slug}` — observed examples: 5ze6g,
+// jjeq3, pem4, 55kym, ll172, 116167. Accept 3..10 alphanumerics.
+const COMIXTO_HID = /^[a-z0-9]{3,10}$/i;
 
 const PARSERS = [
   {
@@ -25,6 +29,87 @@ const PARSERS = [
       return { source: 'mangadex', source_id: id };
     },
     build: (id) => `https://mangadex.org/title/${id}`,
+  },
+  {
+    source: 'weebcentral',
+    // weebcentral.com URLs:
+    //   - title page:   https://weebcentral.com/series/{ULID}/{Title-slug}
+    //   - chapter page: https://weebcentral.com/chapters/{ULID}
+    //
+    // The series ULID is the stable identifier; the title slug is SEO and
+    // is regenerated when the series is renamed. The bare /series/{ULID}
+    // form (no slug) returns the same page, so we canonicalise to that.
+    // ULIDs are exactly 26 chars from Crockford's base32 alphabet (no
+    // I/L/O/U), uppercase.
+    match: (u) =>
+      /^https?:\/\/(www\.)?weebcentral\.com\/series\/[0-9A-HJKMNP-TV-Z]{26}/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/series\/([0-9A-HJKMNP-TV-Z]{26})/i);
+      if (!m) return null;
+      return { source: 'weebcentral', source_id: m[1].toUpperCase() };
+    },
+    build: (id) => `https://weebcentral.com/series/${id}`,
+  },
+  {
+    source: 'mangafire',
+    // mangafire.to URLs:
+    //   - title page:   https://mangafire.to/manga/{slug}.{hid}
+    //   - chapter page: https://mangafire.to/read/{slug}.{hid}/{lang}/chapter-N
+    //
+    // The {slug}.{hid} composite is the actual series identifier — both
+    // halves are required at the source (the bare slug 404s, the bare hid
+    // 404s). We canonicalise to the /manga/ form regardless of where the
+    // user pasted from.
+    match: (u) =>
+      /^https?:\/\/(www\.)?mangafire\.to\/(manga|read)\/[a-z0-9_-]+\.[a-z0-9]+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/(?:manga|read)\/([a-z0-9_-]+\.[a-z0-9]+)/i);
+      if (!m) return null;
+      const id = m[1];
+      // Sanity-check shape: slug then dot then short id of 2..10 chars.
+      if (!/^[a-z0-9_-]{1,200}\.[a-z0-9]{2,10}$/i.test(id)) return null;
+      return { source: 'mangafire', source_id: id };
+    },
+    build: (id) => `https://mangafire.to/manga/${id}`,
+  },
+  {
+    source: 'mangakakalot',
+    // mangakakalot.gg URLs are slug-based:
+    //   - title page:   https://www.mangakakalot.gg/manga/{slug}
+    //   - chapter page: https://www.mangakakalot.gg/manga/{slug}/chapter-N[-N]
+    // Slug is a lowercase a-z0-9-_ identifier (e.g. "horimiya",
+    // "a-mouse-biting-a-dragons-tail"). The www. is optional but the site
+    // canonicalises to the www form, so we build URLs that way too.
+    match: (u) =>
+      /^https?:\/\/(www\.)?mangakakalot\.gg\/manga\/[a-z0-9_-]+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/manga\/([a-z0-9_-]+)/i);
+      if (!m) return null;
+      const slug = m[1];
+      // Reject anything that looks like a chapter sub-path leftover or junk.
+      if (slug.length < 1 || slug.length > 200) return null;
+      return { source: 'mangakakalot', source_id: slug };
+    },
+    build: (slug) => `https://www.mangakakalot.gg/manga/${slug}`,
+  },
+  {
+    source: 'comixto',
+    // comix.to URLs come in two shapes:
+    //   - title page:    https://comix.to/title/{hid}-{seo-slug}
+    //   - chapter page:  https://comix.to/title/{hid}-{seo-slug}/{chapter-id}-chapter-N
+    // Both encode the series hid as the first dash-separated segment after
+    // /title/. We extract just that — the seo-slug rots when the title is
+    // edited, but the hid is stable.
+    match: (u) =>
+      /^https?:\/\/(www\.)?comix\.to\/title\/[a-z0-9]{3,10}([-/].*)?$/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/title\/([a-z0-9]{3,10})(?:[-/]|$)/i);
+      if (!m) return null;
+      const id = m[1];
+      if (!COMIXTO_HID.test(id)) return null;
+      return { source: 'comixto', source_id: id };
+    },
+    build: (id) => `https://comix.to/title/${id}`,
   },
 ];
 

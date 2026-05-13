@@ -57,7 +57,7 @@ One row per manga folder.
 | `mangaupdates_cover` | TEXT | Filename of the MangaUpdates-sourced thumbnail, e.g. `5_mu.webp` |
 | `doujinshi_cover` | TEXT | Filename of the Doujinshi.info-sourced thumbnail, e.g. `5_dj.webp` (legacy installs see `5_cover.webp`, backfilled by `backfillDoujinshiCover`) |
 | `original_cover` | TEXT | Filename of the first-ever scan-generated thumbnail, e.g. `5_original.webp` — set once and never overwritten; final fallback in the cover priority |
-| `cover_user_set` | INTEGER | 1 when the user manually picked the active cover via `POST /api/manga/:id/set-thumbnail`. The post-scan and Reset-Thumbnails reinforcement passes are the only paths that ever clear it (and they always do; both call `reinforceAllCovers(force=true)`). Default 0. |
+| `cover_user_set` | INTEGER | 1 when the user manually picked the active cover via `POST /api/manga/:id/set-thumbnail`. **Sticky across library scans** — the post-scan reinforcement pass (`reinforceAllCovers(force=false)`) skips manga with this flag set. Only the explicit Reset Thumbnails admin action (`POST /api/admin/reset-thumbnails`, `force=true`) clears it. Default 0. |
 | `last_metadata_fetch_attempt_at` | INTEGER | Unix timestamp of the last bulk-pull attempt (any source) — used to skip recently-tried no-match titles |
 | `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Refreshed per-manga by the watcher / optimize paths, and via one grouped `UPDATE … FROM (SELECT … GROUP BY manga_id)` at the end of each `scanLibrary` run. Lets `/api/stats` and `/api/manga/:id/info` answer without walking the library. |
 | `file_count` | INTEGER | Cached rollup of `SUM(chapters.file_count)` — total image pages across all chapters. |

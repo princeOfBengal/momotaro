@@ -182,7 +182,7 @@ Both `/api/library` and `/api/reading-lists/:id/manga` are cached at two layers:
 ```
 
 - `anilist_cover` / `mal_cover` / `mangaupdates_cover` / `doujinshi_cover` / `original_cover` — `null` if not yet generated for that source. The Thumbnail Picker only renders a tile for sources whose column is non-null.
-- `cover_user_set` — `true` when the user has manually picked the active cover via this endpoint (`POST /api/manga/:id/set-thumbnail`). Subsequent metadata-apply paths leave the active cover alone while this is `true`; only `POST /api/admin/reset-thumbnails` and the post-scan reinforcement clear the flag and re-align to the priority order. See [scanner.md § Cover priority](./scanner.md#cover-priority).
+- `cover_user_set` — `true` when the user has manually picked the active cover via this endpoint (`POST /api/manga/:id/set-thumbnail`). **Sticky across library scans** — subsequent metadata-apply paths and the post-scan reinforcement pass leave the active cover alone while this is `true`. Only `POST /api/admin/reset-thumbnails` clears the flag and re-aligns to the priority order. See [scanner.md § Cover priority](./scanner.md#cover-priority).
 - `history` — up to 20 entries, most recent first. Populated by `POST /api/manga/:id/set-thumbnail` with `{ page_id }`. Excludes generated chapter covers — those are folded into `chapter_first_pages` below.
 - `chapter_first_pages` — one entry per chapter (the page at `page_index = 0`), ordered by chapter number. `generated_filename` is the deterministic `<mangaId>_ch<chapterId>.webp` produced by `POST /api/manga/:id/generate-chapter-covers` when present, or `null` when that chapter hasn't been generated yet. The Choose Thumbnail modal renders the pre-sized thumbnail when `generated_filename` is set (applied via `set-thumbnail` `{ saved_filename }`) and falls back to streaming the raw page image otherwise (applied via `set-thumbnail` `{ page_id }`).
 
@@ -207,7 +207,7 @@ Generates a 300 × 430 WebP from the page image, saves it as `{mangaId}_{timesta
 
 Copies an existing saved file to the active `{mangaId}.webp`. The filename must start with `{mangaId}_` and end with `.webp` (path traversal prevention).
 
-**Both forms set `manga.cover_user_set = 1`.** From that point onward, metadata fetches won't touch the active cover — they only refresh the relevant `*_cover` source column. The flag is cleared (and the active cover re-aligned to the priority order) by `POST /api/admin/reset-thumbnails` and the same reinforcement pass run at the end of every library scan. See [scanner.md § Cover priority](./scanner.md#cover-priority).
+**Both forms set `manga.cover_user_set = 1`.** The pick is **sticky across library scans** — metadata fetches won't touch the active cover (they only refresh the relevant `*_cover` source column), and the post-scan cover-priority reinforcement pass skips manga with this flag set. Only `POST /api/admin/reset-thumbnails` clears the flag and re-aligns to the priority order. See [scanner.md § Cover priority](./scanner.md#cover-priority).
 
 ### `POST /api/manga/:id/generate-chapter-covers`
 
@@ -377,12 +377,9 @@ anilist_cover > mal_cover > mangaupdates_cover > doujinshi_cover > original_cove
 
 Every metadata-apply path stores the fetched cover into its source-specific column (`anilist_cover` / `mal_cover` / `mangaupdates_cover` / `doujinshi_cover`) and then calls `reinforceActiveCover` from [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js), which copies the highest-priority on-disk file into `<mangaId>.webp`.
 
-A manual user pick via `POST /api/manga/:id/set-thumbnail` sets `manga.cover_user_set = 1`. From that point on, subsequent metadata fetches only refresh the source-specific column — they never touch the active cover. The flag is cleared (and the active cover re-aligned to the priority order) by:
+A manual user pick via `POST /api/manga/:id/set-thumbnail` sets `manga.cover_user_set = 1`. From that point on, subsequent metadata fetches only refresh the source-specific column — they never touch the active cover. The pick is **sticky across library scans**: the post-scan reinforcement pass calls `reinforceAllCovers(force = false)` and skips manga with this flag set.
 
-1. `POST /api/admin/reset-thumbnails` — explicit user action from Settings → Database.
-2. The end-of-scan reinforcement pass run by `scanLibrary` / `runFullScan`.
-
-Both call `reinforceAllCovers(force = true)`. Neither pings any upstream — they only re-use cover files already on disk. See [scanner.md § Cover priority](./scanner.md#cover-priority).
+The only path that clears the flag and re-aligns to the priority order is the explicit `POST /api/admin/reset-thumbnails` admin action (Settings → Database), which calls `reinforceAllCovers(force = true)`. It re-uses cover files already on disk and never pings any upstream. See [scanner.md § Cover priority](./scanner.md#cover-priority).
 
 ### AniList
 

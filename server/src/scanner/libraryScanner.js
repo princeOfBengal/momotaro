@@ -285,14 +285,18 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
       console.warn(`[Scanner] Metadata priority enforcement failed: ${err.message}`);
     }
 
-    // Reinforce cover priority across the library — equivalent to running
-    // Reset Thumbnails scoped to this library. Forces user-set covers back
-    // onto the priority order (anilist > mal > mu > doujinshi > original)
-    // so the visible cover stays in sync with the highest-priority record
-    // available for each manga. No upstream pings — this only re-uses
-    // cover files already on disk.
+    // Reinforce cover priority across the library. Re-aligns the visible
+    // cover to the priority order (anilist > mal > mu > doujinshi >
+    // original) for any manga whose `cover_user_set` flag is 0. Manga the
+    // user has manually picked a cover for are skipped entirely — their
+    // pick is sticky across scans, regardless of which third-party covers
+    // happen to be on disk. The only path that clobbers a user pick is the
+    // explicit Reset Thumbnails admin action (`POST /api/admin/reset-thumbnails`,
+    // which still passes force=true).
+    //
+    // No upstream pings — this only re-uses cover files already on disk.
     try {
-      const coverCounters = reinforceAllCovers(db, { libraryId: library.id, force: true });
+      const coverCounters = reinforceAllCovers(db, { libraryId: library.id, force: false });
       console.log(
         `[Scanner] Cover priority reinforced for "${library.name}": ` +
         `${coverCounters.changed_to_anilist} → AniList, ` +
@@ -300,6 +304,7 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
         `${coverCounters.changed_to_mu} → MangaUpdates, ` +
         `${coverCounters.changed_to_doujinshi} → Doujinshi, ` +
         `${coverCounters.changed_to_original} → original, ` +
+        `${coverCounters.kept_user} kept user pick, ` +
         `${coverCounters.kept_no_source} no source on disk, ` +
         `${coverCounters.errors} errors (${coverCounters.total} total).`
       );

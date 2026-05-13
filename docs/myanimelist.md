@@ -145,7 +145,7 @@ Two independent priority orders apply.
 
 Bulk metadata pulls run over every title in the library and apply with priority-aware writes — text fields are overwritten only when the new source's priority is ≥ current. Per-manga apply endpoints never refuse, but follow the same priority rule.
 
-A manual user pick (`POST /api/manga/:id/set-thumbnail`) sets `cover_user_set = 1` and is sticky against subsequent metadata fetches; only `POST /api/admin/reset-thumbnails` and the post-scan reinforcement pass clear the flag and re-align the cover. See [scanner.md § Cover Priority](./scanner.md#cover-priority).
+A manual user pick (`POST /api/manga/:id/set-thumbnail`) sets `cover_user_set = 1` and is sticky against both subsequent metadata fetches and library scans. Only `POST /api/admin/reset-thumbnails` clears the flag and re-aligns the cover. See [scanner.md § Cover Priority](./scanner.md#cover-priority).
 
 ## Relevant Files
 

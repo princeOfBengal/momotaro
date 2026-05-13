@@ -121,18 +121,18 @@ Local JSON sidecars (`metadata_source = 'local'`) **don't enter the cover priori
 
 ### Reinforcement passes
 
-The flag is cleared (and the active cover re-aligned to the priority order) by `reinforceAllCovers(force = true)` in `coverResolver.js`. Two callers invoke it:
+The active cover is re-aligned to the priority order by `reinforceAllCovers` in `coverResolver.js`. Two callers, **two different `force` modes**:
 
-1. **`POST /api/admin/reset-thumbnails`** — explicit user action from Settings → Database. Synchronous.
-2. **End of every `scanLibrary` run** — runs after the per-library rollup queries finish and after the metadata-priority enforcement pass (see [End-of-scan metadata priority enforcement](#end-of-scan-metadata-priority-enforcement) below), before the watcher / runFullScan loop moves on. Logs per-source counts:
+1. **`POST /api/admin/reset-thumbnails`** — explicit user action from Settings → Database. Calls with `force = true`, which **clears `cover_user_set` and clobbers user picks**. This is the only path that ever does. Synchronous.
+2. **End of every `scanLibrary` run** — runs after the per-library rollup queries finish and after the metadata-priority enforcement pass (see [End-of-scan metadata priority enforcement](#end-of-scan-metadata-priority-enforcement) below), before the watcher / runFullScan loop moves on. Calls with `force = false`, so **manga the user has manually picked a cover for are skipped entirely** — the user's pick survives every scan. Manga without a user pick re-align to the priority order normally. Logs per-source counts plus a `kept_user` bucket:
 
    ```text
    [Scanner] Cover priority reinforced for "library name": 301 → AniList,
        52 → MAL, 8 → MangaUpdates, 4 → Doujinshi, 18 → original,
-       49 no source on disk, 0 errors (432 total).
+       7 kept user pick, 49 no source on disk, 0 errors (432 total).
    ```
 
-Both call sites use `force = true`. **Neither pings any upstream** — the resolver only re-uses cover files already on disk from earlier metadata fetches. A soft variant (`force = false`) exists in the helper but is not currently called from anywhere; it would skip user-set manga while still re-aligning everything else.
+**Neither pings any upstream** — the resolver only re-uses cover files already on disk from earlier metadata fetches. To re-align a user-picked manga back to the priority order, the user explicitly runs Reset Thumbnails from Settings → Database.
 
 ## End-of-scan metadata priority enforcement
 

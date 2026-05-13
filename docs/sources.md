@@ -8,9 +8,13 @@ future scheduler can re-check those series for new releases.
 or existing series. Source linkage is recorded automatically on download and
 can also be set manually from the same page.
 
-**Future phases (not in this build):**
+**Available source adapters:**
 
-- comix.to adapter (HTML scraping)
+- **MangaDex** — full support (search, series detail, chapter listing, image download)
+- **WeebCentral** — full support (search, series detail, chapter listing, image download). HTML-scraping based; no auth, no Cloudflare gate. See [WeebCentral notes](#weebcentral-notes) below.
+- **comix.to** — partial support (search, series detail, URL recording, cross-source linkage). Chapter listing and image fetching are gated by an obfuscated JS-VM security token; see [comix.to limitations](#comixto-limitations) below.
+- **MangaKakalot** — partial support (search, series detail synthesised from the search response, URL recording, cross-source linkage). Chapter listing and image pages are blocked by Cloudflare's interactive JS challenge; see [MangaKakalot limitations](#mangakakalot-limitations) below.
+- **MangaFire** — partial support (URL-paste search, series detail and **full chapter list** scraped from the openly-served series page, scheduler diff works against the chapter list, URL recording, cross-source linkage). Image fetch is blocked by Cloudflare Turnstile on the reader AJAX; see [MangaFire limitations](#mangafire-limitations) below.
 
 The reference projects called out in the spec —
 [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source)
@@ -79,6 +83,212 @@ cover_url, description, last_chapter, available_languages }`.
 group, external_url }`. `external_url` is non-null when MangaDex hosts the
 chapter on a third-party reader and `getChapterImages` won't work — the picker
 flags those rows so the user knows in advance.
+
+### WeebCentral notes
+
+The WeebCentral adapter ([server/src/sources/weebcentral.js](../server/src/sources/weebcentral.js))
+is the **second source after MangaDex with full chapter download support**.
+The site is HTMX-driven and serves clean HTML fragments from a small set
+of openly-accessible endpoints — no auth, no Cloudflare gate, no token
+challenge.
+
+**Endpoints (all open):**
+
+- `POST /search/simple?location=main` with body `text={query}` — returns
+  an HTMX fragment with one `<a href="/series/{ULID}/{slug}">` per hit
+  plus inline cover image. The adapter wraps this with `HX-Request: true`
+  to mirror what the site's own search box sends.
+- `GET /series/{ULID}` — series detail HTML. The trailing slug is purely
+  SEO; the bare ULID URL returns the same content. The adapter
+  canonicalises to the bare-ULID form.
+- `GET /series/{ULID}/full-chapter-list` — full chapter list as an HTMX
+  fragment. Each chapter block carries the chapter ULID
+  (`<a href="…/chapters/{ULID}">`), the publish timestamp
+  (`x-data="checkNewChapter('ISO8601')"`), and the label
+  (`<span class="">Page. N</span>` — WeebCentral's house style for
+  chapter labels).
+- `GET /chapters/{ULID}/images?reading_style=long_strip` — page list
+  HTMX fragment with one `<img src="https://official.lowee.us/manga/…">`
+  per page. **The `reading_style` query is required** — without it the
+  endpoint 307s into a 400 page (the SPA's reader sets the value from a
+  hidden form before triggering the swap).
+
+**Image host:** images come from `https://official.lowee.us/manga/{Title}/{NNNN-NNN}.png`.
+Verified end-to-end with a real `curl` of `0001-001.png` returning ~235 KB
+of valid JPEG (the `.png` extension is a misnomer in the site's URL
+template — the actual content is JFIF).
+
+**Linkage:** stored in `manga.weebcentral_id` as the bare ULID, kept in
+sync by `syncDenormalizedLinkage` the same way `mangadex_id` is.
+
+**Verified live with Horimiya** (`https://weebcentral.com/series/01J76XY7PBJ0A3GC5PC79VET42/Horimiya`):
+
+- Search: returns `Horimiya · 01J76XY7PBJ0A3GC5PC79VET42` with cover
+- Series detail: title `Horimiya`, author `HAGIWARA Daisuke , HERO`,
+  year `2011`, status `Complete`, genres `Comedy, Romance, School Life,
+  Shounen, Slice of Life`, full description
+- Chapters: 136 entries, sorted oldest-first (Ch.1 → Ch.130 + 6 extras),
+  each with stable ULID id and ISO publish date
+- Image fetch: chapter 1 returns 39 page URLs, all under `official.lowee.us`
+
+### MangaFire limitations
+
+The MangaFire adapter ([server/src/sources/mangafire.js](../server/src/sources/mangafire.js))
+is the **richest** of the three Cloudflare-affected sources. The series
+detail page is openly served and contains the FULL chapter list inline —
+so unlike comix.to and MangaKakalot, the scheduler can actually compute the
+local-vs-remote diff against MangaFire and identify missing chapters.
+Only the actual image-fetch step is gated.
+
+**Endpoints:**
+
+- `GET /manga/{slug}.{hid}` — open. Returns server-rendered HTML with
+  every chapter row (`<li class="item" data-number="N">`), per-language
+  counts, cover image (`<img itemprop="image">`), title, author, and
+  status. Verified end-to-end against `https://mangafire.to/manga/horimiyaa.6nm0`.
+- `GET /filter?keyword=…` — HTTP 403 (server-side blocked against this
+  client). Direct keyword search isn't usable.
+- `GET /ajax/read/chapter/{mangaId}` — HTTP 403 "Request is invalid".
+  The reader page exposes a Cloudflare Turnstile site key
+  (`var captchaKey = '0x4AAAAAAA...'`) and the AJAX call requires a valid
+  Turnstile token, which only a real browser engine can produce.
+
+**What works:**
+
+- Pasting `https://mangafire.to/manga/{slug}.{hid}` into the search box on
+  the **Third Party Sourcing** page (or into the per-manga URL manager).
+  `searchSeries` detects URL-shaped queries, fetches the series page, and
+  returns a single rich result. Verified for the user-supplied test case
+  `https://mangafire.to/manga/horimiyaa.6nm0` — returns title `Horimiya`,
+  author `Daisuke Hagiwara`, status `Completed`, cover URL, and 6
+  available languages.
+- `getSeries(id)` returns the same record by direct id lookup
+- `getChapters(id, { languages })` scrapes the full chapter list (254 EN
+  chapters for Horimiya), with per-row `number`, `volume` (Vol 0
+  normalised to null), title (subtitle stripped of the "Chapter N:" prefix),
+  language, published-date label, and a stable `id` of the form
+  `/read/{slug.hid}/{lang}/chapter-N`. Multi-language is opt-in via the
+  `languages` option; default is `['en']`.
+- **Scheduler diff works against MangaFire** — at runtime, the scheduler
+  walks the recorded MangaFire URL, calls `getChapters`, diffs against
+  the local folder by chapter number, and identifies the missing set just
+  like it does for MangaDex. Only the subsequent image-download step
+  fails — the missing chapters surface in `download_jobs` as `failed`
+  with the gated-error string.
+- URL parser recognises both `/manga/…` and `/read/…` paths and
+  canonicalises to `/manga/{slug}.{hid}`. Linkage stored in
+  `manga.mangafire_id`, kept in sync by `syncDenormalizedLinkage`.
+
+**What returns a clear error:**
+
+- Direct keyword search (non-URL query): explainer telling the user to
+  paste a URL instead
+- Any download attempt: `MangaFire chapter images are loaded behind a
+  Cloudflare Turnstile challenge — chapter download is not supported
+  from this source.` lands in `download_jobs.error` and (for scheduled
+  runs) `manga_schedules.last_result`
+
+**Practical workflow:** the same as comix.to / MangaKakalot — pair the
+MangaFire URL (which gives the scheduler a working chapter list it can
+diff against) with a MangaDex URL (which actually downloads the missing
+images) on the same manga. The URL store allows multiple URLs per manga;
+the scheduler dedupes by `(source, source_id)` and the diff dedupes by
+chapter number, so chapters identified as missing through the MangaFire
+URL get downloaded through the MangaDex URL when both are present.
+
+### MangaKakalot limitations
+
+The MangaKakalot adapter ([server/src/sources/mangakakalot.js](../server/src/sources/mangakakalot.js))
+talks to the site's own autocomplete endpoint for search, which slips
+through Cloudflare:
+
+- `GET https://www.mangakakalot.gg/home/search/json?searchword={normalized}`
+
+The search payload is rich enough to drive the Third Party Sourcing UI
+without a separate series-detail fetch: title, slug, author, latest chapter
+label, thumbnail URL, and canonical series URL all come back inline. The
+adapter mirrors the site's `change_alias()` normalisation (lowercase,
+Unicode NFD-fold, replace non-alphanumeric runs with `_`, collapse, trim)
+so what we send matches what the browser autocomplete sends.
+
+**Cloudflare gate:** every HTML page that would carry the chapter list or
+image URLs (`/manga/{slug}`, `/manga/{slug}/chapter-N`, `/manga-list/all`,
+known mirrors) returns the *"Just a moment..."* interactive challenge.
+Cookies, full browser headers (`Sec-Fetch-*`, `Accept-Language`,
+`Referer`), and same-origin hops were all probed; none get past the JS
+challenge without a real browser engine. Bundling Puppeteer (~200 MB) or
+running an external FlareSolverr proxy would work but are off-spec for a
+self-hosted manga server's dependency footprint.
+
+**What works:**
+
+- Title search via the **Third Party Sourcing** page (source dropdown now
+  lists MangaKakalot alongside MangaDex and Comix.to)
+- Series detail synthesised from the search response — round-trips through
+  the search endpoint with the slug as query and requires an exact slug
+  match in the result, so typo'd slugs surface a clear error rather than
+  silently returning a different series
+- Recording `https://www.mangakakalot.gg/manga/{slug}` URLs against a
+  manga in the per-manga URL manager
+- Linkage to `manga.mangakakalot_id`, kept in sync by
+  `syncDenormalizedLinkage` the same way `mangadex_id` is
+
+**What returns a clear error:**
+
+- Any download attempt against a MangaKakalot URL — the worker writes
+  `MangaKakalot chapter access is blocked by the site's Cloudflare
+  challenge — chapter download is not supported from this source.` to
+  `download_jobs.error`
+- Scheduler runs against MangaKakalot-only series — same string lands in
+  `manga_schedules.last_result` and shows in **Settings → Scheduling**
+
+**Practical workflow:** the same pattern as comix.to — record both the
+MangaKakalot URL (as a visual reference) and the MangaDex URL (for actual
+downloads) against the same manga. The URL store allows multiple URLs per
+manga; the scheduler dedupes by `(source, source_id)` and walks each.
+
+### comix.to limitations
+
+The comix.to adapter ([server/src/sources/comixto.js](../server/src/sources/comixto.js))
+implements **search and series detail** against the site's public JSON API
+at `/api/v1`. The two endpoints needed for actual chapter download are
+gated:
+
+- `GET /api/v1/manga/{hid}/chapters` → `{"status":"error","message":"Missing token.","code":403}`
+- `GET /api/v1/chapters/{hid}/pages` → same
+
+The token is derived in the browser by an obfuscated VM-bytecode module
+that runs as an axios request interceptor. Reproducing it server-side
+would require either JSDOM + the obfuscated module (fragile, breaks on
+every site update) or bundling Puppeteer/Playwright (~200 MB) — neither
+is appropriate for a self-hosted manga server's dependency footprint.
+
+**What works:**
+
+- Title search via the **Third Party Sourcing** page (the source dropdown
+  exposes Comix.to alongside MangaDex)
+- Series detail (cover, synopsis, year, status, genres, last chapter)
+- Pasting `https://comix.to/title/{hid}` URLs into the per-manga URL
+  manager — the URL parser recognises both bare-hid and SEO-slug forms
+  (`/title/5ze6g`, `/title/5ze6g-horimiya`, `/title/5ze6g-horimiya/2602732-chapter-1`)
+- Linkage to `manga.comixto_id`, kept in sync by `syncDenormalizedLinkage`
+  the same way `mangadex_id` is
+
+**What returns a clear error:**
+
+- Any download attempt against a comix.to URL — the worker writes
+  `comix.to chapter access is gated by a browser-only security token; use
+  the linked MangaDex URL for actual downloads.` to `download_jobs.error`
+- Scheduler runs against comix.to-only series — the same string lands in
+  `manga_schedules.last_result`, visible in **Settings → Scheduling**
+
+**Cross-source fallback:** the comix.to series response includes a
+`links` block with the matching IDs at AniList, MyAnimeList,
+MangaUpdates, MangaDex, and MangaBaka. Practical workflow for a series
+that's available on both sites: link both URLs to your manga (the URL
+manager allows multiple URLs per manga), and the MangaDex one will
+handle actual downloads while the comix.to one serves as a record /
+visual confirmation in the Scheduling page.
 
 ### MangaDex specifics
 

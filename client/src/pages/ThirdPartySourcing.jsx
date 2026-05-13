@@ -141,30 +141,34 @@ export default function ThirdPartySourcing() {
 
   // ── Downloads polling ─────────────────────────────────────────────────────
 
+  // refreshJobs returns the freshly-fetched list so the polling tick can
+  // decide cadence from the data it just saw — using `jobs` from React state
+  // would be a stale closure (the effect's deps are intentionally empty so
+  // the timer chain isn't torn down on every render) and would make the
+  // poll always pick the idle interval.
   const refreshJobs = useCallback(async () => {
     try {
       const data = await api.listSourceDownloads(50);
       setJobs(data);
-    } catch (_) { /* transient — keep last good list */ }
+      return data;
+    } catch (_) {
+      return null;
+    }
   }, []);
 
   useEffect(() => {
-    refreshJobs();
-    function tick() {
-      refreshJobs().then(() => {
-        const active = jobsAreActive();
-        const next = active ? POLL_INTERVAL_ACTIVE_MS : POLL_INTERVAL_IDLE_MS;
-        pollTimer.current = setTimeout(tick, next);
-      });
+    let cancelled = false;
+    function schedule(data) {
+      if (cancelled) return;
+      const active = (data || []).some(j => j.status === 'queued' || j.status === 'running');
+      const next = active ? POLL_INTERVAL_ACTIVE_MS : POLL_INTERVAL_IDLE_MS;
+      pollTimer.current = setTimeout(() => {
+        refreshJobs().then(schedule);
+      }, next);
     }
-    pollTimer.current = setTimeout(tick, POLL_INTERVAL_ACTIVE_MS);
-    return () => clearTimeout(pollTimer.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function jobsAreActive() {
-    return jobs.some(j => j.status === 'queued' || j.status === 'running');
-  }
+    refreshJobs().then(schedule);
+    return () => { cancelled = true; clearTimeout(pollTimer.current); };
+  }, [refreshJobs]);
 
   // ── Search ────────────────────────────────────────────────────────────────
 
@@ -293,6 +297,15 @@ export default function ThirdPartySourcing() {
   async function handleCancelJob(id) {
     try {
       await api.cancelSourceDownload(id);
+      refreshJobs();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function handleRetryJob(id) {
+    try {
+      await api.retrySourceDownload(id);
       refreshJobs();
     } catch (err) {
       alert(err.message);
@@ -634,12 +647,21 @@ export default function ThirdPartySourcing() {
                       </p>
                       {j.error && <p className="tps-job-error">{j.error}</p>}
                     </div>
-                    {(j.status === 'queued' || j.status === 'running') && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => handleCancelJob(j.id)}
-                      >Cancel</button>
-                    )}
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                      {(j.status === 'queued' || j.status === 'running') && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleCancelJob(j.id)}
+                        >Cancel</button>
+                      )}
+                      {(j.status === 'failed' || j.status === 'cancelled') && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleRetryJob(j.id)}
+                          title="Re-queue this download — it'll start over from page 1 at the back of the queue"
+                        >Retry</button>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ul>

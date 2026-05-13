@@ -174,6 +174,10 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'doujinshi_id',      'TEXT');
   addColumnIfMissing(db, 'manga',     'mangaupdates_id',   'INTEGER');
   addColumnIfMissing(db, 'manga',     'mangadex_id',       'TEXT');
+  addColumnIfMissing(db, 'manga',     'comixto_id',        'TEXT');
+  addColumnIfMissing(db, 'manga',     'mangakakalot_id',   'TEXT');
+  addColumnIfMissing(db, 'manga',     'mangafire_id',      'TEXT');
+  addColumnIfMissing(db, 'manga',     'weebcentral_id',    'TEXT');
   addColumnIfMissing(db, 'manga',     'anilist_cover',     'TEXT');
   addColumnIfMissing(db, 'manga',     'original_cover',    'TEXT');
   addColumnIfMissing(db, 'manga',     'mal_cover',         'TEXT');

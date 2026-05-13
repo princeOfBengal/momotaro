@@ -1340,7 +1340,12 @@ function SourceUrlsModal({ manga, onClose }) {
           </form>
           {addError && <p className="modal-error" style={{ marginTop: 6 }}>{addError}</p>}
           <p className="settings-hint" style={{ marginTop: 6 }}>
-            Currently recognised: <code>https://mangadex.org/title/&#123;uuid&#125;</code>.
+            Recognised:{' '}
+            <code>https://mangadex.org/title/&#123;uuid&#125;</code> ·{' '}
+            <code>https://comix.to/title/&#123;hid&#125;</code> ·{' '}
+            <code>https://www.mangakakalot.gg/manga/&#123;slug&#125;</code> ·{' '}
+            <code>https://mangafire.to/manga/&#123;slug&#125;.&#123;hid&#125;</code> ·{' '}
+            <code>https://weebcentral.com/series/&#123;ULID&#125;</code>.
           </p>
 
           <div style={{

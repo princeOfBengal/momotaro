@@ -17,6 +17,13 @@ function getDb() {
     db.pragma('wal_autocheckpoint = 10000'); // Checkpoint every ~10k pages (~40 MB) instead of the 1k default
     db.pragma('temp_store = MEMORY');        // temp tables in RAM
     migrate(db);
+
+    // Ask SQLite to hand idle page-cache pages back to the OS every few
+    // minutes. No-op when the cache is hot — only reclaims what SQLite
+    // isn't using. Cheap; .unref() so the timer never blocks shutdown.
+    setInterval(() => {
+      try { db.pragma('shrink_memory'); } catch (_) { /* best-effort */ }
+    }, 5 * 60 * 1000).unref();
   }
   return db;
 }

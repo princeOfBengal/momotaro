@@ -83,6 +83,14 @@ export const api = {
   getPages: (chapterId) => apiFetch(`/api/chapters/${chapterId}/pages`),
   triggerScan: () => apiFetch('/api/scan', { method: 'POST' }),
   getScanStatus: () => apiFetch('/api/scan/status'),
+  // Re-scan only one manga's folder. Synchronous on the server — the
+  // promise resolves once the folder walk + chapter index + thumbnail
+  // generation finish, so the caller can immediately re-fetch the manga
+  // and show the new chapters. Returns { added, removed,
+  // before_chapter_count, after_chapter_count }. The default 15 s timeout
+  // is plenty: a single folder rarely has more than ~200 chapters and the
+  // incremental mtime check skips anything unchanged.
+  scanManga: (id) => apiFetch(`/api/manga/${id}/scan`, { method: 'POST', timeoutMs: 60_000 }),
 
   // Progress
   getProgress: (mangaId) => apiFetch(`/api/progress/${mangaId}`),

@@ -3,6 +3,7 @@ const comixto      = require('./comixto');
 const mangakakalot = require('./mangakakalot');
 const mangafire    = require('./mangafire');
 const weebcentral  = require('./weebcentral');
+const mangaball    = require('./mangaball');
 
 // Registry of available third-party download sources. Look up an adapter by
 // its string id; throws if the id is unknown so callers can map that to a
@@ -13,6 +14,7 @@ const SOURCES = {
   [mangakakalot.id]: mangakakalot,
   [mangafire.id]:    mangafire,
   [weebcentral.id]:  weebcentral,
+  [mangaball.id]:    mangaball,
 };
 
 function getSource(id) {

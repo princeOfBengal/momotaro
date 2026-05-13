@@ -13,24 +13,48 @@ export default defineConfig({
         name: 'Momotaro',
         short_name: 'Momotaro',
         description: 'Self-hosted manga reader',
+        lang: 'en',
         theme_color: '#1a1a1a',
         background_color: '#0f0f0f',
         display: 'standalone',
+        // `display_override` lets browsers fall through to a usable display
+        // mode when `standalone` isn't supported (older Android WebView,
+        // some PWA engines). Required for Chrome Android to show the rich
+        // install prompt on a few device classes.
+        display_override: ['standalone', 'minimal-ui'],
         orientation: 'any',
         start_url: '/',
         scope: '/',
+        categories: ['books', 'entertainment'],
         prefer_related_applications: false,
         icons: [
+          // Two `purpose: 'any'` icons — Android Chrome's installability
+          // checker requires at least one any-purpose icon ≥192px AND will
+          // pick the largest any-purpose icon for the home-screen launcher
+          // when no maskable variant is selected by the OS theme.
+          //
+          // Being explicit about `purpose` is required to dodge a Chrome
+          // 88+ behaviour where icons without a purpose can be inferred as
+          // maskable-only on some Android versions, which then fails the
+          // "any-purpose icon present" check and silently disables the
+          // install prompt.
           {
             src: 'icon-192.png',
             sizes: '192x192',
             type: 'image/png',
+            purpose: 'any',
           },
           {
             src: 'icon-512.png',
             sizes: '512x512',
             type: 'image/png',
+            purpose: 'any',
           },
+          // The maskable variant feeds Android's adaptive-icon shape
+          // (circle / rounded square / squircle depending on launcher).
+          // Reusing the 512 — no dedicated maskable artwork — produces a
+          // safe-zone-cropped icon on launchers that mask aggressively, but
+          // the install prompt still fires.
           {
             src: 'icon-512.png',
             sizes: '512x512',

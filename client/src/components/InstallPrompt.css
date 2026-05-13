@@ -1,0 +1,181 @@
+/* PWA install banner — fixed at the bottom of the viewport on mobile,
+   sized so it doesn't obscure reader controls. The banner is sticky-ish
+   only on phones (the JS already gates rendering by viewport); these
+   styles are intentionally aggressive about staying out of the way. */
+
+.install-banner {
+  position: fixed;
+  /* Honour iOS safe-area inset so the banner clears the home bar / notch
+     bottom inset on iPhone. The fallback 12px is the minimum on Android. */
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  left: 12px;
+  right: 12px;
+  z-index: 1100;
+  pointer-events: none; /* let the inner card own pointer events */
+  display: flex;
+  justify-content: center;
+}
+
+.install-banner-inner {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  background: var(--bg-elev, #1f1f1f);
+  color: var(--text-primary, #fff);
+  border: 1px solid var(--border, #2c2c2c);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  max-width: 480px;
+  width: 100%;
+  /* slight slide-up on mount; works even without a CSS transition library */
+  animation: install-slideup 0.28s ease-out;
+}
+
+@keyframes install-slideup {
+  from { transform: translateY(20px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.install-banner-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--accent-dim, rgba(106, 166, 255, 0.15));
+  color: var(--accent, #6aa6ff);
+}
+
+.install-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.install-banner-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.install-banner-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-muted, #8e8e8e);
+  line-height: 1.3;
+  /* clamp on very narrow phones so the CTA stays visible */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.install-banner-cta {
+  flex-shrink: 0;
+  background: var(--accent, #6aa6ff);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.install-banner-cta:hover { filter: brightness(1.1); }
+.install-banner-cta:active { filter: brightness(0.92); }
+
+.install-banner-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #8e8e8e);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.install-banner-close:hover {
+  color: var(--text-primary, #fff);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+/* iOS instructions modal — only shown after the user taps "How?" on the
+   banner, so it's gated behind explicit user intent. */
+
+.install-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: install-fade-in 0.18s ease-out;
+}
+
+@keyframes install-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.install-modal {
+  background: var(--bg-elev, #1f1f1f);
+  color: var(--text-primary, #fff);
+  border: 1px solid var(--border, #2c2c2c);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 380px;
+  width: 100%;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.install-modal-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.install-modal-step {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary, #fff);
+}
+
+.install-modal-step strong:first-child {
+  color: var(--accent, #6aa6ff);
+  margin-right: 4px;
+}
+
+.install-modal-icon {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  color: var(--accent, #6aa6ff);
+  margin: 0 2px;
+}
+
+.install-modal-close {
+  margin-top: 8px;
+  width: 100%;
+  background: var(--accent, #6aa6ff);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.install-modal-close:hover { filter: brightness(1.1); }

@@ -10,7 +10,15 @@
     <meta name="apple-mobile-web-app-title" content="Momotaro" />
     <title>Momotaro</title>
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- iOS Safari only honours sized variants for the home-screen icon
+         picker. The unsized fallback below covers older devices; the sized
+         entries cover every modern iPhone/iPad form factor — without these
+         iOS may pick an arbitrary favicon-sized fallback for the home
+         screen, which reads as "this site isn't a PWA". -->
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png" />
   </head>
   <body>
     <div id="root"></div>

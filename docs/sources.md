@@ -12,6 +12,7 @@ can also be set manually from the same page.
 
 - **MangaDex** — full support (search, series detail, chapter listing, image download)
 - **WeebCentral** — full support (search, series detail, chapter listing, image download). HTML-scraping based; no auth, no Cloudflare gate. See [WeebCentral notes](#weebcentral-notes) below.
+- **MangaBall** — full support (search, series detail, chapter listing, image download). Uses MangaBall's own `/api/v1/` REST endpoints with Laravel-style CSRF; session is warmed lazily and cached for 10 minutes. See [MangaBall notes](#mangaball-notes) below.
 - **comix.to** — partial support (search, series detail, URL recording, cross-source linkage). Chapter listing and image fetching are gated by an obfuscated JS-VM security token; see [comix.to limitations](#comixto-limitations) below.
 - **MangaKakalot** — partial support (search, series detail synthesised from the search response, URL recording, cross-source linkage). Chapter listing and image pages are blocked by Cloudflare's interactive JS challenge; see [MangaKakalot limitations](#mangakakalot-limitations) below.
 - **MangaFire** — partial support (URL-paste search, series detail and **full chapter list** scraped from the openly-served series page, scheduler diff works against the chapter list, URL recording, cross-source linkage). Image fetch is blocked by Cloudflare Turnstile on the reader AJAX; see [MangaFire limitations](#mangafire-limitations) below.
@@ -83,6 +84,75 @@ cover_url, description, last_chapter, available_languages }`.
 group, external_url }`. `external_url` is non-null when MangaDex hosts the
 chapter on a third-party reader and `getChapterImages` won't work — the picker
 flags those rows so the user knows in advance.
+
+### MangaBall notes
+
+The MangaBall adapter ([server/src/sources/mangaball.js](../server/src/sources/mangaball.js))
+is the **third source after MangaDex and WeebCentral with full chapter
+download support**. The site is a PHP app at `mangaball.net` exposing a
+clean `/api/v1/` REST surface protected by Laravel-style CSRF.
+
+**Auth model:** three protections that all need to be satisfied on every
+API call:
+
+1. `PHPSESSID` cookie — set by any HTML page; required on every API call
+2. CSRF token — embedded in every page as `<meta name="csrf-token" content="…">`,
+   sent back as the `X-CSRF-TOKEN` header on every API request
+3. `X-Requested-With: XMLHttpRequest` — the API rejects requests without
+   it as cross-origin
+
+The adapter warms a session lazily on first call (GET `/` → parse
+PHPSESSID + csrf-token meta) and caches it for 10 minutes. On 403/419
+(CSRF rejection patterns) it re-warms and retries once.
+
+**Endpoints used:**
+
+- `POST /api/v1/smart-search/search/` — body (form-encoded):
+  `search_input={query}`. Returns `{code:200, data:{manga:[{title, img,
+  status, url, ...}, ...]}}`. The `url` field carries `/title-detail/{slug}-{ObjectId}/`,
+  from which the adapter pulls the trailing 24-hex ObjectId as the source id.
+- `GET /title-detail/{any-slug}-{ObjectId}/` — series detail HTML scrape.
+  The slug prefix is purely SEO; the site canonicalises any non-empty
+  slug to the real title slug, so the adapter uses a fixed placeholder
+  `series-{ObjectId}` URL. Title is read from the JSON-LD `caption` field
+  and falls back to `og:title`; cover from `og:image`.
+- `POST /api/v1/chapter/chapter-listing-by-title-id/` — body (JSON):
+  `{title_id: "<24-hex ObjectId>"}`. Returns `{code:200, ALL_CHAPTERS:
+  [{number, number_float, title, translations: [{id, language, group,
+  date, pages, url, volume}, ...]}, ...]}`. The adapter walks the
+  per-language translations array and emits one chapter entry per
+  (language, group) pair so the scheduler can reason about each
+  translation independently. The per-translation ObjectId becomes the
+  queue's `source_chapter_id`.
+- `GET /chapter-detail/{translationObjectId}/` — chapter reader HTML
+  scrape. Image URLs are embedded inline as `<img src="https://heracross.red-and-blue.net/storage/{titleId}/{vol}/{ch}/{group}/{lang}/{chapterId}-NNN.webp">`.
+  The adapter accepts any `*.{red-and-blue,black-and-white,poke*}.net/storage/{24-hex}/...`
+  pattern since the site rotates through several Pokémon-themed CDN
+  hostnames (jigglypuff, heracross, bulbasaur, etc.).
+
+**Linkage:** stored in `manga.mangaball_id` as the bare 24-hex ObjectId,
+kept in sync by `syncDenormalizedLinkage` the same way `mangadex_id` is.
+
+**Multi-language / multi-group caveat:** MangaBall typically has 3-5
+scanlation groups per chapter per language, so `getChapters` returns
+many more entries than other sources (720 EN rows for Horimiya across
+multiple groups vs. ~130 chapters from other sources). The scheduler
+diffs by chapter number, so duplicates collapse correctly there. On
+manual-pick downloads the user sees every translation/group separately
+and chooses which one to grab.
+
+**Verified live with Horimiya** (`https://mangaball.net/title-detail/horimiya-68517bef5a163752cfb9d159/`):
+
+- Search: returns 2 hits including the test case with `id=68517bef5a163752cfb9d159`,
+  `status=Completed`, cover URL
+- `getSeries('68517bef5a163752cfb9d159')` → `{ title: 'Horimiya', cover_url, series_url }`
+- `getChapters` EN: 720 rows (groups Suicune / Raikou / Empoleon /
+  Zinmanga / etc.), sorted oldest-first
+- `getChapters` all langs: 1505 rows split across en/ru/pt-br/es/fr/vi
+- `getChapterImages` for `68da947d1ec6dc083a2b20f8` (Ch.0 Suicune):
+  82 page URLs from `jigglypuff.poke-black-and-white.net`. Earlier raw
+  curl on a different chapter fetched a real 230 KB RIFF/WEBP image.
+- Scheduler diff math: with local `{1,2,3,4,5}` → 700 missing EN rows
 
 ### WeebCentral notes
 

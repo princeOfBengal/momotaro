@@ -18,6 +18,7 @@ const LINKAGE_COLUMNS = {
   mangakakalot: 'mangakakalot_id',
   mangafire:    'mangafire_id',
   weebcentral:  'weebcentral_id',
+  mangaball:    'mangaball_id',
 };
 
 /**
@@ -365,6 +366,7 @@ router.post('/manga/:id/source-urls', asyncWrapper(async (req, res) => {
         'https://www.mangakakalot.gg/manga/{slug}',
         'https://mangafire.to/manga/{slug}.{hid}',
         'https://weebcentral.com/series/{ULID}',
+        'https://mangaball.net/title-detail/{slug}-{ObjectId}/',
       ],
       });
     }
@@ -419,6 +421,7 @@ router.patch('/manga/:id/source-urls/:urlId', asyncWrapper(async (req, res) => {
         'https://www.mangakakalot.gg/manga/{slug}',
         'https://mangafire.to/manga/{slug}.{hid}',
         'https://weebcentral.com/series/{ULID}',
+        'https://mangaball.net/title-detail/{slug}-{ObjectId}/',
       ],
       });
     }

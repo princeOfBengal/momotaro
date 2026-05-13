@@ -133,6 +133,68 @@
   background: var(--accent-dim);
 }
 
+/* Refresh — same shape as optimize/edit/delete/source so the icon row stays
+   visually consistent. The spin animation kicks in while a single-folder
+   rescan is in flight (icon rotates, button is disabled, hover paused). */
+.detail-refresh-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.detail-refresh-btn svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.4s ease;
+}
+.detail-refresh-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.detail-refresh-btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+.detail-refresh-btn.is-spinning svg {
+  animation: detail-refresh-spin 0.85s linear infinite;
+}
+@keyframes detail-refresh-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Inline status pill that appears next to the refresh button for a few
+   seconds after a scan finishes. Hidden on small phones to keep the
+   navbar from wrapping. */
+.detail-refresh-flash {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
+  white-space: nowrap;
+  animation: detail-refresh-flash-in 0.2s ease-out;
+}
+.detail-refresh-flash.is-error {
+  background: rgba(244, 67, 54, 0.15);
+  color: #ff8a80;
+}
+@keyframes detail-refresh-flash-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (max-width: 700px) {
+  .detail-refresh-flash { display: none; }
+}
+
 .detail-source-btn {
   width: 32px;
   height: 32px;

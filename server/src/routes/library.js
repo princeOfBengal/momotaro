@@ -599,6 +599,51 @@ router.get('/scan/status', asyncWrapper(async (req, res) => {
   res.json({ data: getScanStatus() });
 }));
 
+// POST /api/manga/:id/scan — re-scan only this manga's folder.
+//
+// Cheap alternative to a full library scan when the user just wants to pick
+// up freshly-added chapters for one series. Walks `manga.path` only, runs
+// the same upsert / chapter-index / cover-thumbnail pipeline as the bulk
+// scanner, but never touches sibling manga or runs the per-library cover /
+// metadata reinforcement passes — those rely on aggregated state that
+// only makes sense after a full pass.
+//
+// Synchronous: the response is sent only after the rescan completes so the
+// MangaDetail page can re-fetch and immediately display the new chapters.
+// `scanMangaDirectory` is fast for a single folder (a handful of MB of disk
+// I/O at most) so blocking the request here is fine.
+router.post('/manga/:id/scan', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare(
+    'SELECT id, folder_name, path, library_id FROM manga WHERE id = ?'
+  ).get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const beforeCount = db.prepare(
+    'SELECT COUNT(*) AS n FROM chapters WHERE manga_id = ?'
+  ).pluck().get(manga.id);
+
+  const { scanMangaDirectory } = require('../scanner/libraryScanner');
+  try {
+    await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id);
+  } catch (err) {
+    return res.status(500).json({ error: 'Scan failed: ' + err.message });
+  }
+
+  const afterCount = db.prepare(
+    'SELECT COUNT(*) AS n FROM chapters WHERE manga_id = ?'
+  ).pluck().get(manga.id);
+
+  res.json({
+    data: {
+      before_chapter_count: beforeCount,
+      after_chapter_count:  afterCount,
+      added:                Math.max(0, afterCount - beforeCount),
+      removed:              Math.max(0, beforeCount - afterCount),
+    },
+  });
+}));
+
 // GET /api/manga/:id/info — file path, file count, and folder size.
 // Values come from the cached `bytes_on_disk` / `file_count` columns populated
 // during scan. This used to walk the manga folder on each request, which is

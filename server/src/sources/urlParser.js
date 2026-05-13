@@ -31,6 +31,26 @@ const PARSERS = [
     build: (id) => `https://mangadex.org/title/${id}`,
   },
   {
+    source: 'mangaball',
+    // mangaball.net URLs:
+    //   - title page:   https://mangaball.net/title-detail/{slug}-{ObjectId}/
+    //   - chapter page: https://mangaball.net/chapter-detail/{ObjectId}/
+    //
+    // The MongoDB ObjectId (24 hex chars) is the stable identifier; the
+    // {slug}- prefix is SEO and the site redirects /title-detail/{anything}-
+    // {ObjectId}/ to the canonical slugged form, so we canonicalise to a
+    // safe placeholder slug ("series-") + the ObjectId.
+    match: (u) =>
+      /^https?:\/\/(www\.)?mangaball\.net\/title-detail\/(?:[a-z0-9_-]+-)?[a-f0-9]{24}\/?$/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/title-detail\/(?:[a-z0-9_-]+-)?([a-f0-9]{24})\/?$/i);
+      if (!m) return null;
+      return { source: 'mangaball', source_id: m[1].toLowerCase() };
+    },
+    // Use a generic slug — the site redirects to the canonical one anyway.
+    build: (id) => `https://mangaball.net/title-detail/series-${id}/`,
+  },
+  {
     source: 'weebcentral',
     // weebcentral.com URLs:
     //   - title page:   https://weebcentral.com/series/{ULID}/{Title-slug}

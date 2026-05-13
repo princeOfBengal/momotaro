@@ -1345,7 +1345,8 @@ function SourceUrlsModal({ manga, onClose }) {
             <code>https://comix.to/title/&#123;hid&#125;</code> ·{' '}
             <code>https://www.mangakakalot.gg/manga/&#123;slug&#125;</code> ·{' '}
             <code>https://mangafire.to/manga/&#123;slug&#125;.&#123;hid&#125;</code> ·{' '}
-            <code>https://weebcentral.com/series/&#123;ULID&#125;</code>.
+            <code>https://weebcentral.com/series/&#123;ULID&#125;</code> ·{' '}
+            <code>https://mangaball.net/title-detail/&#123;slug&#125;-&#123;ObjectId&#125;/</code>.
           </p>
 
           <div style={{
@@ -1442,6 +1443,13 @@ export default function MangaDetail() {
   const [optimizePhase, setOptimizePhase] = useState('confirm'); // 'confirm' | 'running' | 'done'
   const [optimizeResult, setOptimizeResult] = useState(null);
 
+  // Refresh — single-folder rescan triggered from the navbar refresh button.
+  // `refreshing` controls the spinner state on the icon; `refreshFlash`
+  // shows a small inline status pill ("+3 chapters" / "no changes" / error)
+  // for a couple of seconds after the rescan completes.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshFlash, setRefreshFlash] = useState(null); // { ok: bool, text: string }
+
   // More Info
   const [showInfo, setShowInfo] = useState(false);
   const [infoData, setInfoData] = useState(null);
@@ -1481,6 +1489,34 @@ export default function MangaDetail() {
     }).catch(() => { if (!cancelled) setGalleryLoading(false); });
     return () => { cancelled = true; };
   }, [id]);
+
+  async function handleRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshFlash(null);
+    try {
+      const result = await api.scanManga(id);
+      // Re-fetch the manga so the chapter list re-renders with anything
+      // the scan added/removed. Single round-trip — much cheaper than the
+      // full library reload that would happen if the user manually scanned.
+      const fresh = await api.getManga(id);
+      setManga(fresh);
+      const added = result?.added | 0;
+      const removed = result?.removed | 0;
+      let text;
+      if (added && removed)       text = `+${added} new, -${removed} removed`;
+      else if (added)             text = `+${added} new chapter${added === 1 ? '' : 's'}`;
+      else if (removed)           text = `-${removed} removed`;
+      else                        text = 'No changes';
+      setRefreshFlash({ ok: true, text });
+    } catch (err) {
+      setRefreshFlash({ ok: false, text: 'Refresh failed: ' + err.message });
+    } finally {
+      setRefreshing(false);
+      // Auto-clear the flash after a few seconds so it doesn't stick.
+      setTimeout(() => setRefreshFlash(null), 4000);
+    }
+  }
 
   async function handleRemoveFromGallery(itemId) {
     if (removingGalleryIds.has(itemId)) return;
@@ -1896,6 +1932,25 @@ export default function MangaDetail() {
         <Link to="/library" className="btn btn-ghost">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
+        {refreshFlash && (
+          <span
+            className={`detail-refresh-flash${refreshFlash.ok ? '' : ' is-error'}`}
+            role="status"
+          >{refreshFlash.text}</span>
+        )}
+        <button
+          className={`detail-refresh-btn${refreshing ? ' is-spinning' : ''}`}
+          onClick={handleRefresh}
+          disabled={refreshing}
+          title="Re-scan this manga's folder for new chapters"
+          aria-label="Refresh chapters"
+        >
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="17 2 17 7 12 7" />
+            <polyline points="3 18 3 13 8 13" />
+            <path d="M16.5 8a7 7 0 0 0-12.5 2.5M3.5 12a7 7 0 0 0 12.5-2.5" />
+          </svg>
+        </button>
         <button
           className="detail-optimize-btn"
           onClick={openOptimizeModal}

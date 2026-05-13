@@ -461,7 +461,11 @@ export default function Home() {
         <Link to="/" className="navbar-brand">
           <img src="/logo.png" alt="Momotaro" className="navbar-logo" />
         </Link>
-        <div className="library-search-wrap">
+        {/* Desktop search lives in the navbar; the mobile copy below the
+            navbar is the touch-friendly version (the navbar one shrinks
+            unusably small between the brand and the right-side actions on
+            phones). Mirrors the dual-input pattern Library already uses. */}
+        <div className="library-search-wrap lib-desktop-only">
           <input
             className="library-search"
             type="search"
@@ -483,6 +487,21 @@ export default function Home() {
           ⚙
         </button>
       </nav>
+
+      {/* Mobile-only search row, lifted out of the sticky navbar so the
+          input is full-width and easy to tap on a phone. CSS:
+          .lib-mobile-search-row in Library.css (loaded by Home too). */}
+      <div className="lib-mobile-search-row">
+        <input
+          className="library-search"
+          type="search"
+          placeholder="Search across All Libraries"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          enterKeyHint="search"
+          autoComplete="off"
+        />
+      </div>
 
       {/* Backdrop for the mobile sidebar drawer */}
       <div

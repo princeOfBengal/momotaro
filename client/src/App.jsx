@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Library from './pages/Library';
 import MangaDetail from './pages/MangaDetail';
+import InstallPrompt from './components/InstallPrompt';
 
 // Routes off the primary browse path are loaded on demand. The PWA
 // `globPatterns: ['**/*.{js,css,...}']` in vite.config.js precaches every
@@ -53,6 +54,11 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
+      {/* Mounted outside <Routes> so it persists across navigation. The
+          component self-gates: only renders on mobile viewports, hides
+          itself when the app is already running standalone, and skips the
+          reader route to keep the bottom of the screen clear for taps. */}
+      <InstallPrompt />
     </BrowserRouter>
   );
 }

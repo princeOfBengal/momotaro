@@ -243,6 +243,9 @@ function sourceColumn(source) {
     case 'mangafire':    return 'mangafire_id';
     case 'weebcentral':  return 'weebcentral_id';
     case 'mangaball':    return 'mangaball_id';
+    case 'mangataro':    return 'mangataro_id';
+    case 'mangadotnet':  return 'mangadotnet_id';
+    case 'comikuro':     return 'comikuro_id';
     default:             return null;
   }
 }

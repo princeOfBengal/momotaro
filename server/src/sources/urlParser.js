@@ -113,6 +113,62 @@ const PARSERS = [
     build: (slug) => `https://www.mangakakalot.gg/manga/${slug}`,
   },
   {
+    source: 'comikuro',
+    // comikuro.to URLs are slug-based:
+    //   - title page:   https://comikuro.to/manga/{slug}
+    //   - reader page:  https://comikuro.to/read/{chapter_hid}
+    // The slug ("horimiya") is the stable identifier for the series.
+    // Reader URLs use a separate hid we don't expose to callers — only
+    // the /manga/ form gets canonicalised here.
+    match: (u) =>
+      /^https?:\/\/(www\.)?comikuro\.to\/manga\/[a-z0-9_-]+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/manga\/([a-z0-9_-]+)/i);
+      if (!m) return null;
+      const slug = m[1];
+      if (slug.length < 1 || slug.length > 200) return null;
+      return { source: 'comikuro', source_id: slug };
+    },
+    build: (slug) => `https://comikuro.to/manga/${slug}`,
+  },
+  {
+    source: 'mangadotnet',
+    // mangadot.net URLs are id-based:
+    //   - title page:   https://mangadot.net/manga/{id}
+    //   - chapter page: https://mangadot.net/chapter/{chapter_id}[?source=...]
+    // Series id is a positive integer assigned by the site; the chapter
+    // page lives at a flat /chapter/{id} path (not under /manga/{id}/...),
+    // so we only canonicalise from the /manga/{id} form to avoid mistaking
+    // a chapter id for a series id.
+    match: (u) =>
+      /^https?:\/\/(www\.)?mangadot\.net\/manga\/\d+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/manga\/(\d+)/i);
+      if (!m) return null;
+      return { source: 'mangadotnet', source_id: m[1] };
+    },
+    build: (id) => `https://mangadot.net/manga/${id}`,
+  },
+  {
+    source: 'mangataro',
+    // mangataro.org URLs are slug-based:
+    //   - title page:   https://mangataro.org/manga/{slug}
+    //   - chapter page: https://mangataro.org/read/{slug}/ch{N}-{chapter_id}
+    // The slug ("horimiya", "hori-san-to-miyamura-kun") is the stable
+    // identifier the user pastes; the numeric manga_id needed by the
+    // chapter-list API is resolved from the series page on demand.
+    match: (u) =>
+      /^https?:\/\/(www\.)?mangataro\.org\/(manga|read)\/[a-z0-9_-]+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/(?:manga|read)\/([a-z0-9_-]+)/i);
+      if (!m) return null;
+      const slug = m[1];
+      if (slug.length < 1 || slug.length > 200) return null;
+      return { source: 'mangataro', source_id: slug };
+    },
+    build: (slug) => `https://mangataro.org/manga/${slug}`,
+  },
+  {
     source: 'comixto',
     // comix.to URLs come in two shapes:
     //   - title page:    https://comix.to/title/{hid}-{seo-slug}

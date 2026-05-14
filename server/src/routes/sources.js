@@ -19,6 +19,9 @@ const LINKAGE_COLUMNS = {
   mangafire:    'mangafire_id',
   weebcentral:  'weebcentral_id',
   mangaball:    'mangaball_id',
+  mangataro:    'mangataro_id',
+  mangadotnet:  'mangadotnet_id',
+  comikuro:     'comikuro_id',
 };
 
 /**
@@ -367,6 +370,9 @@ router.post('/manga/:id/source-urls', asyncWrapper(async (req, res) => {
         'https://mangafire.to/manga/{slug}.{hid}',
         'https://weebcentral.com/series/{ULID}',
         'https://mangaball.net/title-detail/{slug}-{ObjectId}/',
+        'https://mangataro.org/manga/{slug}',
+        'https://mangadot.net/manga/{id}',
+        'https://comikuro.to/manga/{slug}',
       ],
       });
     }
@@ -422,6 +428,9 @@ router.patch('/manga/:id/source-urls/:urlId', asyncWrapper(async (req, res) => {
         'https://mangafire.to/manga/{slug}.{hid}',
         'https://weebcentral.com/series/{ULID}',
         'https://mangaball.net/title-detail/{slug}-{ObjectId}/',
+        'https://mangataro.org/manga/{slug}',
+        'https://mangadot.net/manga/{id}',
+        'https://comikuro.to/manga/{slug}',
       ],
       });
     }

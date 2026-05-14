@@ -1346,7 +1346,10 @@ function SourceUrlsModal({ manga, onClose }) {
             <code>https://www.mangakakalot.gg/manga/&#123;slug&#125;</code> ·{' '}
             <code>https://mangafire.to/manga/&#123;slug&#125;.&#123;hid&#125;</code> ·{' '}
             <code>https://weebcentral.com/series/&#123;ULID&#125;</code> ·{' '}
-            <code>https://mangaball.net/title-detail/&#123;slug&#125;-&#123;ObjectId&#125;/</code>.
+            <code>https://mangaball.net/title-detail/&#123;slug&#125;-&#123;ObjectId&#125;/</code> ·{' '}
+            <code>https://mangataro.org/manga/&#123;slug&#125;</code> ·{' '}
+            <code>https://mangadot.net/manga/&#123;id&#125;</code> ·{' '}
+            <code>https://comikuro.to/manga/&#123;slug&#125;</code>.
           </p>
 
           <div style={{

@@ -212,6 +212,50 @@ function migrate(db) {
   createDownloadJobsTable(db);
   createMangaSourceUrlsTable(db);
   createMangaSchedulesTable(db);
+  createAuthTables(db);
+}
+
+/**
+ * Authentication tables for Phase 1 of remote-access support.
+ *
+ * `paired_clients` — one row per device that has completed pairing. We store
+ * `token_hash` (SHA-256 of the plaintext token) rather than the token itself
+ * so a DB leak does not expose live credentials. The plaintext is returned
+ * exactly once at pairing completion and never persisted.
+ *
+ * `pending_pairings` — short-lived rows representing a device that has
+ * requested pairing and is waiting for the admin to enter the PIN. Rows are
+ * pruned by TTL (`expires_at`) and after `attempts` exceeds the cap. A
+ * successful PIN submission moves the minted token's hash into
+ * `paired_clients` and deletes the pending row.
+ */
+function createAuthTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS paired_clients (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_name   TEXT    NOT NULL,
+      platform      TEXT    NOT NULL DEFAULT '',
+      token_hash    TEXT    NOT NULL UNIQUE,
+      created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_seen_at  INTEGER,
+      last_seen_ip  TEXT,
+      revoked       INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_paired_clients_token_hash ON paired_clients(token_hash);
+
+    CREATE TABLE IF NOT EXISTS pending_pairings (
+      id            TEXT    PRIMARY KEY,
+      pin           TEXT    NOT NULL,
+      device_name   TEXT    NOT NULL,
+      platform      TEXT    NOT NULL DEFAULT '',
+      ip            TEXT,
+      requested_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+      expires_at    INTEGER NOT NULL,
+      attempts      INTEGER NOT NULL DEFAULT 0,
+      approved_token TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_pairings_expires ON pending_pairings(expires_at);
+  `);
 }
 
 /**

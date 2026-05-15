@@ -1,0 +1,172 @@
+/* First-run pairing wizard. Shown when the app has no server URL configured
+   or no valid client token. Used primarily by the Android APK on first
+   launch, but also reachable from the PWA via /pairing for testing or
+   re-pairing scenarios. */
+
+.pw-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+.pw-card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 28px;
+}
+
+.pw-logo {
+  display: block;
+  margin: 0 auto 18px;
+  width: 64px;
+  height: 64px;
+}
+
+.pw-step {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+.pw-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-align: center;
+  margin: 0 0 8px;
+}
+
+.pw-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  text-align: center;
+  margin: 0 0 24px;
+}
+
+.pw-field {
+  margin-bottom: 14px;
+}
+
+.pw-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.pw-input {
+  width: 100%;
+  padding: 11px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.pw-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pw-pin-input {
+  text-align: center;
+  font-family: 'Courier New', monospace;
+  font-size: 24px;
+  letter-spacing: 0.3em;
+  font-weight: 700;
+}
+
+.pw-error {
+  font-size: 12px;
+  color: #f44336;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.pw-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 12px 0 0;
+}
+
+.pw-hint code {
+  background: var(--bg-primary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.pw-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.pw-actions .btn {
+  flex: 1;
+}
+
+.pw-server-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.pw-server-status.ok    { color: #4caf50; }
+.pw-server-status.error { color: #f44336; }
+
+.pw-server-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pw-success-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  margin: 0 auto 18px;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.pw-reset-link {
+  display: block;
+  margin-top: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.pw-reset-link:hover {
+  color: var(--text-primary);
+}

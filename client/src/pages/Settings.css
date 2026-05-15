@@ -573,3 +573,254 @@
   .stat-grid { grid-template-columns: 1fr; }
   .stat-tile { min-width: 80px; padding: 12px 8px 10px; }
 }
+
+/* ── Client Management ───────────────────────────────────────────────────── */
+
+.cm-block {
+  margin-bottom: 28px;
+}
+
+.cm-block-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cm-block-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.cm-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+}
+
+.cm-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.cm-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cm-device-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-device-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cm-device-meta-revoked {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.cm-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cm-pin {
+  font-family: 'Courier New', monospace;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  user-select: all;
+}
+
+.cm-pin-countdown {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cm-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.cm-toggle-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.cm-toggle-help {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.cm-warning {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 10px 14px;
+  background: rgba(244, 167, 89, 0.08);
+  border-left: 3px solid rgba(244, 167, 89, 0.6);
+  border-radius: 4px;
+  margin-bottom: 14px;
+}
+
+.cm-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 24px 0;
+}
+
+/* ── Port Forwarding ─────────────────────────────────────────────────────── */
+
+.pf-mode-group {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.pf-mode-btn {
+  flex: 1;
+  min-width: 140px;
+  padding: 14px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.pf-mode-btn:hover {
+  border-color: var(--accent);
+}
+
+.pf-mode-btn.active {
+  border-color: var(--accent);
+  background: rgba(244, 167, 89, 0.08);
+}
+
+.pf-mode-label {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.pf-mode-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.pf-port-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.pf-port-input {
+  width: 100px;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: 'Courier New', monospace;
+  text-align: center;
+}
+
+.pf-port-arrow {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.pf-status-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 14px;
+}
+
+.pf-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+
+.pf-status-dot.mapped { background: #4caf50; }
+.pf-status-dot.error  { background: #f44336; }
+.pf-status-dot.idle   { background: var(--text-muted); }
+
+.pf-status-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.pf-status-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.pf-status-detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.pf-public-url {
+  font-family: 'Courier New', monospace;
+  color: var(--accent);
+  user-select: all;
+}
+
+.pf-action-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}

@@ -1,4 +1,32 @@
-const BASE = import.meta.env.VITE_API_BASE || '';
+// ── Server URL resolution ────────────────────────────────────────────────────
+// PWA / dev: same-origin (BASE = ''), so /api/* hits whatever host served the
+// HTML. Android app (wrapped via Capacitor): the WebView serves files from
+// `https://localhost`, which obviously can't reach the real Momotaro server —
+// the user pairs the app to a server during onboarding and the URL is saved
+// to localStorage. Read on every call so a re-pair takes effect without a
+// reload.
+const BUILD_DEFAULT_BASE = import.meta.env.VITE_API_BASE || '';
+const SERVER_URL_KEY = 'momotaro_server_url';
+
+function getServerUrl() {
+  const saved = localStorage.getItem(SERVER_URL_KEY);
+  if (saved) return saved.replace(/\/+$/, '');
+  return BUILD_DEFAULT_BASE;
+}
+
+function setServerUrl(url) {
+  if (url) localStorage.setItem(SERVER_URL_KEY, url.replace(/\/+$/, ''));
+  else     localStorage.removeItem(SERVER_URL_KEY);
+}
+
+function clearServerUrl() {
+  localStorage.removeItem(SERVER_URL_KEY);
+}
+
+// `BASE` is kept as an alias for backwards compatibility — anything outside
+// `apiFetch` (URL builders for image src attributes, etc.) reads it directly.
+// Using a getter would be cleaner but breaks the existing `const`-destructuring
+// callers; the explicit helper functions cover the same ground.
 
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -14,6 +42,47 @@ function getDeviceId() {
     localStorage.setItem('momotaro_device_id', id);
   }
   return id;
+}
+
+// ── Admin session token ─────────────────────────────────────────────────────
+// Set by POST /api/admin/setup or /api/admin/login. Stored in localStorage so
+// the admin stays signed in across page reloads. Sent on every request via
+// `X-Admin-Token`; the server treats it as a satisfying credential for both
+// admin-gated and client-gated routes.
+const ADMIN_TOKEN_KEY = 'momotaro_admin_token';
+
+function getAdminToken() {
+  return localStorage.getItem(ADMIN_TOKEN_KEY) || null;
+}
+
+function setAdminToken(token) {
+  if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
+  else       localStorage.removeItem(ADMIN_TOKEN_KEY);
+}
+
+function clearAdminToken() {
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+}
+
+// ── Paired-client token ─────────────────────────────────────────────────────
+// Issued at the end of the PIN-pairing flow (see `Pairing.jsx`). The Android
+// app saves this after onboarding; subsequent requests go out with both the
+// `Authorization: Bearer` header (preferred) and the server URL pointing at
+// the paired host. The PWA on the same LAN as the server typically does not
+// need this — LAN bypass + no auth_enabled covers that case.
+const CLIENT_TOKEN_KEY = 'momotaro_client_token';
+
+function getClientToken() {
+  return localStorage.getItem(CLIENT_TOKEN_KEY) || null;
+}
+
+function setClientToken(token) {
+  if (token) localStorage.setItem(CLIENT_TOKEN_KEY, token);
+  else       localStorage.removeItem(CLIENT_TOKEN_KEY);
+}
+
+function clearClientToken() {
+  localStorage.removeItem(CLIENT_TOKEN_KEY);
 }
 
 async function apiFetch(path, options = {}) {
@@ -39,13 +108,17 @@ async function apiFetch(path, options = {}) {
     }
   }
 
+  const adminToken  = getAdminToken();
+  const clientToken = getClientToken();
   try {
-    const resp = await fetch(`${BASE}${path}`, {
+    const resp = await fetch(`${getServerUrl()}${path}`, {
       ...fetchOptions,
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'X-Device-ID': getDeviceId(),
+        ...(adminToken  ? { 'X-Admin-Token': adminToken } : {}),
+        ...(clientToken ? { 'Authorization': `Bearer ${clientToken}` } : {}),
         ...fetchOptions.headers,
       },
     });
@@ -283,12 +356,12 @@ export const api = {
   vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
 
   // Config backup (export/import)
-  exportConfigUrl: () => `${BASE}/api/admin/export-config`,
+  exportConfigUrl: () => `${getServerUrl()}/api/admin/export-config`,
   // CSV download: one row per manga, columns: Library, Series Name
   // (AniList/MAL/MangaUpdates/Doujinshi.info), Folder path, Number of
   // chapters, Number of volumes, Author. Used for manually spot-checking
   // that third-party metadata matches are correct.
-  exportSeriesListUrl: () => `${BASE}/api/admin/export-series-list`,
+  exportSeriesListUrl: () => `${getServerUrl()}/api/admin/export-series-list`,
   importConfig: (payload) =>
     apiFetch('/api/admin/import-config', {
       method: 'POST',
@@ -299,7 +372,7 @@ export const api = {
 
   // System Logs
   getSystemLogs: () => apiFetch('/api/admin/logs'),
-  systemLogsExportUrl: () => `${BASE}/api/admin/logs/export`,
+  systemLogsExportUrl: () => `${getServerUrl()}/api/admin/logs/export`,
 
   // Home page — single aggregate fetch for every ribbon (continue reading,
   // discover, recently added, art gallery, top-manga-per-genre). Scoped
@@ -415,9 +488,105 @@ export const api = {
       timeoutMs: 60_000,
     }),
 
+  // ── Remote-access admin + pairing ──────────────────────────────────────
+  // These endpoints back the Client Management section in Settings. The
+  // admin token returned by `adminSetup` and `adminLogin` is persisted by
+  // `setAdminToken` so subsequent requests in the same browser session pick
+  // it up via the `X-Admin-Token` header.
+  getAuthStatus: () => apiFetch('/api/admin/auth-status'),
+  adminSetup: async (password) => {
+    const data = await apiFetch('/api/admin/setup', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    if (data?.admin_token) setAdminToken(data.admin_token);
+    return data;
+  },
+  adminLogin: async (password) => {
+    const data = await apiFetch('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    if (data?.admin_token) setAdminToken(data.admin_token);
+    return data;
+  },
+  adminLogout: async () => {
+    try {
+      await apiFetch('/api/admin/logout', { method: 'POST' });
+    } finally {
+      clearAdminToken();
+    }
+  },
+  changeAdminPassword: async (currentPassword, newPassword) => {
+    const data = await apiFetch('/api/admin/password', {
+      method: 'PUT',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    if (data?.admin_token) setAdminToken(data.admin_token);
+    return data;
+  },
+  getSecuritySettings: () => apiFetch('/api/admin/security-settings'),
+  saveSecuritySettings: (body) =>
+    apiFetch('/api/admin/security-settings', { method: 'PUT', body: JSON.stringify(body) }),
+  listPendingPairings: () => apiFetch('/api/admin/pairings/pending'),
+  cancelPendingPairing: (id) =>
+    apiFetch(`/api/admin/pairings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listPairedClients: () => apiFetch('/api/admin/clients'),
+  revokePairedClient: (id) =>
+    apiFetch(`/api/admin/clients/${id}`, { method: 'DELETE' }),
+
+  // ── Port forwarding (UPnP) ─────────────────────────────────────────────
+  // Backs the Port Forwarding section. `getNetworkStatus` is what the UI
+  // polls every few seconds while the section is open — returns both the
+  // user-saved config and the live UPnP state. Probe is a one-shot check
+  // for whether the router answers SSDP at all.
+  getNetworkStatus: () => apiFetch('/api/admin/network/status'),
+  saveNetworkConfig: (body) =>
+    apiFetch('/api/admin/network/config', { method: 'PUT', body: JSON.stringify(body), timeoutMs: 30_000 }),
+  probeUpnp: () =>
+    apiFetch('/api/admin/network/probe', { method: 'POST', timeoutMs: 30_000 }),
+  refreshUpnpMapping: () =>
+    apiFetch('/api/admin/network/refresh', { method: 'POST', timeoutMs: 30_000 }),
+  // HTTP-based — doesn't touch the router. Used by Manual mode where
+  // talking to UPnP would be the wrong thing to do.
+  detectPublicIp: () =>
+    apiFetch('/api/admin/network/public-ip', { method: 'POST', timeoutMs: 15_000 }),
+
+  // ── Pairing (client-side flow, used by Pairing.jsx) ─────────────────────
+  // These hit the public pairing endpoints — no admin token required. The
+  // wrapper writes the resulting client token to localStorage on success so
+  // every subsequent `api.*` call from the same browser/APK includes it.
+  pairingRequest: (deviceName, platform) =>
+    apiFetch('/api/pairing/request', {
+      method: 'POST',
+      body: JSON.stringify({ device_name: deviceName, platform }),
+    }),
+  pairingStatus: (id) =>
+    apiFetch(`/api/pairing/status/${encodeURIComponent(id)}`),
+  pairingSubmitPin: async (pairingId, pin) => {
+    const data = await apiFetch('/api/pairing/submit-pin', {
+      method: 'POST',
+      body: JSON.stringify({ pairing_id: pairingId, pin }),
+    });
+    if (data?.token) setClientToken(data.token);
+    return data;
+  },
+  // Public health check used by the pairing wizard to validate the server
+  // URL before asking the user for a device name.
+  healthCheck: () => apiFetch('/api/health'),
+
   // Helpers
-  pageImageUrl: (pageId) => `${BASE}/api/pages/${pageId}/image`,
+  pageImageUrl: (pageId) => `${getServerUrl()}/api/pages/${pageId}/image`,
   thumbnailUrl,
+  getAdminToken,
+  setAdminToken,
+  clearAdminToken,
+  getClientToken,
+  setClientToken,
+  clearClientToken,
+  getServerUrl,
+  setServerUrl,
+  clearServerUrl,
 };
 
 // Thumbnails are sharded by `mangaId % 256` into 2-digit hex subdirectories,
@@ -427,7 +596,7 @@ export const api = {
 function thumbnailUrl(filename) {
   if (!filename) return null;
   const m = String(filename).match(/^(\d+)/);
-  if (!m) return `${BASE}/thumbnails/${filename}`;
+  if (!m) return `${getServerUrl()}/thumbnails/${filename}`;
   const shard = (parseInt(m[1], 10) % 256).toString(16).padStart(2, '0');
-  return `${BASE}/thumbnails/${shard}/${filename}`;
+  return `${getServerUrl()}/thumbnails/${shard}/${filename}`;
 }

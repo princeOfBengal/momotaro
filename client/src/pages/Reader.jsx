@@ -578,6 +578,16 @@ export default function Reader() {
         />
       )}
       <ReaderEdgeHints mode={hintMode} rtl={isRtl} suppressed={hintsSuppressed} />
+      {zoom !== 100 && (
+        <button
+          type="button"
+          className="reader-restore-zoom"
+          onClick={() => setZoom(100)}
+          aria-label="Restore zoom to 100%"
+        >
+          Restore Zoom
+        </button>
+      )}
       {controls}
     </div>
   );

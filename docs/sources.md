@@ -4,18 +4,22 @@ In-app downloader that fetches chapters from third-party sources, writes them
 as CBZ archives into the user's library, and records the source linkage so a
 future scheduler can re-check those series for new releases.
 
-**Phase 1 (current):** MangaDex search + manual download into a chosen library
-or existing series. Source linkage is recorded automatically on download and
-can also be set manually from the same page.
+Title search, manual chapter selection, and scheduled auto-checks are all
+wired up. Source linkage is recorded automatically on download and can also
+be set manually from the per-manga URL manager. Successful per-manga
+schedules dispatch missing chapters through the same download queue.
 
-**Available source adapters:**
+**Available source adapters** (registered in [server/src/sources/index.js](../server/src/sources/index.js); enumerated by `GET /api/sources`):
 
-- **MangaDex** — full support (search, series detail, chapter listing, image download)
-- **WeebCentral** — full support (search, series detail, chapter listing, image download). HTML-scraping based; no auth, no Cloudflare gate. See [WeebCentral notes](#weebcentral-notes) below.
-- **MangaBall** — full support (search, series detail, chapter listing, image download). Uses MangaBall's own `/api/v1/` REST endpoints with Laravel-style CSRF; session is warmed lazily and cached for 10 minutes. See [MangaBall notes](#mangaball-notes) below.
+- **MangaDex** — full support (search, series detail, chapter listing, image download).
+- **WeebCentral** — full support (HTML-scraping; no auth, no Cloudflare gate). See [WeebCentral notes](#weebcentral-notes) below.
+- **MangaBall** — full support (uses MangaBall's own `/api/v1/` REST endpoints with Laravel-style CSRF; session warmed lazily and cached for 10 minutes). See [MangaBall notes](#mangaball-notes) below.
+- **MangaTaro** — full support (uses the site's `/auth/*` JSON API; chapter list requires a time-derived MD5 token reproduced server-side, page list is open).
+- **MangaDotNet** — full support (clean `/api/*` REST surface from a React Router v7 SSR app; no auth, no token).
+- **ComiKuro** — full support via the site's allowlisted CORS proxy. ComiKuro is itself a metadata aggregator; chapter pages are pinned to the kaliscan upstream through `https://api.comikuro.to/api/_proxy/proxy`.
 - **comix.to** — partial support (search, series detail, URL recording, cross-source linkage). Chapter listing and image fetching are gated by an obfuscated JS-VM security token; see [comix.to limitations](#comixto-limitations) below.
-- **MangaKakalot** — partial support (search, series detail synthesised from the search response, URL recording, cross-source linkage). Chapter listing and image pages are blocked by Cloudflare's interactive JS challenge; see [MangaKakalot limitations](#mangakakalot-limitations) below.
-- **MangaFire** — partial support (URL-paste search, series detail and **full chapter list** scraped from the openly-served series page, scheduler diff works against the chapter list, URL recording, cross-source linkage). Image fetch is blocked by Cloudflare Turnstile on the reader AJAX; see [MangaFire limitations](#mangafire-limitations) below.
+- **MangaKakalot** — partial support (search, series detail synthesised from the search response, URL recording). Chapter listing and image pages are blocked by Cloudflare's interactive JS challenge; see [MangaKakalot limitations](#mangakakalot-limitations) below.
+- **MangaFire** — partial support (URL-paste search, series detail and **full chapter list** scraped from the openly-served series page, scheduler diff works). Image fetch is blocked by Cloudflare Turnstile on the reader AJAX; see [MangaFire limitations](#mangafire-limitations) below.
 
 The reference projects called out in the spec —
 [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source)
@@ -33,8 +37,13 @@ Art Gallery, ThirdPartySourcing itself). Clicking it routes to
 
 The page has four panes:
 
-1. **Source picker + search** — single source dropdown (only MangaDex right
-   now) and a title query box.
+1. **Source picker + search** — source dropdown populated from
+   `GET /api/sources` (MangaDex, WeebCentral, MangaBall, MangaTaro,
+   MangaDotNet, ComiKuro, comix.to, MangaKakalot, MangaFire) and a title
+   query box. When the page is opened from a per-manga *Find more sources*
+   link (`/third-party-sourcing?manga_id=N`), the search box is pre-filled
+   with the manga's title and the target is locked to mode='existing' for
+   that manga.
 2. **Search results** — title / cover / author / year / status / genres,
    click-through to a series detail.
 3. **Series detail + chapter picker** — the user picks which chapters to grab,
@@ -56,9 +65,19 @@ The page has four panes:
 | File | Responsibility |
 |---|---|
 | [server/src/sources/index.js](../server/src/sources/index.js) | Registry of source adapters keyed by id |
+| [server/src/sources/urlParser.js](../server/src/sources/urlParser.js) | URL ↔ `(source, source_id)` translation for every adapter |
 | [server/src/sources/mangadex.js](../server/src/sources/mangadex.js) | MangaDex API client — search, series, chapters, MangaDex@Home image URLs |
+| [server/src/sources/weebcentral.js](../server/src/sources/weebcentral.js) | WeebCentral HTML/HTMX scraper |
+| [server/src/sources/mangaball.js](../server/src/sources/mangaball.js) | MangaBall `/api/v1/` client with CSRF session warmup |
+| [server/src/sources/mangataro.js](../server/src/sources/mangataro.js) | MangaTaro `/auth/*` JSON client with time-derived token |
+| [server/src/sources/mangadotnet.js](../server/src/sources/mangadotnet.js) | MangaDotNet `/api/*` REST client |
+| [server/src/sources/comikuro.js](../server/src/sources/comikuro.js) | ComiKuro proxy-routed adapter, kaliscan-pinned for pages |
+| [server/src/sources/comixto.js](../server/src/sources/comixto.js) | comix.to search + series detail; chapters/pages gated |
+| [server/src/sources/mangakakalot.js](../server/src/sources/mangakakalot.js) | MangaKakalot autocomplete search; chapters/pages gated |
+| [server/src/sources/mangafire.js](../server/src/sources/mangafire.js) | MangaFire URL-paste search + series-page chapter scrape |
 | [server/src/downloader/queue.js](../server/src/downloader/queue.js) | Persistent FIFO download queue with configurable concurrency + per-page delay |
-| [server/src/routes/sources.js](../server/src/routes/sources.js) | `/api/sources/*` REST endpoints + manga linkage routes |
+| [server/src/scheduler/index.js](../server/src/scheduler/index.js) | Per-manga `manga_schedules` polling loop and `checkOneManga` worker |
+| [server/src/routes/sources.js](../server/src/routes/sources.js) | `/api/sources/*` REST endpoints + manga linkage + schedule routes |
 
 ### Source adapter contract
 
@@ -200,6 +219,79 @@ sync by `syncDenormalizedLinkage` the same way `mangadex_id` is.
 - Chapters: 136 entries, sorted oldest-first (Ch.1 → Ch.130 + 6 extras),
   each with stable ULID id and ISO publish date
 - Image fetch: chapter 1 returns 39 page URLs, all under `official.lowee.us`
+
+### MangaTaro notes
+
+The MangaTaro adapter ([server/src/sources/mangataro.js](../server/src/sources/mangataro.js))
+talks to the site's small `/auth/*` JSON API (the prefix is misleading —
+no auth is required for the read endpoints).
+
+**Endpoints:**
+
+- `POST /auth/search` — body `{query, limit}`. Returns `{results:[{id, title,
+  slug, alt_titles, authors, permalink, thumbnail, description, type, status}]}`.
+  `id` is the numeric series id; `slug` is the URL slug the user pastes.
+- `GET /auth/manga-chapters?manga_id={id}&offset=0&limit=500&order=ASC&_t={token}&_ts={timestamp}` —
+  the chapter list endpoint requires a 16-char MD5-prefix token derived from
+  the timestamp plus an hour-based secret. The token algorithm is reproduced
+  server-side in `generateToken()` so the adapter doesn't need to scrape the
+  site bundle.
+- `GET /auth/chapter-content?chapter_id={id}` — page list, no token required.
+  Image URLs are absolute (`mangataro.yachts` CDN); the downloader fetches
+  them directly.
+
+**Linkage:** stored in `manga.mangataro_id` as the slug. The slug → numeric
+manga_id lookup needed for the chapter-list call is resolved through the
+series page on demand.
+
+### MangaDotNet notes
+
+The MangaDotNet adapter ([server/src/sources/mangadotnet.js](../server/src/sources/mangadotnet.js))
+hits a clean REST API exposed by the site's React Router v7 SSR app. No
+auth, no token, no Cloudflare gate.
+
+**Endpoints:**
+
+- `GET /_rr/suggestions?q={query}` — search / autocomplete. Returns
+  `{suggestions:[{id, title, photo, genres, chapter_count, status, …}]}`.
+- `GET /api/manga/{id}` — series detail including authors / artists (both
+  JSON-string-encoded) and alt-titles.
+- `GET /api/manga/{id}/chapters/list` — full chapter list. Optional `?lang=`
+  and `?group_id=` filters mirror the site UI; the adapter omits them so the
+  user sees every translation and post-filters client-side.
+- `GET /api/chapters/{chapterId}/images` — page list with `{url, w, h}` per
+  image. URLs are site-relative and absolutised by the downloader.
+
+**Linkage:** stored in `manga.mangadotnet_id` as the numeric series id.
+
+### ComiKuro notes
+
+The ComiKuro adapter ([server/src/sources/comikuro.js](../server/src/sources/comikuro.js))
+is structurally different from the others: ComiKuro is a **metadata
+aggregator** that doesn't host chapter pages for most titles. Its SPA
+scrapes pages from an upstream host per series (kaliscan, comix.to,
+mangaball, zazamanga). The adapter pins kaliscan as the page upstream
+since it has the broadest English coverage and the cleanest HTML.
+
+All HTTP traffic flows through the site's allowlisted CORS proxy at
+`https://api.comikuro.to/api/_proxy/proxy?url=…` so the adapter inherits
+whatever headers the proxy adds.
+
+**Endpoints (through the proxy):**
+
+- Search → `https://api.comick.dev/v1.0/search?q={query}&limit=N`. Returns
+  `[{id, hid, slug, title, desc, status, last_chapter, content_rating, country, md_covers:[{b2key}]}]`.
+- Series detail → native ComiKuro `/api/_data/manga?slug={slug}`. Returns
+  `{pageProps:{comic:{…}, artists:[…], authors:[…]}}`.
+- Chapter list → 1) re-search kaliscan for the title to resolve its manga
+  id; 2) `GET /service/backend/chaplist/?manga_id=N&manga_name=…`. Returns
+  HTML the adapter parses for chapter links.
+- Chapter images → `GET /manga/{kaliscan_id}-{slug}/chapter-{number}` and
+  parse the inline `var chapImages = "url1,url2,…"` string. URLs carry
+  time-expiring `acc=…&expires=…` tokens — the downloader fetches them
+  immediately to avoid expiry.
+
+**Linkage:** stored in `manga.comikuro_id` as the slug.
 
 ### MangaFire limitations
 
@@ -447,6 +539,14 @@ There are two layers, and they're kept in sync:
 | Column | Source | Filled by |
 |---|---|---|
 | `mangadex_id` | MangaDex (UUID string) | Most recent `manga_source_urls` row with `source='mangadex'` |
+| `comixto_id` | comix.to (hid) | Most recent `manga_source_urls` row with `source='comixto'` |
+| `mangakakalot_id` | MangaKakalot (slug) | Most recent `manga_source_urls` row with `source='mangakakalot'` |
+| `mangafire_id` | MangaFire (`{slug}.{hid}`) | Most recent `manga_source_urls` row with `source='mangafire'` |
+| `weebcentral_id` | WeebCentral (ULID) | Most recent `manga_source_urls` row with `source='weebcentral'` |
+| `mangaball_id` | MangaBall (24-hex ObjectId) | Most recent `manga_source_urls` row with `source='mangaball'` |
+| `mangataro_id` | MangaTaro (slug) | Most recent `manga_source_urls` row with `source='mangataro'` |
+| `mangadotnet_id` | MangaDotNet (numeric id) | Most recent `manga_source_urls` row with `source='mangadotnet'` |
+| `comikuro_id` | ComiKuro (slug) | Most recent `manga_source_urls` row with `source='comikuro'` |
 
 ### Auto-recording
 
@@ -477,6 +577,14 @@ response includes the list of accepted patterns so the user knows what to
 paste. Recognised today:
 
 - `https://mangadex.org/title/{uuid}` (also `.cc` and `.com` legacy mirrors)
+- `https://comix.to/title/{hid}[-{seo-slug}[/{chapter-id}-chapter-N]]`
+- `https://www.mangakakalot.gg/manga/{slug}`
+- `https://mangafire.to/manga/{slug}.{hid}` (also `/read/{slug}.{hid}/{lang}/chapter-N`)
+- `https://weebcentral.com/series/{ULID}`
+- `https://mangaball.net/title-detail/{slug}-{ObjectId}/`
+- `https://mangataro.org/manga/{slug}` (also `/read/{slug}`)
+- `https://mangadot.net/manga/{id}`
+- `https://comikuro.to/manga/{slug}`
 
 ### Legacy direct-linkage routes
 
@@ -618,10 +726,20 @@ The modal:
 | `POST` | `/api/sources/:source/download` | Enqueue chapters; body documented in [routes/sources.js](../server/src/routes/sources.js) |
 | `GET`  | `/api/sources/downloads?limit=50` | Recent jobs newest-first |
 | `DELETE` | `/api/sources/downloads/:id` | Cancel queued or running job |
+| `POST` | `/api/sources/downloads/:id/retry` | Re-queue a failed or cancelled job |
 | `POST` | `/api/sources/downloads/clear-finished` | Drop done/failed/cancelled rows |
 | `GET`  | `/api/sources/match-existing?title=…` | FTS5 lookup against the user's library |
 | `POST` | `/api/manga/:id/link-source` | Set `<source>_id` on a manga row |
 | `DELETE` | `/api/manga/:id/link-source/:source` | Clear that linkage |
+| `GET`  | `/api/manga/:id/source-urls` | List recorded URLs for this manga |
+| `POST` | `/api/manga/:id/source-urls` | Add a URL — body `{url}` (auto-detect) or `{source, source_id, url?, label?}` |
+| `PATCH` | `/api/manga/:id/source-urls/:urlId` | Replace URL and/or label |
+| `DELETE` | `/api/manga/:id/source-urls/:urlId` | Remove a URL row |
+| `GET`  | `/api/schedules` | Every per-manga schedule with each manga's URLs embedded |
+| `GET`  | `/api/manga/:id/schedule` | Current schedule or `null` |
+| `PUT`  | `/api/manga/:id/schedule` | Upsert — body `{frequency, time_of_day, day_of_week?, enabled?}` |
+| `DELETE` | `/api/manga/:id/schedule` | Remove the schedule |
+| `POST` | `/api/manga/:id/schedule/run-now` | One-shot check; writes `last_checked_at`/`last_result` if a schedule exists |
 
 ## Database
 

@@ -17,17 +17,17 @@ Quick-reference documentation for the Momotaro self-hosted manga server.
 | [myanimelist.md](./myanimelist.md) | Client-ID auth, search/refresh/apply, bulk concurrency pool, NSFW handling, status mapping |
 | [mangaupdates.md](./mangaupdates.md) | Public read API (no auth), search/refresh/apply, conservative pacing, status / rating / author normalization |
 | [doujinshi.md](./doujinshi.md) | Email/password auth, search mechanics (space→underscore workaround), normalization, metadata priority |
-| [sources.md](./sources.md) | Third Party Sourcing — MangaDex search, CBZ download queue, source linkage, scheduled-check follow-up plan |
+| [sources.md](./sources.md) | Third Party Sourcing — nine source adapters (MangaDex, WeebCentral, MangaBall, MangaTaro, MangaDotNet, ComiKuro, comix.to, MangaKakalot, MangaFire), persistent CBZ download queue, per-manga `manga_source_urls` log, and the per-manga `manga_schedules` poll loop driving automatic re-checks |
 
 ## Quick Start
 
 ```bash
 # Development
 cd server && npm install && npm run dev   # API on :3000
-cd client && npm install && npm run dev   # UI  on :5173
+cd client && npm install && npm run dev   # UI  on :5173 (proxies /api + /thumbnails to :3000)
 
-# Production
-docker compose up --build                 # UI  on :8080
+# Production — Node serves the API and the prebuilt SPA on the same port
+docker compose up -d --build              # http://localhost:3000
 ```
 
 ## Key Architecture Notes

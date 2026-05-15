@@ -25,9 +25,11 @@ The UUID is generated on first load and persisted in `localStorage` as `momotaro
 | PATCH | `/api/libraries/:id` | Update library `{ name?, path?, show_in_all? }` |
 | DELETE | `/api/libraries/:id` | Delete library and all its manga |
 | POST | `/api/libraries/:id/scan` | Trigger manual scan of one library |
+| POST | `/api/manga/:id/scan` | Re-scan a single manga directory (used by the watcher path and the Refresh button on MangaDetail) |
 | POST | `/api/scan` | Trigger full scan of all libraries (returns 409 if already running) |
 | GET | `/api/scan/status` | Current scan progress — see *Scan Progress* below |
 | POST | `/api/libraries/:id/export-metadata` | Write `metadata.json` to each manga folder that has third-party metadata |
+| POST | `/api/libraries/:id/reset-metadata` | Bulk Break Linkage across every manga in the library — same per-manga semantics as `POST /api/manga/:id/reset-metadata` (see [Reset Metadata](#reset-metadata)) |
 
 ### Scan Progress
 
@@ -230,6 +232,7 @@ A per-manga collection of saved pages. Users bookmark pages from the reader via 
 
 | Method | Path | Description |
 | --- | --- | --- |
+| GET | `/api/gallery/all` | Every gallery item across every manga, grouped by series. Powers the standalone `/art-gallery` page (see [frontend.md § ArtGallery](./frontend.md#artgallery-srcpagesartgalleryjsx)). |
 | GET | `/api/manga/:id/gallery` | List gallery items for a manga, newest first |
 | POST | `/api/manga/:id/gallery` | Add a page `{ pageId }` |
 | DELETE | `/api/manga/:id/gallery/page/:pageId` | Remove by page ID (used by the reader toggle) |
@@ -637,6 +640,31 @@ The file uses the same field names recognised by the local metadata scanner (`ti
 
 ---
 
+## Third Party Sourcing
+
+Routes that drive the in-app downloader, per-manga URL log, and per-manga schedule poller. All routes are mounted under `/api/sources/*` (discovery + downloads + match), `/api/manga/:id/source-urls*` (URL log), `/api/manga/:id/schedule*` (schedule editor), and `/api/manga/:id/link-source*` (legacy direct-column linkage). The full surface — request bodies, response shapes, adapter-specific notes, and the scheduler poll-loop — is documented in [sources.md](./sources.md). A condensed list:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/sources` | Available source adapters (id, label, homepage) |
+| GET | `/api/sources/:source/search?q=…` | Title search at one source |
+| GET | `/api/sources/:source/series/:id` | Series detail |
+| GET | `/api/sources/:source/series/:id/chapters?lang=en[&manga_id=…]` | Chapter list annotated with `already_downloaded` |
+| POST | `/api/sources/:source/download` | Enqueue chapters into the persistent download queue |
+| GET | `/api/sources/downloads?limit=50` | Recent jobs newest-first |
+| DELETE | `/api/sources/downloads/:id` | Cancel queued or running job |
+| POST | `/api/sources/downloads/:id/retry` | Re-queue a failed/cancelled job |
+| POST | `/api/sources/downloads/clear-finished` | Drop done/failed/cancelled rows |
+| GET | `/api/sources/match-existing?title=…` | FTS5 lookup against the user's library for the "Add to existing series" picker |
+| GET / POST / PATCH / DELETE | `/api/manga/:id/source-urls[/:urlId]` | Per-manga URL log — see [sources.md § Source linkage](./sources.md#source-linkage) |
+| GET | `/api/schedules` | Every schedule with each manga's URLs embedded |
+| GET / PUT / DELETE | `/api/manga/:id/schedule` | Per-manga schedule editor |
+| POST | `/api/manga/:id/schedule/run-now` | One-shot check independent of the schedule |
+| POST | `/api/manga/:id/link-source` | Legacy direct linkage — set `<source>_id` without writing to `manga_source_urls`. Prefer the `/source-urls` routes for user-facing workflows. |
+| DELETE | `/api/manga/:id/link-source/:source` | Legacy linkage clear |
+
+---
+
 ## Settings
 
 | Method | Path | Description |
@@ -655,13 +683,15 @@ The file uses the same field names recognised by the local metadata scanner (`ti
   "anilist_username": "myuser",
   "anilist_avatar": "https://...",
   "doujinshi_logged_in": true,
-  "mal_client_id_set": true
+  "mal_client_id_set": true,
+  "tps_max_concurrent_chapters": 1,
+  "tps_page_delay_ms": 500
 }
 ```
 
-`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only. `doujinshi_logged_in` is server-wide (true whenever a doujinshi token is stored in `settings`). `mal_client_id_set` is server-wide (true whenever a MAL Client ID is stored).
+`anilist_token_set` and `anilist_logged_in` reflect the session for the requesting device only. `doujinshi_logged_in` is server-wide (true whenever a doujinshi token is stored in `settings`). `mal_client_id_set` is server-wide (true whenever a MAL Client ID is stored). `tps_*` are the live Third Party Sourcing downloader knobs — exposed in Settings → Third Party Sourcing and applied via `downloader.applySettings()` on every PUT.
 
-**PUT** also accepts `mal_client_id` to save or clear the MyAnimeList Client ID. Passing an empty string clears it.
+**PUT accepts** `{ anilist_client_id?, anilist_client_secret?, mal_client_id?, tps_max_concurrent_chapters?, tps_page_delay_ms? }`. All fields are optional; only provided fields are written. Empty-string values clear the AniList / MAL credential fields. `tps_max_concurrent_chapters` is bounded `[1, 8]` and `tps_page_delay_ms` is bounded `[0, 60000]` — out-of-range values return `400`.
 
 > CBZ cache size and the auto-clear schedule are *not* read or written through `/api/settings` — they live under their own route pair, `GET`/`PUT /api/admin/cbz-cache-settings` (see [Admin → CBZ Cache Settings](#cbz-cache-settings)). They are still persisted into the underlying `settings` table (keys prefixed `cbz_cache_*`), so they travel with config exports and survive server restarts.
 
@@ -879,6 +909,7 @@ Genre aggregation and read-time estimation are computed entirely in SQL against 
 | POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
 | POST | `/api/admin/reset-thumbnails` | Re-align every manga's active cover to the priority order (anilist > mal > mu > doujinshi > original); overrides `cover_user_set`. **Never pings any upstream.** |
 | POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
+| GET | `/api/admin/export-series-list` | Download a CSV listing every manga (`id, title, library_name, path, …`). Used for offline grooming of a large library. `Content-Disposition: attachment; filename="momotaro-series-<iso-timestamp>.csv"`. |
 | GET | `/api/admin/logs` | Return the in-memory system log buffer as JSON |
 | GET | `/api/admin/logs/export` | Download the log buffer as a plain-text `.txt` file |
 

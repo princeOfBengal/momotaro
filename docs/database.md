@@ -27,6 +27,7 @@ Multiple library root directories.
 | `name` | TEXT | Display name |
 | `path` | TEXT UNIQUE | Absolute filesystem path |
 | `show_in_all` | INTEGER | 1 = included in "All Libraries" filter |
+| `last_scan_mtime_ms` | REAL | Library-root `mtimeMs` recorded at the end of the last successful walk. Used by the startup-scan shortcut to skip a re-walk when nothing at the top level has changed (see [scanner.md § Startup Skip](./scanner.md#startup-skip-root-mtime-shortcut)). |
 | `created_at` | INTEGER | Unix timestamp |
 
 ### `manga`
@@ -49,6 +50,15 @@ One row per manga folder.
 | `mal_id` | INTEGER | MyAnimeList ID |
 | `mangaupdates_id` | INTEGER | MangaUpdates `series_id` (the modern long-form ID) |
 | `doujinshi_id` | TEXT | Doujinshi.info book slug, e.g. `glasses-in-summer-life` |
+| `mangadex_id` | TEXT | MangaDex series UUID — denormalized "active" pointer kept in sync with `manga_source_urls` by `syncDenormalizedLinkage`. See [sources.md § Source linkage](./sources.md#source-linkage). |
+| `comixto_id` | TEXT | comix.to series hid |
+| `mangakakalot_id` | TEXT | MangaKakalot slug |
+| `mangafire_id` | TEXT | MangaFire `{slug}.{hid}` composite |
+| `weebcentral_id` | TEXT | WeebCentral ULID (26-char Crockford base32) |
+| `mangaball_id` | TEXT | MangaBall 24-hex ObjectId |
+| `mangataro_id` | TEXT | MangaTaro slug |
+| `mangadotnet_id` | TEXT | MangaDotNet numeric series id |
+| `comikuro_id` | TEXT | ComiKuro slug |
 | `score` | REAL | Average score from metadata source (0–10 scale) |
 | `metadata_source` | TEXT | `none`, `anilist`, `myanimelist`, `mangaupdates`, `doujinshi`, `local` — controls which source's text fields the UI displays |
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
@@ -128,6 +138,8 @@ Key-value store for server-wide configuration (not per-device state). Every row 
 | `cbz_cache_autoclear_mode` | `off` \| `daily` \| `weekly`. Drives the auto-clear scheduler. |
 | `cbz_cache_autoclear_day` | `0..6` (0 = Sunday). Day-of-week when `cbz_cache_autoclear_mode = 'weekly'`. Ignored otherwise. |
 | `cbz_cache_autoclear_time` | `HH:MM` 24-hour, server local time. Time-of-day for the scheduled wipe. |
+| `tps_max_concurrent_chapters` | Third Party Sourcing downloader — max chapters fetched in parallel. Bounded `[1, 8]`; default 1. |
+| `tps_page_delay_ms` | Third Party Sourcing downloader — per-page delay in ms. Bounded `[0, 60000]`; default 500. |
 
 ### `device_anilist_sessions`
 Per-device AniList login state. Keyed by a UUID generated in the browser (`localStorage` key `momotaro_device_id`) and sent as the `X-Device-ID` request header.
@@ -200,6 +212,78 @@ User-created (and two built-in) reading lists.
 | `name` | TEXT UNIQUE | |
 | `is_default` | INTEGER | 1 for "Favorites" and "Want to Read" |
 | `created_at` | INTEGER | |
+
+### `manga_source_urls`
+
+Authoritative log of every third-party-source URL ever associated with a manga. Multiple rows per manga are normal (alternate mirror, replacement after a dead link, second source like comix.to alongside the active MangaDex link). Powers the Third Party Sourcing URL manager (see [sources.md § Source linkage](./sources.md#source-linkage)).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `manga_id` | INTEGER FK | References `manga(id)`, CASCADE delete |
+| `source` | TEXT | Adapter id — `mangadex`, `comixto`, `mangakakalot`, `mangafire`, `weebcentral`, `mangaball`, `mangataro`, `mangadotnet`, `comikuro` |
+| `source_id` | TEXT | Series id at that source (UUID / slug / ObjectId / hid depending on adapter) |
+| `url` | TEXT | Canonical landing URL produced by `buildUrl` in [sources/urlParser.js](../server/src/sources/urlParser.js) |
+| `label` | TEXT | Optional user-set display label |
+| `created_at` | INTEGER | Unix timestamp |
+| `last_used_at` | INTEGER | Unix timestamp — bumped whenever a download succeeds against the URL |
+
+**Unique constraint:** `(manga_id, url)` — `INSERT … ON CONFLICT DO UPDATE` is used everywhere that writes to it.
+
+**Indexes:** `idx_manga_source_urls_manga ON manga_source_urls(manga_id)`, `idx_manga_source_urls_source ON manga_source_urls(source)`
+
+The per-source columns on `manga` (`mangadex_id`, …, `comikuro_id`) are denormalized pointers maintained by `syncDenormalizedLinkage` in [routes/sources.js](../server/src/routes/sources.js): after every insert/update/delete the column is set to the `source_id` of the most recent matching row, or NULL when no row of that source remains.
+
+### `manga_schedules`
+
+One row per manga that the user has opted into auto-checking for new chapters. Polled once a minute by [server/src/scheduler/index.js](../server/src/scheduler/index.js); rows whose `next_run_at <= now` are dispatched through the existing download queue. See [sources.md § Scheduled auto-checking](./sources.md#scheduled-auto-checking).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `manga_id` | INTEGER FK UNIQUE | References `manga(id)`, CASCADE delete |
+| `enabled` | INTEGER | 0/1 — when 0, `next_run_at` is NULL so the index skips the row |
+| `frequency` | TEXT | `daily` or `weekly` |
+| `day_of_week` | INTEGER | 0..6 (0 = Sunday) when `frequency = 'weekly'`; NULL otherwise |
+| `time_of_day` | TEXT | `HH:MM` 24-hour, server local time |
+| `last_checked_at` | INTEGER | Unix timestamp of the most recent fire (poll or run-now) |
+| `last_result` | TEXT | Short status string, e.g. `"Queued 3 new chapters"`, `"No new chapters"`, `"error: …"` |
+| `next_run_at` | INTEGER | Unix timestamp — primary query column |
+| `created_at` | INTEGER | |
+| `updated_at` | INTEGER | |
+
+**Index:** `idx_manga_schedules_due ON manga_schedules(next_run_at) WHERE enabled = 1` — partial index keeps the poll-tick lookup `O(log n)` even with thousands of scheduled series.
+
+### `download_jobs`
+
+Persistent FIFO queue backing the Third Party Sourcing downloader (see [sources.md § Download queue](./sources.md#download-queue)). Rows survive process restarts — a kill mid-download leaves a record the queue rehydrates on startup, flipping any `running` rows back to `queued`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `source` | TEXT | Adapter id, e.g. `mangadex`, `weebcentral` |
+| `source_series_id` | TEXT | Series id at the source |
+| `source_series_title` | TEXT | Frozen at enqueue time for display |
+| `source_chapter_id` | TEXT | Chapter id at the source |
+| `chapter_number` | REAL | Preserved verbatim from the source (fractional values kept intact) |
+| `chapter_volume` | REAL | |
+| `chapter_title` | TEXT | |
+| `target_mode` | TEXT | `new` (create new manga folder) or `existing` (write into an existing manga) |
+| `target_library_id` | INTEGER | Used in `target_mode = 'new'` |
+| `target_manga_id` | INTEGER | Used in `target_mode = 'existing'` |
+| `target_folder_name` | TEXT | Manga folder name to create when `target_mode = 'new'` |
+| `target_chapter_filename` | TEXT | CBZ filename — filled by the worker once the chapter is downloaded |
+| `status` | TEXT | `queued`, `running`, `done`, `failed`, `cancelled` |
+| `error` | TEXT | First 500 chars of the error message when `status = 'failed'` |
+| `pages_downloaded` | INTEGER | Live progress counter for the UI |
+| `pages_total` | INTEGER | |
+| `created_at` | INTEGER | |
+| `started_at` | INTEGER | |
+| `finished_at` | INTEGER | |
+
+No FK to `manga`/`libraries` — the destination might not exist yet (mode='new') and the record should survive a manga deletion so the user can still see history.
+
+**Indexes:** `idx_download_jobs_status ON download_jobs(status)`, `idx_download_jobs_created_at ON download_jobs(created_at DESC)`
 
 ### `reading_list_manga`
 Junction table linking manga to lists.
@@ -308,6 +392,15 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |
 | `manga` | `mangaupdates_id` | MangaUpdates integration |
+| `manga` | `mangadex_id` | Third Party Sourcing — MangaDex linkage |
+| `manga` | `comixto_id` | Third Party Sourcing — comix.to linkage |
+| `manga` | `mangakakalot_id` | Third Party Sourcing — MangaKakalot linkage |
+| `manga` | `mangafire_id` | Third Party Sourcing — MangaFire linkage |
+| `manga` | `weebcentral_id` | Third Party Sourcing — WeebCentral linkage |
+| `manga` | `mangaball_id` | Third Party Sourcing — MangaBall linkage |
+| `manga` | `mangataro_id` | Third Party Sourcing — MangaTaro linkage |
+| `manga` | `mangadotnet_id` | Third Party Sourcing — MangaDotNet linkage |
+| `manga` | `comikuro_id` | Third Party Sourcing — ComiKuro linkage |
 | `manga` | `anilist_cover` | AniList thumbnail filename |
 | `manga` | `mal_cover` | MyAnimeList thumbnail filename |
 | `manga` | `mangaupdates_cover` | MangaUpdates thumbnail filename |
@@ -324,3 +417,4 @@ Structural migrations and one-time backfills handled separately from the column-
 
 - **`upgradeToMultiLibrary`** — Recreates the `manga` table to add `library_id` and change the unique constraint from `folder_name` to `path`. Runs once, detected by checking `pragma_table_info`.
 - **`backfillDoujinshiCover`** — Pre-`doujinshi_cover` installations saved Doujinshi.info covers as `<mangaId>_cover.webp` because doujinshi was the one source without a dedicated column. The new cover-priority resolver only looks at `*_cover` columns, so any doujinshi-displayed manga whose linkage exists but `doujinshi_cover IS NULL` gets the legacy filename written into the column on next startup. The actual file isn't touched. Logged as `[DB] Backfilled doujinshi_cover for N legacy doujinshi-displayed manga.` when it fires; no-op on subsequent boots.
+- **`createMangaSourceUrlsTable` / `createMangaSchedulesTable` / `createDownloadJobsTable`** — Idempotent `CREATE TABLE IF NOT EXISTS` calls for the Third Party Sourcing tables described above. Safe to run on every boot; no migration required for legacy installs because the tables are simply created empty.

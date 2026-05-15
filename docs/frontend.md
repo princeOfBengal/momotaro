@@ -10,6 +10,8 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | --- | --- | --- |
 | `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Recently Added, Discover, Art Gallery, Top Manga per favourite genre) |
 | `/genres` | `Genres` | Browse By Genre — grid of every genre across visible libraries, each tile decorated with a faded top-rated cover; clicking a tile searches All Libraries for that genre |
+| `/art-gallery` | `ArtGallery` | Standalone Art Gallery page — every bookmarked page grouped by series, each series rendered as its own ribbon. Reached from the sidebar shortcut. |
+| `/third-party-sourcing` | `ThirdPartySourcing` | Third Party Sourcing UI — source dropdown, search, series detail + chapter picker, downloads queue. Accepts `?manga_id=N` to pre-fill the search box and lock the target to that existing manga. See [sources.md](./sources.md). |
 | `/library` | `Library` | Main manga grid with search, sort, and the libraries / reading-lists sidebar |
 | `/manga/:id` | `MangaDetail` | Manga info and chapter list |
 | `/manga/:id/edit` | `EditManga` | Manual metadata editor — title, author, genres, and the `track_volumes` toggle. Reached from the *Edit Metadata* button on MangaDetail. PATCHes `/api/manga/:id`. |
@@ -18,6 +20,8 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | `/settings` | `Settings` | App settings + AniList OAuth |
 | `/auth/anilist/callback` | `AnilistCallback` | OAuth redirect handler |
 | `*` | — | Anything else `Navigate`s to `/`. |
+
+Every route except `/`, `/library`, and `/manga/:id` is `React.lazy`-loaded. The main bundle is the Home → Library → MangaDetail click-through path; the Reader, Settings, Libraries, EditManga, Genres, ArtGallery, ThirdPartySourcing, and AnilistCallback chunks are fetched on first visit and then cached by the service worker for offline-instant subsequent navigations.
 
 **Back-link convention:** the `<Link to="/">` used as the navbar logo on every page always returns to Home. "← Back" / "← Library" buttons (on MangaDetail, Settings, Libraries) target `/library` so they return to the full browsable grid, not the ribbon landing page.
 
@@ -64,6 +68,16 @@ Each tile is a `<button>` (so it stays keyboard-navigable) decorated with a **fa
 Clicking a tile calls `navigate('/library', { state: { search: genre } })`, which Library reads on mount and seeds into its search box. Single-term search resolves to an exact (case-insensitive) genre match server-side via the normalised `manga_genres` table — see [api.md § Search](./api.md#search-search) — so the existing search route is the only filter mechanism; no separate "filter by genre" code path was added.
 
 Empty / loading / error states mirror the rest of the app: a skeleton grid replaces the tiles before data arrives, an inline error block surfaces failures with a Retry button, and a "No genres yet" state appears when the library has no tagged metadata.
+
+### ArtGallery (`src/pages/ArtGallery.jsx`)
+
+Landing page at `/art-gallery`. Renders the shared `AppSidebar` plus, on the right, one `ArtGalleryRibbon` per series the user has bookmarked pages for. Data comes from `api.getAllGallery()` (returns `[{ manga, items: [...] }]`). Unlike the Home Art Gallery ribbon, the tiles here use the page's natural aspect ratio (no cropping) so landscape spreads display correctly. Empty / error / loading states mirror the rest of the app.
+
+The sidebar shortcut to this page is rendered by `AppSidebar` directly below the Reading Lists section.
+
+### ThirdPartySourcing (`src/pages/ThirdPartySourcing.jsx`)
+
+Page at `/third-party-sourcing`. Implements the four-pane UI for picking a third-party source, searching, picking chapters, and watching the download queue — see [sources.md § UI entry point](./sources.md#ui-entry-point) for the full breakdown. The sidebar shortcut sits below the Art Gallery entry in `AppSidebar`. When opened with `?manga_id=N`, the page reads the query param, pre-fills the search box with the manga's title, locks the target to mode='existing' + that manga, and auto-runs the search — driven from the *Find more sources* button in MangaDetail's *Third Party Sources* modal.
 
 ### Library (`src/pages/Library.jsx`)
 
@@ -209,14 +223,28 @@ The grid tile rendered by Library and by Home's search-results view. Reads only 
 
 See [reader.md](./reader.md).
 
+### `InstallPrompt`
+
+Mounted once at the root of `App.jsx` outside `<Routes>` so it persists across navigation. Self-gating — only renders on mobile viewports, hides itself when the app is already running standalone (PWA installed), and suppresses on the reader route to keep the bottom of the screen clear for taps.
+
+### `VirtualizedMangaGrid`
+
+Windowed grid renderer used by Library when the result set grows large enough that mounting every `MangaCard` becomes expensive even with `content-visibility: auto`. Reads grid column count from the `useGridColumnCount` hook (which observes the container's actual width through `ResizeObserver`) and uses `useScrollPosition` to map the visible viewport onto a slice of the manga array.
+
+### `ArtGalleryRibbon`
+
+Shared between the Home Art Gallery ribbon and the dedicated `/art-gallery` page. The Home variant auto-scrolls via a pure-CSS keyframe (pauses on hover/focus/touch/off-screen/`prefers-reduced-motion`); the standalone-page variant is rendered statically per series with natural-aspect-ratio tiles.
+
 ### `AppSidebar`
 
-Shared left-rail sidebar rendered by both Home and Library. Contents, top to bottom:
+Shared left-rail sidebar rendered by Home, Library, Genres, ArtGallery, and ThirdPartySourcing. Contents, top to bottom:
 
 - **Home** shortcut (always present) — `<Link to="/">` with a house icon.
 - **Libraries** — each configured library (with manga count) and, when there are ≥ 2, an **All Libraries** aggregate entry.
 - **Reading Lists** — every list with an inline `+` affordance to create a new one and `×` to delete non-default lists.
 - **Browse By Genre** shortcut — `<Link to="/genres">` rendered below the Reading Lists section. Always visible regardless of library / list state.
+- **Art Gallery** shortcut — `<Link to="/art-gallery">` rendered below Browse By Genre.
+- **Third Party Sourcing** shortcut — `<Link to="/third-party-sourcing">` rendered below Art Gallery.
 
 Selection is driven by optional `onSelectAll` / `onSelectLibrary` / `onSelectList` props. Library passes in-place setState callbacks; Home omits them, which causes the sidebar to navigate to `/library` with the chosen filter in React Router location state. List creation and deletion are managed inside the component itself, with `onReadingListsChanged` letting the host refetch counts afterwards.
 

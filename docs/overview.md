@@ -22,22 +22,29 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 momotaro/
 ├── server/              # Express API server
 │   └── src/
-│       ├── index.js           # App entry point + graceful shutdown
-│       ├── config.js          # Env-var configuration
-│       ├── logger.js          # Console interceptor → in-memory log ring buffer (2000 entries)
-│       ├── db/database.js     # SQLite init + migrations
-│       ├── routes/            # API route handlers
-│       ├── scanner/           # Library scanning logic
-│       ├── metadata/          # AniList / Jikan / Doujinshi.info integration
-│       └── watcher/           # File system watcher
+│       ├── index.js              # App entry point + graceful shutdown
+│       ├── config.js             # Env-var configuration
+│       ├── logger.js             # Console interceptor → in-memory log ring buffer (2000 entries)
+│       ├── genresCache.js        # In-memory payload cache backing /api/genres
+│       ├── db/database.js        # SQLite init + migrations
+│       ├── routes/               # API route handlers (library, chapters, pages, progress, settings, metadata, optimize, admin, gallery, config, sources)
+│       ├── scanner/              # Library scanning, CBZ extract cache + scheduler, thumbnails, cover priority
+│       ├── metadata/             # AniList / MAL / MangaUpdates / Doujinshi.info + per-source JSON cache
+│       ├── sources/              # Third Party Sourcing adapters (mangadex, weebcentral, mangaball, mangataro, mangadotnet, comikuro, comix.to, mangakakalot, mangafire) + URL parser
+│       ├── downloader/queue.js   # Persistent FIFO download queue for the Third Party Sourcing flow
+│       ├── scheduler/            # Per-manga `manga_schedules` poll loop and run-now worker
+│       ├── middleware/           # `asyncWrapper` + central error handler
+│       └── watcher/              # chokidar watcher
 ├── client/              # React SPA
 │   └── src/
 │       ├── api/client.js      # All API calls + device ID + timeout
-│       ├── pages/             # Route-level components
-│       ├── components/        # Shared UI components
+│       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback)
+│       ├── components/        # Shared UI components (AppSidebar, MangaCard, Ribbon, ArtGalleryRibbon, InstallPrompt, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
+│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`
 │       └── context/           # React context (sidebar)
 ├── assets/              # Source artwork / logo files
-├── data/                # Runtime data: DB, thumbnails (gitignored)
+├── data/                # Runtime data: DB, thumbnails, CBZ extract cache, per-source metadata cache (gitignored)
+├── py_scripts/          # Stand-alone helper Python scripts for library cleanup (not invoked by the server)
 ├── docker-compose.yml
 └── docs/                # This documentation
 ```
@@ -62,6 +69,8 @@ cd client && npm install && npm run dev
 docker compose up -d --build
 # UI + API on http://localhost:3000
 ```
+
+The container ships the Node server and the prebuilt React SPA together. Express serves the SPA out of `client/dist` and the API under `/api/*` on the same port. The dev-mode Vite server on `:5173` only runs when you start it manually with `npm run dev`; it isn't part of the Docker image.
 
 ### Data persistence
 

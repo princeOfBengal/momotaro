@@ -4,7 +4,7 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { hashPassword, verifyPassword, hashToken } = require('../auth/crypto');
 const adminSession = require('../auth/adminSession');
 const rateLimit = require('../auth/rateLimit');
-const { requireAdmin, isLanIp, extractClientToken, extractAdminToken } = require('../middleware/auth');
+const { requireAdmin, isLanIp, isLanBypassEnabled, isAuthEnabled, extractClientToken, extractAdminToken } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -44,8 +44,8 @@ router.get('/admin/auth-status', asyncWrapper(async (req, res) => {
   const adminTokenStr = extractAdminToken(req);
   const loggedIn = !!(adminTokenStr && adminSession.validateSession(adminTokenStr));
 
-  const authEnabled       = getSetting(db, 'auth_enabled')       === '1';
-  const lanBypassEnabled  = getSetting(db, 'lan_bypass_enabled') === '1';
+  const authEnabled       = isAuthEnabled(db);
+  const lanBypassEnabled  = isLanBypassEnabled(db);
   const callerIsLan       = isLanIp(req.ip);
 
   // pairing_required mirrors the gate logic in requireClientOrAdmin, but as
@@ -171,8 +171,8 @@ router.get('/admin/security-settings', requireAdmin, asyncWrapper(async (req, re
   const db = getDb();
   res.json({
     data: {
-      auth_enabled:        getSetting(db, 'auth_enabled')        === '1',
-      lan_bypass_enabled:  getSetting(db, 'lan_bypass_enabled')  === '1',
+      auth_enabled:        isAuthEnabled(db),
+      lan_bypass_enabled:  isLanBypassEnabled(db),
     },
   });
 }));
@@ -188,8 +188,8 @@ router.put('/admin/security-settings', requireAdmin, asyncWrapper(async (req, re
   }
   res.json({
     data: {
-      auth_enabled:        getSetting(db, 'auth_enabled')        === '1',
-      lan_bypass_enabled:  getSetting(db, 'lan_bypass_enabled')  === '1',
+      auth_enabled:        isAuthEnabled(db),
+      lan_bypass_enabled:  isLanBypassEnabled(db),
     },
   });
 }));

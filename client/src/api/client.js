@@ -85,6 +85,49 @@ function clearClientToken() {
   localStorage.removeItem(CLIENT_TOKEN_KEY);
 }
 
+/**
+ * Walk a parsed JSON response and append `?t=<token>` to any string that
+ * points at a gated media endpoint we know the SPA will load via a
+ * native browser element (`<img src>` etc), which can't carry the
+ * Authorization header. Two patterns match:
+ *
+ *   - `/thumbnails/<shard>/<file>` — library cover art baked into many
+ *     responses as `cover_url`. Served by express.static, gated by the
+ *     same client/admin auth middleware.
+ *   - `/api/pages/<id>/image` — manga page bytes. The
+ *     `api.pageImageUrl()` helper already appends the token for paths the
+ *     SPA constructs locally; this catches the server-baked
+ *     `page_image_url` field used by ArtGalleryRibbon (home page + the
+ *     dedicated /art-gallery page).
+ *
+ * External URLs (AniList covers, MangaDex thumbs) pass through.
+ * Already-tagged URLs are not double-tagged. Recurses into arrays and
+ * plain objects. Returns a shallow copy; the input is not mutated.
+ */
+const TOKEN_BEARING_URL_RE = /\/thumbnails\/|\/api\/pages\/\d+\/image(?:\?|$|\/)/;
+
+function appendTokenToMediaUrls(value, token) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    if (TOKEN_BEARING_URL_RE.test(value) && !/[?&]t=/.test(value)) {
+      const sep = value.includes('?') ? '&' : '?';
+      return `${value}${sep}t=${encodeURIComponent(token)}`;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(v => appendTokenToMediaUrls(v, token));
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) {
+      out[k] = appendTokenToMediaUrls(value[k], token);
+    }
+    return out;
+  }
+  return value;
+}
+
 async function apiFetch(path, options = {}) {
   // `signal` is the caller-supplied AbortSignal (used by Library to cancel
   // stale debounced fetches when the user keeps typing). It is composed with
@@ -124,8 +167,15 @@ async function apiFetch(path, options = {}) {
     });
     const json = await resp.json();
     if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
-    if (raw) return json;
-    return json.data !== undefined ? json.data : json;
+    // Rewrite any `/thumbnails/*` URLs the server baked into the response
+    // so `<img src>` requests carry the auth token. Server-side helpers
+    // (e.g. routes/library.js, scanner/thumbnailPaths.js) emit URLs like
+    // `/thumbnails/05/5.webp` that the SPA consumes as `manga.cover_url`,
+    // `g.cover_url` etc. Doing the rewrite here covers every consumer in
+    // one place instead of touching 20+ component files.
+    const rewritten = clientToken ? appendTokenToMediaUrls(json, clientToken) : json;
+    if (raw) return rewritten;
+    return rewritten.data !== undefined ? rewritten.data : rewritten;
   } catch (err) {
     if (err.name === 'AbortError') {
       // Bubble user-cancellation as an AbortError so the caller can ignore it
@@ -576,7 +626,17 @@ export const api = {
   healthCheck: () => apiFetch('/api/health'),
 
   // Helpers
-  pageImageUrl: (pageId) => `${getServerUrl()}/api/pages/${pageId}/image`,
+  // `<img src>` requests are initiated by the browser, not by our
+  // `fetch()` wrapper, so they can't carry the Authorization header. The
+  // server accepts the same paired-client token via the `?t=` query
+  // string as a fallback (see [server/src/middleware/auth.js]). On the
+  // LAN with auth disabled this just produces a slightly longer URL
+  // that the server ignores.
+  pageImageUrl: (pageId) => {
+    const tok = getClientToken();
+    const qs = tok ? `?t=${encodeURIComponent(tok)}` : '';
+    return `${getServerUrl()}/api/pages/${pageId}/image${qs}`;
+  },
   thumbnailUrl,
   getAdminToken,
   setAdminToken,
@@ -593,10 +653,16 @@ export const api = {
 // e.g. `5.webp` is served from `/thumbnails/05/5.webp`. The server migrates
 // any legacy flat files at startup; the API also returns a `cover_url` field
 // that's already sharded, so prefer that when available.
+//
+// `?t=<token>` is appended for the same reason as on `pageImageUrl`:
+// `<img src>` requests don't carry the Authorization header, and the
+// /thumbnails route is now gated by the client-or-admin auth check.
 function thumbnailUrl(filename) {
   if (!filename) return null;
-  const m = String(filename).match(/^(\d+)/);
-  if (!m) return `${getServerUrl()}/thumbnails/${filename}`;
+  const tok = getClientToken();
+  const qs  = tok ? `?t=${encodeURIComponent(tok)}` : '';
+  const m   = String(filename).match(/^(\d+)/);
+  if (!m) return `${getServerUrl()}/thumbnails/${filename}${qs}`;
   const shard = (parseInt(m[1], 10) % 256).toString(16).padStart(2, '0');
-  return `${getServerUrl()}/thumbnails/${shard}/${filename}`;
+  return `${getServerUrl()}/thumbnails/${shard}/${filename}${qs}`;
 }

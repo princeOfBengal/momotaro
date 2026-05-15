@@ -56,6 +56,16 @@ function extractClientToken(req) {
   if (header && header.startsWith('Bearer ')) return header.slice(7).trim();
   const alt = req.headers['x-client-token'];
   if (typeof alt === 'string' && alt) return alt.trim();
+  // Query-parameter fallback. Necessary for requests the browser
+  // initiates natively (e.g. `<img src>`, `<video src>`) which cannot
+  // carry custom headers — the SPA's `fetch()` calls still use the
+  // header above. This is the same pattern Plex uses for its
+  // X-Plex-Token. The Referrer-Policy: same-origin header (set in
+  // index.js) prevents the token from leaking via Referer to
+  // third-party origins. Server access logs on a self-hosted instance
+  // are the operator's own.
+  const qToken = req.query && req.query.t;
+  if (typeof qToken === 'string' && qToken) return qToken.trim();
   return null;
 }
 
@@ -68,8 +78,20 @@ function isAuthEnabled(db) {
   return getSetting(db, 'auth_enabled') === '1';
 }
 
+/**
+ * LAN bypass: on by default. Devices on the local network are trusted
+ * unless the admin explicitly opts out (e.g. for an untrusted office /
+ * shared Wi-Fi). The previous false-by-default flipped surprise pairing
+ * prompts on home users who flipped `auth_enabled` and didn't realise
+ * they also had to toggle bypass on. Plex and Jellyfin both treat LAN
+ * as trusted by default.
+ *
+ * Backwards-compat: admins who previously toggled it OFF have a stored
+ * value of '0', which we still honour. Only the unset case flips from
+ * "off" to "on".
+ */
 function isLanBypassEnabled(db) {
-  return getSetting(db, 'lan_bypass_enabled') === '1';
+  return getSetting(db, 'lan_bypass_enabled') !== '0';
 }
 
 const lastSeenWriteAt = new Map(); // client_id -> timestamp; throttles last_seen updates
@@ -192,6 +214,8 @@ module.exports = {
   requireAdmin,
   enforceLanOnlyMode,
   isLanIp,
+  isLanBypassEnabled,
+  isAuthEnabled,
   extractClientToken,
   extractAdminToken,
 };

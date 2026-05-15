@@ -653,7 +653,16 @@ export default function Home() {
                 </Ribbon>
 
                 <Suspense fallback={null}>
-                  <ArtGalleryRibbon items={data.art_gallery} />
+                  {/* fullSize: render each tile at the page's natural
+                      aspect ratio (landscape spreads aren't cropped),
+                      matching the dedicated /art-gallery page. Requires
+                      width/height to be present on each item, which
+                      /api/home started returning alongside this change. */}
+                  <ArtGalleryRibbon
+                    items={data.art_gallery}
+                    titleHref="/art-gallery"
+                    fullSize
+                  />
                 </Suspense>
 
                 {genreRibbonsVisible.map(r => (

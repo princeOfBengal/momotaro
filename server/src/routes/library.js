@@ -1002,7 +1002,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     SELECT ag.id, ag.manga_id, m.title AS manga_title, m.track_volumes,
            ag.chapter_id, c.folder_name AS chapter_folder,
            c.number AS chapter_number, c.volume AS chapter_volume,
-           ag.page_id, pg.page_index, ag.created_at
+           ag.page_id, pg.page_index, pg.width, pg.height, ag.created_at
     FROM art_gallery ag
     JOIN manga m    ON m.id = ag.manga_id
     JOIN chapters c ON c.id = ag.chapter_id
@@ -1024,6 +1024,11 @@ router.get('/home', asyncWrapper(async (req, res) => {
     chapter_volume:  r.chapter_volume,
     page_id:         r.page_id,
     page_index:      r.page_index,
+    // Natural pixel dimensions, so the home-page ribbon can render
+    // landscape spreads at the correct aspect ratio (fullSize mode in
+    // ArtGalleryRibbon). Same shape as /api/gallery/all returns.
+    width:           r.width,
+    height:          r.height,
     page_image_url:  `/api/pages/${r.page_id}/image`,
     created_at:      r.created_at,
   }));

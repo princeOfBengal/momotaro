@@ -79,9 +79,13 @@ app.use(express.json({ limit: '64mb' }));
 // [middleware/auth.js] for the recovery story.
 app.use(enforceLanOnlyMode);
 
-// Serve generated thumbnails
+// Serve generated thumbnails. Gated by the same client-or-admin token
+// check that protects every /api route, so an external visitor without
+// a paired token can't enumerate library cover art. The middleware
+// accepts the token via the `?t=` query string (see
+// [middleware/auth.js]) — the SPA's thumbnailUrl helper appends it.
 fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
-app.use('/thumbnails', express.static(config.THUMBNAIL_DIR));
+app.use('/thumbnails', requireClientOrAdmin, express.static(config.THUMBNAIL_DIR));
 
 // Health check — public, used by clients to probe whether a host is a
 // Momotaro server before attempting pairing.

@@ -7,6 +7,7 @@ import ReaderControls from '../components/ReaderControls';
 import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
+import { enableImmersive, disableImmersive } from '../api/immersive';
 import './Reader.css';
 
 // Resolve the page-transition style. Migrates the legacy boolean key
@@ -184,6 +185,18 @@ export default function Reader() {
       document.exitFullscreen().catch(() => {});
     }
   }
+
+  // Capacitor APK only: enter Android sticky-immersive mode while the
+  // Reader is mounted — hides both the status bar (top with time/battery)
+  // and the navigation bar (bottom with back/home/recents). Swiping from
+  // either edge briefly reveals them and they auto-hide again. The web
+  // Fullscreen API above only hides browser chrome (which doesn't exist
+  // inside the Capacitor WebView), so for the APK we need this native
+  // path. PWA / desktop browsers no-op inside the helpers.
+  useEffect(() => {
+    enableImmersive();
+    return () => { disableImmersive(); };
+  }, []);
 
   // Keep focus on container so arrow keys work
   useEffect(() => { containerRef.current?.focus(); }, []);

@@ -1104,6 +1104,44 @@ The body is the same entries formatted as `[<iso-ts>] [<LEVEL>] <message>`, one 
 
 ---
 
+## Android App Distribution
+
+Public endpoints used by the Capacitor-wrapped Android app — they bootstrap
+a freshly-installed APK that has no client token yet. See
+[android.md § Self-hosted distribution](./android.md#self-hosted-distribution).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/app/version` | Reads `data/downloads/version.json` and reports the latest published APK. 404 when no APK has been dropped into `data/downloads/` yet. |
+| GET | `/downloads/momotaro.apk` | Static file: the signed release APK. Public so the system browser tab that handles the `.apk` download (which can't carry a bearer token) can fetch it. |
+
+### `GET /api/app/version` response
+
+```json
+{
+  "data": {
+    "version":     "1.1",
+    "apk_url":     "/downloads/momotaro.apk",
+    "released_at": "2026-05-15",
+    "notes":       "Brief change summary shown in the update banner.",
+    "size_bytes":  3398672
+  }
+}
+```
+
+`version` is the only required field in `version.json`; `released_at` and
+`notes` are optional and pass through unchanged. `size_bytes` is computed
+from the on-disk APK each call so the value stays accurate after a
+re-release without editing `version.json`.
+
+The client's [useAppUpdateCheck](../client/src/hooks/useAppUpdateCheck.js)
+compares this `version` against the bundled
+[APP_VERSION](../client/src/version.js) constant and surfaces the
+[UpdateBanner](../client/src/components/UpdateBanner.jsx) when they
+differ — see [android.md § Update mechanism](./android.md#end-to-end-update-flow).
+
+---
+
 ## Image URLs
 
 Page images are served at:

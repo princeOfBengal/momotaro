@@ -18,6 +18,7 @@ Quick-reference documentation for the Momotaro self-hosted manga server.
 | [mangaupdates.md](./mangaupdates.md) | Public read API (no auth), search/refresh/apply, conservative pacing, status / rating / author normalization |
 | [doujinshi.md](./doujinshi.md) | Email/password auth, search mechanics (space→underscore workaround), normalization, metadata priority |
 | [sources.md](./sources.md) | Third Party Sourcing — nine source adapters (MangaDex, WeebCentral, MangaBall, MangaTaro, MangaDotNet, ComiKuro, comix.to, MangaKakalot, MangaFire), persistent CBZ download queue, per-manga `manga_source_urls` log, and the per-manga `manga_schedules` poll loop driving automatic re-checks |
+| [android.md](./android.md) | Capacitor wrapper architecture — WebView origin choices (`http://momotaro.app`), first-launch routing for the native shell, pairing flow, media URL rewriting, JDK 26 / Gradle 9.4 / AGP 9.2 build chain, release signing, self-hosted APK distribution + in-app update check |
 
 ## Quick Start
 

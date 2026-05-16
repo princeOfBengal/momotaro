@@ -19,11 +19,14 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | `/libraries` | `Libraries` | Older standalone Library Management page; the same controls also live under Settings → Libraries. |
 | `/settings` | `Settings` | App settings + AniList OAuth |
 | `/auth/anilist/callback` | `AnilistCallback` | OAuth redirect handler |
+| `/pairing` | `Pairing` | First-launch pairing wizard for the Android APK — 5 steps: welcome → server URL → device name → PIN entry → done. See [android.md § Pairing wizard](./android.md#pairing-wizard). |
 | `*` | — | Anything else `Navigate`s to `/`. |
 
 Every route except `/`, `/library`, and `/manga/:id` is `React.lazy`-loaded. The main bundle is the Home → Library → MangaDetail click-through path; the Reader, Settings, Libraries, EditManga, Genres, ArtGallery, ThirdPartySourcing, and AnilistCallback chunks are fetched on first visit and then cached by the service worker for offline-instant subsequent navigations.
 
 **Back-link convention:** the `<Link to="/">` used as the navbar logo on every page always returns to Home. "← Back" / "← Library" buttons (on MangaDetail, Settings, Libraries) target `/library` so they return to the full browsable grid, not the ribbon landing page.
+
+**First-launch gating** — [`FirstLaunchGate`](../client/src/App.jsx) wraps every route except `/pairing` and `/auth/anilist/callback`. On mount it asks `GET /api/admin/auth-status` whether the caller would be turned away by the auth middleware and, if so, `<Navigate replace to="/pairing">`s. The native shell (Capacitor APK) short-circuits this when there's no saved server URL and no client token — it redirects to `/pairing` immediately without the probe, since `getServerUrl()` is empty and the would-be fetch would go to `http://momotaro.app/api/admin/auth-status` (the Capacitor asset shell, which has no API). See [android.md § First-launch routing](./android.md#first-launch-routing).
 
 ## Pages
 
@@ -227,6 +230,10 @@ See [reader.md](./reader.md).
 
 Mounted once at the root of `App.jsx` outside `<Routes>` so it persists across navigation. Self-gating — only renders on mobile viewports, hides itself when the app is already running standalone (PWA installed), and suppresses on the reader route to keep the bottom of the screen clear for taps.
 
+### `UpdateBanner`
+
+Mounted alongside `InstallPrompt` at the App root. Renders only inside the Capacitor native shell — `useAppUpdateCheck` gates on `Capacitor.isNativePlatform()`, so the PWA never sees it. Polls `GET /api/app/version` on mount; when the server's reported version differs from the bundled [`APP_VERSION`](../client/src/version.js), surfaces a bottom-fixed card with the release notes and an "Update" button that's a plain `<a target="_blank">` to the APK URL — Android handles the download + install prompt from there. Dismissal is per-version (stored in `localStorage[momotaro_dismissed_update_version]`), so the same release won't keep re-nagging. Reuses the [`InstallPrompt`](../client/src/components/InstallPrompt.css) CSS for visual consistency. Hidden on `/read/:chapterId` for the same reason `InstallPrompt` is. See [android.md § Self-hosted distribution](./android.md#self-hosted-distribution).
+
 ### `VirtualizedMangaGrid`
 
 Windowed grid renderer used by Library when the result set grows large enough that mounting every `MangaCard` becomes expensive even with `content-visibility: auto`. Reads grid column count from the `useGridColumnCount` hook (which observes the container's actual width through `ResizeObserver`) and uses `useScrollPosition` to map the visible viewport onto a slice of the manga array.
@@ -258,13 +265,28 @@ Every request includes:
 
 - `Content-Type: application/json`
 - `X-Device-ID: <uuid>` (from `localStorage`)
+- `Authorization: Bearer <clientToken>` when a paired-client token is in `localStorage[momotaro_client_token]` (set by the pairing wizard's final step)
+- `X-Admin-Token: <token>` when an admin session is in `localStorage[momotaro_admin_token]`
 - An `AbortController` timeout — default 15 s, overridable per call via `{ timeoutMs }` on the fetch options. Throws `'Request timed out'` if exceeded. `api.exportMetadata(libraryId)` raises this to 10 minutes because the endpoint may issue many upstream fetches for large libraries.
+
+The fetch URL is always prefixed with `getServerUrl()` (reads `localStorage[momotaro_server_url]` on every call). In the PWA this returns `''` so requests stay same-origin; in the Capacitor APK it returns the URL the user picked in the pairing wizard.
+
+**`rewriteMediaUrls(json, serverUrl, token)`** — every successful response is walked after parsing to fix up server-baked image URLs:
+
+- URLs matching `/thumbnails/...` or `/api/pages/N/image` get **`serverUrl` prepended** when they start with `/`. Necessary in the APK because the WebView origin is `http://momotaro.app` — a bare `/thumbnails/05/5.webp` would otherwise try to load from the asset shell instead of the real Momotaro server. In the PWA `serverUrl` is `''` so URLs stay relative and resolve same-origin as before.
+- The same URLs get **`?t=<token>` appended** so the `<img src>` request carries auth — `<img>` can't carry the `Authorization` header, and the server's auth middleware accepts the token via query string as a fallback.
+
+Gated on `clientToken` presence: pre-pairing flows (health check, PIN handshake) intentionally skip the walk. See [android.md § Media URL rewriting](./android.md#media-url-rewriting).
 
 Notable helpers:
 
 ```js
-api.pageImageUrl(pageId)    // → "/api/pages/{id}/image"
-api.thumbnailUrl(filename)  // → "/thumbnails/{filename}"
+api.pageImageUrl(pageId)    // → "{serverUrl}/api/pages/{id}/image?t={token}"
+api.thumbnailUrl(filename)  // → "{serverUrl}/thumbnails/{shard}/{filename}?t={token}"
+api.getAppVersion()         // → /api/app/version — used by useAppUpdateCheck
+api.healthCheck()           // → /api/health — used by the pairing wizard
+api.pairingRequest(name, platform)
+api.pairingSubmitPin(pairingId, pin)  // persists the returned token to localStorage
 ```
 
 Metadata methods:

@@ -15,6 +15,7 @@ Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ fi
 | Frontend | React 18 + React Router 6 |
 | Bundler | Vite 5 |
 | Deployment | Docker (nginx + Node) |
+| Android | Capacitor 8 wrapper over the same React build — see [android.md](./android.md) |
 
 ## Directory Structure
 
@@ -35,15 +36,18 @@ momotaro/
 │       ├── scheduler/            # Per-manga `manga_schedules` poll loop and run-now worker
 │       ├── middleware/           # `asyncWrapper` + central error handler
 │       └── watcher/              # chokidar watcher
-├── client/              # React SPA
+├── client/              # React SPA + Android wrapper
+│   ├── capacitor.config.json  # Capacitor scheme / hostname / mixed-content config — see [android.md](./android.md)
+│   ├── android/               # Capacitor-generated Android project (Gradle build, AndroidManifest, NSC, release keystore wiring)
 │   └── src/
-│       ├── api/client.js      # All API calls + device ID + timeout
-│       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback)
-│       ├── components/        # Shared UI components (AppSidebar, MangaCard, Ribbon, ArtGalleryRibbon, InstallPrompt, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
-│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`
+│       ├── api/client.js      # All API calls + device ID + timeout + `rewriteMediaUrls` for APK absolute URLs
+│       ├── version.js         # APP_VERSION constant — kept in sync with `versionName` in `android/app/build.gradle`
+│       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback, Pairing)
+│       ├── components/        # Shared UI components (AppSidebar, MangaCard, Ribbon, ArtGalleryRibbon, InstallPrompt, UpdateBanner, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
+│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`
 │       └── context/           # React context (sidebar)
 ├── assets/              # Source artwork / logo files
-├── data/                # Runtime data: DB, thumbnails, CBZ extract cache, per-source metadata cache (gitignored)
+├── data/                # Runtime data: DB, thumbnails, CBZ extract cache, per-source metadata cache, downloads/ (signed APK + version.json — see [android.md](./android.md)) — gitignored
 ├── py_scripts/          # Stand-alone helper Python scripts for library cleanup (not invoked by the server)
 ├── docker-compose.yml
 └── docs/                # This documentation
@@ -106,5 +110,6 @@ docker volume rm momotaro_data
 | `DB_PATH` | `$DATA_PATH/momotaro.db` | SQLite database file |
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
 | `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Per-chapter extract cache for CBZ archives. Size cap and scheduled auto-clear are runtime-configurable from Settings → Database (persisted in the `settings` table). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
+| `DOWNLOADS_DIR` | `$DATA_PATH/downloads` | Holds the signed Android APK (`momotaro.apk`) and `version.json` advertised by `GET /api/app/version`. See [android.md § Self-hosted distribution](./android.md#self-hosted-distribution). |
 | `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts (set to the literal string `false` to disable). |
 | `REQUEST_DELAY_MS` | `700` | Legacy minimum delay floor; the AniList integration now reads `X-RateLimit-Limit` and adapts spacing per response (default range 700–5 000 ms). |

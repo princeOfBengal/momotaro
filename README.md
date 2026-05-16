@@ -139,19 +139,108 @@ same way.
 
 ## Android App
 
-A first-class Android app wraps the same React UI with a native shell. On
-first launch it walks the user through pairing with your server, persists
-the issued token, and behaves identically to the PWA from there on.
+Momotaro ships with a first-class Android app — a [Capacitor](https://capacitorjs.com/)
+wrapper around the same React UI. On first launch it walks the user
+through pairing with your server (PIN-based, 6 digits from
+**Settings → Client Management**), persists the issued token, and
+behaves identically to the PWA from there on.
 
-To build the APK yourself, see [BUILD_ANDROID.md](BUILD_ANDROID.md). You'll
-need JDK 17+ and the Android SDK installed locally.
+The app is **self-hosted alongside the server**: your Momotaro instance
+serves the signed APK at `/downloads/momotaro.apk` and the in-app update
+check polls `/api/app/version` on launch. No app store, no review, no
+Google account.
+
+Pick the path that matches your role:
+
+### I just want to use the Android app on my phone
+
+Your server admin needs to publish an APK first (see the next section).
+Once they have:
+
+1. On your phone, open a browser and navigate to your Momotaro server's
+   download URL, e.g. `http://your-server:3000/downloads/momotaro.apk`.
+2. Android downloads the APK. Tap the notification (or the file in
+   Downloads) to install.
+3. The first time you install an APK from a browser, Android asks you to
+   allow "Install unknown apps" for that browser — one-time setting.
+4. Launch Momotaro. Enter your server URL → device name → 6-digit PIN
+   that the admin reads off **Settings → Client Management**.
+5. Done — the library opens. Subsequent updates to the app are
+   advertised by an in-app banner; tapping it re-runs steps 1–3.
+
+### I'm self-hosting and want to provide the APK to others
+
+You need to build and sign the APK once, then drop it on your server. Full
+walkthrough in [BUILD_ANDROID.md](BUILD_ANDROID.md). Quick version:
 
 ```bash
-# After making web-UI changes:
-cd client && npm run build && npx cap copy android
-cd android && ./gradlew assembleDebug
-# APK lands at: client/android/app/build/outputs/apk/debug/app-debug.apk
+# One-time setup
+# 1. Install JDK 17 or 21 (or 26 — see BUILD_ANDROID.md for toolchain notes)
+#    and Android Studio (for the SDK + build-tools 36).
+# 2. Generate a release keystore. Back this file up offline — losing it
+#    means you can never update the app under the same package ID.
+keytool -genkey -v -keystore momotaro-release.jks -keyalg RSA -keysize 2048 \
+    -validity 10000 -alias momotaro
+# 3. Copy the keystore credentials template into place and fill it in.
+cp client/android/key.properties.example client/android/key.properties
+# Edit client/android/key.properties — set the four values. Gitignored.
+
+# Per-release
+cd client
+npm install                          # first time only
+npm run build && npx cap copy android
+cd android && ./gradlew assembleRelease
+# Signed APK lands at:
+#   client/android/app/build/outputs/apk/release/app-release.apk
+
+# Publish it via the server's download endpoint
+mkdir -p ../../data/downloads
+cp app/build/outputs/apk/release/app-release.apk ../../data/downloads/momotaro.apk
+cat > ../../data/downloads/version.json <<'EOF'
+{
+  "version": "1.1",
+  "released_at": "2026-05-15",
+  "notes": "First self-hosted release."
+}
+EOF
+# Restart the Momotaro server so it serves the new file + version metadata.
 ```
+
+Every existing install on a paired phone will see the "Update available"
+banner on its next launch and a tap downloads the new APK through the
+system browser.
+
+### I just want a quick debug build to test on my own phone
+
+If you're hacking on the code and don't need a signed release yet, the
+debug variant is enough — skip the keystore, skip the server publishing
+step, just:
+
+```bash
+cd client
+npm install
+npm run build && npx cap copy android
+cd android && ./gradlew.bat assembleDebug   # Windows
+# or ./gradlew assembleDebug                # macOS / Linux
+# Unsigned debug APK at:
+#   client/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Sideload via USB or share-to-device. The pairing flow on the phone is
+the same as the release variant.
+
+### Architecture details
+
+Capacitor's WebView origin is configured as `http://momotaro.app` in
+[client/capacitor.config.json](client/capacitor.config.json) — `http`
+because most self-hosted Momotaro instances speak plain HTTP, and the
+custom hostname dodges a Chromium HSTS-for-localhost gotcha. Once you
+front the server with HTTPS (Caddy / Cloudflare Tunnel / nginx),
+switch this back to `"androidScheme": "https"` and tighten
+[client/android/app/src/main/res/xml/network_security_config.xml](client/android/app/src/main/res/xml/network_security_config.xml)
+to disallow cleartext.
+
+Full architecture writeup is in [docs/android.md](docs/android.md).
 
 ## Configuration
 
@@ -196,7 +285,7 @@ npm run dev   # starts on :5173, proxies API to :3000
 - **Frontend**: React 18, Vite, React Router
 - **Metadata**: AniList GraphQL API, Jikan (MyAnimeList), MangaUpdates,
   Doujinshi.info
-- **Android shell**: Capacitor 7 over the same React build
+- **Android shell**: Capacitor 8 over the same React build (Gradle 9.4 / AGP 9.2)
 - **Docker**: nginx + Node Alpine
 
 ## Security Notes

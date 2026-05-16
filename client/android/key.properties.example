@@ -1,0 +1,14 @@
+# Release signing credentials. Copy this file to `key.properties` in the same
+# directory and fill in the values from your keystore. The real `key.properties`
+# is gitignored — never commit it.
+#
+# Generate the keystore once with:
+#   keytool -genkey -v -keystore momotaro-release.jks -keyalg RSA -keysize 2048 \
+#       -validity 10000 -alias momotaro
+# Keep the .jks file safe (offsite backup) — losing it means you can never
+# update the app under the same package ID.
+
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=momotaro
+storeFile=/absolute/path/to/momotaro-release.jks

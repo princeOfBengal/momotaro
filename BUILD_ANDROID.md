@@ -55,24 +55,82 @@ distribution. For a release build:
 
 ```bash
 # 1. Generate a keystore once. Keep this file safe — losing it means you
-#    can never update the app under the same package ID.
+#    can never update the app under the same package ID. Store the .jks
+#    somewhere offsite (encrypted backup, password manager attachment).
 keytool -genkey -v -keystore momotaro-release.jks -keyalg RSA -keysize 2048 \
     -validity 10000 -alias momotaro
 
-# 2. Create client/android/key.properties (do NOT commit):
-#    storePassword=...
-#    keyPassword=...
-#    keyAlias=momotaro
-#    storeFile=/absolute/path/to/momotaro-release.jks
+# 2. Copy the example into place and fill in your keystore details:
+cp client/android/key.properties.example client/android/key.properties
+# Edit client/android/key.properties — set storePassword, keyPassword,
+# keyAlias, and the absolute storeFile path. The file is gitignored.
 
-# 3. Wire the key into client/android/app/build.gradle's signingConfigs —
-#    Capacitor's docs cover this:
-#    https://capacitorjs.com/docs/android/deploying-to-google-play
+# 3. The signing config is already wired into client/android/app/build.gradle.
+#    When key.properties exists, `assembleRelease` signs with the release
+#    key; without it, the task fails with a clear error rather than
+#    silently producing an unsigned APK.
 
-# 4. Build:
-cd client/android
-./gradlew assembleRelease
+# 4. Build the signed release APK:
+cd client && npm run build && npx cap copy android
+cd android && ./gradlew assembleRelease
 ```
+
+The signed APK lands at
+`client/android/app/build/outputs/apk/release/app-release.apk`.
+
+## Self-hosted distribution
+
+Momotaro is built to be self-hosted, and so is its Android app. The server
+serves the latest APK at `/downloads/momotaro.apk` and exposes
+`/api/app/version` for the in-app update check. To publish a new build:
+
+```bash
+# 1. Bump versions in lockstep before building:
+#    - client/android/app/build.gradle  -> versionCode + versionName
+#    - client/src/version.js            -> APP_VERSION
+#    Mismatched versions are the most common release bug; do these together.
+
+# 2. Build the signed APK (see Release builds above).
+
+# 3. Drop the APK + version metadata into the server's data dir:
+mkdir -p data/downloads
+cp client/android/app/build/outputs/apk/release/app-release.apk \
+   data/downloads/momotaro.apk
+cat > data/downloads/version.json <<'EOF'
+{
+  "version": "1.1",
+  "released_at": "2026-05-15",
+  "notes": "Brief change summary shown in the update banner."
+}
+EOF
+```
+
+Existing paired clients will see the "Update available" banner on their next
+launch and tapping it opens the APK URL in the system browser — Android
+downloads it and prompts the user to install. Users need "Install unknown
+apps" enabled for their browser (one-time setting per browser).
+
+## Production hardening
+
+A few things to tighten before exposing the server to the public internet
+with the app installed on real users' devices:
+
+- **HTTPS**: front the server with Caddy / Cloudflare Tunnel / nginx and
+  switch `client/capacitor.config.json` back to `"androidScheme": "https"`.
+  The current `http` scheme is necessary today because the server speaks
+  plain HTTP, but auth tokens travel in cleartext over the network.
+- **Cleartext config**: once HTTPS is in front, tighten
+  [client/android/app/src/main/res/xml/network_security_config.xml] to
+  `cleartextTrafficPermitted="false"` (or scope cleartext to your LAN
+  range only). Play Store flags app-wide cleartext during review.
+- **Minification**: flip `minifyEnabled true` in
+  `client/android/app/build.gradle`'s release block. Reduces APK size and
+  obfuscates the wrapper code. Test that pairing still works afterwards —
+  R8 occasionally strips reflective JNI hooks.
+- **Privacy policy**: even for sideload-only distribution, a one-page
+  policy describing what data the app stores (paired-client token on
+  device, server URL, reading progress synced to user's own server) is
+  good practice. Required if you ever submit to F-Droid or Play.
 
 ## What gets shipped
 

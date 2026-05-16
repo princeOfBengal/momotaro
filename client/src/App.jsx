@@ -4,6 +4,7 @@ import Home from './pages/Home';
 import Library from './pages/Library';
 import MangaDetail from './pages/MangaDetail';
 import InstallPrompt from './components/InstallPrompt';
+import UpdateBanner from './components/UpdateBanner';
 import { api } from './api/client';
 
 // Routes off the primary browse path are loaded on demand. The PWA
@@ -56,6 +57,13 @@ const Pairing         = lazy(() => import('./pages/Pairing'));
  */
 const PAIRING_EXEMPT_PATHS = new Set(['/pairing', '/auth/anilist/callback']);
 
+function isNativeShell() {
+  return typeof window !== 'undefined'
+      && window.Capacitor
+      && typeof window.Capacitor.isNativePlatform === 'function'
+      && window.Capacitor.isNativePlatform();
+}
+
 function FirstLaunchGate({ children }) {
   const location = useLocation();
   const [decision, setDecision] = useState('loading'); // 'loading' | 'allow' | 'redirect'
@@ -65,6 +73,16 @@ function FirstLaunchGate({ children }) {
 
     if (PAIRING_EXEMPT_PATHS.has(location.pathname)) {
       setDecision('allow');
+      return;
+    }
+
+    // In the APK the WebView is served from capacitor://localhost, so there
+    // is no server to call until the user picks one in the pairing wizard.
+    // Skip the auth-status probe entirely and route to /pairing when we have
+    // neither a saved server URL nor a client token — otherwise the probe
+    // hits localhost, fails, and we'd send the user to a broken Home page.
+    if (isNativeShell() && !api.getServerUrl() && !api.getClientToken()) {
+      setDecision('redirect');
       return;
     }
 
@@ -128,6 +146,11 @@ export default function App() {
           itself when the app is already running standalone, and skips the
           reader route to keep the bottom of the screen clear for taps. */}
       <InstallPrompt />
+      {/* Self-hosted APK update prompt. Only renders inside the Capacitor
+          native shell — see useAppUpdateCheck. Stacks on top of the PWA
+          install banner if both fire (they normally don't: InstallPrompt
+          hides itself when running standalone, which the APK always is). */}
+      <UpdateBanner />
     </BrowserRouter>
   );
 }

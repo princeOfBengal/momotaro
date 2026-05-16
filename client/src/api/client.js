@@ -86,19 +86,26 @@ function clearClientToken() {
 }
 
 /**
- * Walk a parsed JSON response and append `?t=<token>` to any string that
- * points at a gated media endpoint we know the SPA will load via a
- * native browser element (`<img src>` etc), which can't carry the
- * Authorization header. Two patterns match:
+ * Walk a parsed JSON response and rewrite any string that points at a gated
+ * media endpoint the SPA will load via a native browser element (`<img src>`
+ * etc), which can't carry the Authorization header. Two patterns match:
  *
  *   - `/thumbnails/<shard>/<file>` — library cover art baked into many
  *     responses as `cover_url`. Served by express.static, gated by the
  *     same client/admin auth middleware.
  *   - `/api/pages/<id>/image` — manga page bytes. The
- *     `api.pageImageUrl()` helper already appends the token for paths the
- *     SPA constructs locally; this catches the server-baked
- *     `page_image_url` field used by ArtGalleryRibbon (home page + the
- *     dedicated /art-gallery page).
+ *     `api.pageImageUrl()` helper already does this for paths the SPA
+ *     constructs locally; this catches the server-baked `page_image_url`
+ *     field used by ArtGalleryRibbon (home page + dedicated /art-gallery).
+ *
+ * Two rewrites are applied:
+ *   1. Prepend the saved server URL when the URL is server-relative.
+ *      Necessary in the Capacitor APK because the WebView origin is
+ *      `https://localhost`, so a bare `/thumbnails/...` would otherwise
+ *      try to load from the asset shell instead of the real Momotaro
+ *      server. In the PWA `getServerUrl()` returns '', so the URL is
+ *      left relative and resolves same-origin as before.
+ *   2. Append `?t=<token>` so the image request carries auth.
  *
  * External URLs (AniList covers, MangaDex thumbs) pass through.
  * Already-tagged URLs are not double-tagged. Recurses into arrays and
@@ -106,22 +113,27 @@ function clearClientToken() {
  */
 const TOKEN_BEARING_URL_RE = /\/thumbnails\/|\/api\/pages\/\d+\/image(?:\?|$|\/)/;
 
-function appendTokenToMediaUrls(value, token) {
+function rewriteMediaUrls(value, serverUrl, token) {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') {
-    if (TOKEN_BEARING_URL_RE.test(value) && !/[?&]t=/.test(value)) {
-      const sep = value.includes('?') ? '&' : '?';
-      return `${value}${sep}t=${encodeURIComponent(token)}`;
+    if (!TOKEN_BEARING_URL_RE.test(value)) return value;
+    let out = value;
+    if (serverUrl && out.startsWith('/')) {
+      out = serverUrl + out;
     }
-    return value;
+    if (token && !/[?&]t=/.test(out)) {
+      const sep = out.includes('?') ? '&' : '?';
+      out = `${out}${sep}t=${encodeURIComponent(token)}`;
+    }
+    return out;
   }
   if (Array.isArray(value)) {
-    return value.map(v => appendTokenToMediaUrls(v, token));
+    return value.map(v => rewriteMediaUrls(v, serverUrl, token));
   }
   if (typeof value === 'object') {
     const out = {};
     for (const k of Object.keys(value)) {
-      out[k] = appendTokenToMediaUrls(value[k], token);
+      out[k] = rewriteMediaUrls(value[k], serverUrl, token);
     }
     return out;
   }
@@ -167,13 +179,14 @@ async function apiFetch(path, options = {}) {
     });
     const json = await resp.json();
     if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
-    // Rewrite any `/thumbnails/*` URLs the server baked into the response
-    // so `<img src>` requests carry the auth token. Server-side helpers
-    // (e.g. routes/library.js, scanner/thumbnailPaths.js) emit URLs like
-    // `/thumbnails/05/5.webp` that the SPA consumes as `manga.cover_url`,
-    // `g.cover_url` etc. Doing the rewrite here covers every consumer in
-    // one place instead of touching 20+ component files.
-    const rewritten = clientToken ? appendTokenToMediaUrls(json, clientToken) : json;
+    // Rewrite any `/thumbnails/*` and `/api/pages/N/image` URLs the server
+    // baked into the response so `<img src>` requests (a) hit the real
+    // server instead of the Capacitor asset shell, and (b) carry the
+    // auth token. Gated on clientToken: pre-pairing flows (health check,
+    // pairing handshake) intentionally skip the walk to preserve the
+    // original code path. Post-pairing the token is always present, which
+    // is when image URLs need fixing up anyway.
+    const rewritten = clientToken ? rewriteMediaUrls(json, getServerUrl(), clientToken) : json;
     if (raw) return rewritten;
     return rewritten.data !== undefined ? rewritten.data : rewritten;
   } catch (err) {
@@ -624,6 +637,12 @@ export const api = {
   // Public health check used by the pairing wizard to validate the server
   // URL before asking the user for a device name.
   healthCheck: () => apiFetch('/api/health'),
+
+  // Public app-version metadata — used by the Android app's update check.
+  // Returns { version, apk_url, released_at, notes, size_bytes }, or 404
+  // if the server has no published APK. The caller swallows 404s
+  // silently (no update advertised, not an error).
+  getAppVersion: () => apiFetch('/api/app/version'),
 
   // Helpers
   // `<img src>` requests are initiated by the browser, not by our

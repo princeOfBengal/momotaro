@@ -33,3 +33,8 @@ Thumbs.db
 .idea/
 *.suo
 *.user
+
+# Android release signing — never commit the keystore or its password
+client/android/key.properties
+*.jks
+*.keystore

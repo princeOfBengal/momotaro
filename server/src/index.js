@@ -31,6 +31,7 @@ const sourcesRoutes = require('./routes/sources');
 const pairingRoutes = require('./routes/pairing');
 const adminAuthRoutes = require('./routes/adminAuth');
 const networkRoutes = require('./routes/network');
+const appVersionRoutes = require('./routes/appVersion');
 const { requireClientOrAdmin, enforceLanOnlyMode } = require('./middleware/auth');
 const upnp = require('./network/upnp');
 
@@ -87,6 +88,16 @@ app.use(enforceLanOnlyMode);
 fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
 app.use('/thumbnails', requireClientOrAdmin, express.static(config.THUMBNAIL_DIR));
 
+// Self-hosted Android APK distribution. Public on purpose — the system
+// browser tab that handles the APK download cannot carry the bearer
+// token (no JS context), and the threat model for a server already
+// reachable on the LAN/public internet doesn't change meaningfully:
+// the APK is the client code, not secret data. Only the contents of
+// data/downloads/ are exposed (currently just `momotaro.apk` +
+// `version.json`); no other paths leak.
+fs.mkdirSync(config.DOWNLOADS_DIR, { recursive: true });
+app.use('/downloads', express.static(config.DOWNLOADS_DIR));
+
 // Health check — public, used by clients to probe whether a host is a
 // Momotaro server before attempting pairing.
 app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
@@ -97,6 +108,10 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }
 // its sensitive routes internally with `requireAdmin`.
 app.use('/api', pairingRoutes);
 app.use('/api', adminAuthRoutes);
+// App version check — public so a freshly-installed APK with no token
+// can still discover that an update is available without going through
+// pairing first.
+app.use('/api', appVersionRoutes);
 
 // Network management (UPnP / port forwarding). All routes inside are
 // gated by `requireAdmin` internally — mounted at the public tier because

@@ -3,7 +3,8 @@
   "appName": "Momotaro",
   "webDir": "dist",
   "server": {
-    "androidScheme": "https"
+    "androidScheme": "http",
+    "hostname": "momotaro.app"
   },
   "android": {
     "allowMixedContent": true

@@ -338,8 +338,10 @@ export default function Pairing() {
               />
               {pinError && <p className="pw-error">{pinError}</p>}
               <p className="pw-hint">
-                The PIN expires after 5 minutes. After 5 wrong tries the
-                pairing is invalidated and you'll need to restart.
+                The PIN expires after 5 minutes. After too many wrong tries
+                this device's network address is locked out of pairing for
+                24 hours — check Client Management on the server for the
+                exact attempt limit.
               </p>
             </div>
             <div className="pw-actions">

@@ -4,6 +4,8 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { hashPassword, verifyPassword, hashToken } = require('../auth/crypto');
 const adminSession = require('../auth/adminSession');
 const rateLimit = require('../auth/rateLimit');
+const pinLockout = require('../auth/pinLockout');
+const connectionLog = require('../auth/connectionLog');
 const { requireAdmin, isLanIp, isLanBypassEnabled, isAuthEnabled, extractClientToken, extractAdminToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -110,7 +112,9 @@ router.post('/admin/setup', asyncWrapper(async (req, res) => {
  * Body: { password }
  */
 router.post('/admin/login', asyncWrapper(async (req, res) => {
+  const fp = connectionLog.fingerprint(req);
   if (!rateLimit.check(`admin-login:${req.ip}`, LOGIN_LIMIT_PER_MIN, 60_000)) {
+    connectionLog.recordEvent('admin_login_rate_limited', { ...fp, detail: `rate cap ${LOGIN_LIMIT_PER_MIN}/min` });
     return res.status(429).json({ error: 'Too many login attempts. Try again in a minute.' });
   }
   const db = getDb();
@@ -120,9 +124,11 @@ router.post('/admin/login', asyncWrapper(async (req, res) => {
   }
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!verifyPassword(password, stored)) {
+    connectionLog.recordEvent('admin_login_fail', { ...fp, detail: 'wrong password' });
     return res.status(401).json({ error: 'Wrong password' });
   }
   const token = adminSession.createSession();
+  connectionLog.recordEvent('admin_login_ok', { ...fp });
   res.json({ data: { admin_token: token } });
 }));
 
@@ -195,6 +201,77 @@ router.put('/admin/security-settings', requireAdmin, asyncWrapper(async (req, re
 }));
 
 /**
+ * GET /api/admin/pairing-pin-settings
+ *
+ * Returns the admin-configurable max-wrong-PIN cap and the list of IPs that
+ * are currently locked out. Used by the Client Management UI to render the
+ * "Max wrong PIN attempts before lockout" input and (optionally) a list of
+ * active lockouts the admin can inspect.
+ */
+router.get('/admin/pairing-pin-settings', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+  // Drop expired lockout rows opportunistically so the table doesn't bloat.
+  db.prepare('DELETE FROM pin_lockouts WHERE locked_until > 0 AND locked_until <= ?').run(now);
+  const lockouts = db.prepare(`
+    SELECT ip, failed_attempts, locked_until, updated_at
+      FROM pin_lockouts
+     WHERE locked_until > ?
+     ORDER BY locked_until DESC
+  `).all(now);
+  res.json({
+    data: {
+      max_attempts:          pinLockout.getMaxAttempts(db),
+      default_max_attempts:  pinLockout.DEFAULT_MAX_ATTEMPTS,
+      min_max_attempts:      pinLockout.MIN_MAX_ATTEMPTS,
+      max_max_attempts:      pinLockout.MAX_MAX_ATTEMPTS,
+      lockout_duration_sec:  pinLockout.LOCKOUT_DURATION_SEC,
+      active_lockouts:       lockouts,
+    },
+  });
+}));
+
+/**
+ * PUT /api/admin/pairing-pin-settings
+ * Body: { max_attempts: integer }
+ */
+router.put('/admin/pairing-pin-settings', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const body = req.body || {};
+  if ('max_attempts' in body) {
+    const n = parseInt(body.max_attempts, 10);
+    if (!Number.isFinite(n) || n < pinLockout.MIN_MAX_ATTEMPTS || n > pinLockout.MAX_MAX_ATTEMPTS) {
+      return res.status(400).json({
+        error: `max_attempts must be an integer between ${pinLockout.MIN_MAX_ATTEMPTS} and ${pinLockout.MAX_MAX_ATTEMPTS}.`,
+      });
+    }
+    pinLockout.setMaxAttempts(db, n);
+  }
+  res.json({
+    data: {
+      max_attempts:          pinLockout.getMaxAttempts(db),
+      default_max_attempts:  pinLockout.DEFAULT_MAX_ATTEMPTS,
+      min_max_attempts:      pinLockout.MIN_MAX_ATTEMPTS,
+      max_max_attempts:      pinLockout.MAX_MAX_ATTEMPTS,
+      lockout_duration_sec:  pinLockout.LOCKOUT_DURATION_SEC,
+    },
+  });
+}));
+
+/**
+ * DELETE /api/admin/pairing-pin-lockouts/:ip
+ * Clears the lockout for one IP — the admin's escape hatch when a household
+ * member fat-fingers the PIN past the cap. Idempotent.
+ */
+router.delete('/admin/pairing-pin-lockouts/:ip', requireAdmin, asyncWrapper(async (req, res) => {
+  const ip = String(req.params.ip || '').trim();
+  if (!ip) return res.status(400).json({ error: 'IP is required' });
+  pinLockout.clear(ip);
+  console.log(`[Admin] Cleared pairing-PIN lockout for ${ip}`);
+  res.json({ data: { cleared: ip } });
+}));
+
+/**
  * GET /api/admin/pairings/pending
  *
  * Lists every active pending pairing along with its PIN so the admin can
@@ -226,16 +303,198 @@ router.delete('/admin/pairings/:id', requireAdmin, asyncWrapper(async (req, res)
 
 /**
  * GET /api/admin/clients
- * Paired clients list. Tokens are never returned — only the metadata.
+ * Paired clients list, with forensic fingerprint (OS, browser, device type,
+ * first-seen IP, request count). Tokens are never returned — only the
+ * metadata. Buffered request counts are flushed first so the numbers the
+ * admin sees are current.
  */
 router.get('/admin/clients', requireAdmin, asyncWrapper(async (req, res) => {
+  connectionLog.flushAll();
   const db = getDb();
   const rows = db.prepare(`
-    SELECT id, device_name, platform, created_at, last_seen_at, last_seen_ip, revoked
+    SELECT id, device_name, platform, created_at,
+           last_seen_at, last_seen_ip,
+           first_seen_at, first_seen_ip,
+           user_agent, os, browser, device_type,
+           request_count, revoked
       FROM paired_clients
      ORDER BY (revoked = 1) ASC, COALESCE(last_seen_at, created_at) DESC
   `).all();
   res.json({ data: rows });
+}));
+
+/**
+ * GET /api/admin/connection-log
+ * Returns the most recent forensic events. Used by the UI to preview what
+ * the CSV download will contain. `limit` query param caps the number of
+ * rows (default 200, max 5000).
+ */
+router.get('/admin/connection-log', requireAdmin, asyncWrapper(async (req, res) => {
+  connectionLog.flushAll();
+  const db = getDb();
+  let limit = parseInt(req.query?.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 200;
+  if (limit > 5000) limit = 5000;
+  const rows = db.prepare(`
+    SELECT id, event_type, ip, user_agent, os, browser, device_type,
+           platform, device_name, pairing_id, paired_client_id,
+           occurred_at, detail
+      FROM connection_attempts
+     ORDER BY occurred_at DESC, id DESC
+     LIMIT ?
+  `).all(limit);
+  const total = db.prepare('SELECT COUNT(*) AS n FROM connection_attempts').get().n;
+  res.json({ data: { entries: rows, total } });
+}));
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
+function formatUnix(ts) {
+  if (!ts) return '';
+  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
+}
+
+/**
+ * GET /api/admin/connection-log.csv
+ *
+ * Authenticated CSV download covering every connection attempt the server
+ * has observed, plus a roll-up of the current paired-client roster. The
+ * file is intended as an incident-response artefact — if a malicious actor
+ * probes the pairing flow, the admin can hand this CSV to law enforcement
+ * or use it to identify the attacker by IP, OS, browser, and device-type
+ * fingerprint.
+ *
+ * Output has two sections:
+ *   1. PAIRED DEVICES — one row per row in `paired_clients`, including
+ *      revoked entries. Captures aggregate per-device metrics (request
+ *      count, first/last seen IPs, OS/browser fingerprint).
+ *   2. CONNECTION EVENTS — one row per row in `connection_attempts`,
+ *      newest first. Captures both successful and unsuccessful attempts:
+ *      pairing requests, wrong-PIN guesses, lockouts, rate-limit hits, and
+ *      admin-login attempts.
+ *
+ * Auth: admin session token via `?t=` query string (the same fallback the
+ * client-token gate already uses for `<img src>` requests) — native browser
+ * navigation can't send custom headers, and we want this to be downloadable
+ * with a single click.
+ */
+router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
+  // Custom auth path: accept either the X-Admin-Token header (when the SPA
+  // does a fetch+blob download) or a `?t=` query token (when the user types
+  // the URL directly). We can't put this behind `requireAdmin` because that
+  // middleware only reads the header.
+  const headerToken = req.headers['x-admin-token'];
+  const queryToken  = typeof req.query?.t === 'string' ? req.query.t : '';
+  const adminToken  = (typeof headerToken === 'string' && headerToken) || queryToken;
+  if (!adminToken || !adminSession.validateSession(adminToken)) {
+    return res.status(401).json({ error: 'Admin authentication required' });
+  }
+
+  connectionLog.flushAll();
+
+  const db = getDb();
+  const fp = connectionLog.fingerprint(req);
+  connectionLog.recordEvent('connection_log_exported', { ...fp, detail: 'CSV export' });
+
+  const clients = db.prepare(`
+    SELECT id, device_name, platform, created_at,
+           first_seen_at, first_seen_ip,
+           last_seen_at, last_seen_ip,
+           user_agent, os, browser, device_type,
+           request_count, revoked
+      FROM paired_clients
+     ORDER BY (revoked = 1) ASC, COALESCE(last_seen_at, created_at) DESC
+  `).all();
+
+  const events = db.prepare(`
+    SELECT id, event_type, ip, user_agent, os, browser, device_type,
+           platform, device_name, pairing_id, paired_client_id,
+           occurred_at, detail
+      FROM connection_attempts
+     ORDER BY occurred_at DESC, id DESC
+  `).all();
+
+  const lines = [];
+
+  lines.push(csvEscape(`Momotaro connection log — generated ${new Date().toISOString()}`));
+  lines.push('');
+  lines.push(csvEscape('SECTION: PAIRED DEVICES'));
+  const clientHeader = [
+    'ID', 'Device name', 'Platform', 'Device type', 'OS', 'Browser',
+    'User agent', 'First seen (UTC)', 'First seen IP',
+    'Last seen (UTC)', 'Last seen IP', 'Paired at (UTC)',
+    'Request count', 'Status',
+  ];
+  lines.push(clientHeader.map(csvEscape).join(','));
+  for (const c of clients) {
+    lines.push([
+      c.id,
+      c.device_name || '',
+      c.platform || '',
+      c.device_type || '',
+      c.os || '',
+      c.browser || '',
+      c.user_agent || '',
+      formatUnix(c.first_seen_at || c.created_at),
+      c.first_seen_ip || '',
+      formatUnix(c.last_seen_at),
+      c.last_seen_ip || '',
+      formatUnix(c.created_at),
+      c.request_count || 0,
+      c.revoked ? 'revoked' : 'active',
+    ].map(csvEscape).join(','));
+  }
+
+  lines.push('');
+  lines.push(csvEscape('SECTION: CONNECTION EVENTS (newest first)'));
+  const eventHeader = [
+    'Event ID', 'Occurred at (UTC)', 'Event type', 'IP', 'Device type',
+    'OS', 'Browser', 'Platform', 'Device name', 'User agent',
+    'Pairing ID', 'Paired client ID', 'Detail',
+  ];
+  lines.push(eventHeader.map(csvEscape).join(','));
+  for (const e of events) {
+    lines.push([
+      e.id,
+      formatUnix(e.occurred_at),
+      e.event_type || '',
+      e.ip || '',
+      e.device_type || '',
+      e.os || '',
+      e.browser || '',
+      e.platform || '',
+      e.device_name || '',
+      e.user_agent || '',
+      e.pairing_id || '',
+      e.paired_client_id == null ? '' : e.paired_client_id,
+      e.detail || '',
+    ].map(csvEscape).join(','));
+  }
+
+  // UTF-8 BOM so Windows Excel renders non-ASCII (Japanese, French, etc.)
+  // cleanly. RFC 4180 line endings.
+  const body = '﻿' + lines.join('\r\n') + '\r\n';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="momotaro-connection-log-${stamp}.csv"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+}));
+
+/**
+ * DELETE /api/admin/connection-log
+ * Wipes the event log. Useful before handing the server off, or after
+ * exporting and archiving the CSV.
+ */
+router.delete('/admin/connection-log', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const { changes } = db.prepare('DELETE FROM connection_attempts').run();
+  console.log(`[Admin] Cleared ${changes} connection-log rows.`);
+  res.json({ data: { deleted: changes } });
 }));
 
 /**

@@ -597,6 +597,49 @@ export const api = {
   listPairedClients: () => apiFetch('/api/admin/clients'),
   revokePairedClient: (id) =>
     apiFetch(`/api/admin/clients/${id}`, { method: 'DELETE' }),
+  // Pairing-PIN brute-force lockout settings — configurable cap and the list
+  // of IPs currently sitting out a 24-hour lockout.
+  getPairingPinSettings: () => apiFetch('/api/admin/pairing-pin-settings'),
+  savePairingPinSettings: (body) =>
+    apiFetch('/api/admin/pairing-pin-settings', { method: 'PUT', body: JSON.stringify(body) }),
+  clearPairingPinLockout: (ip) =>
+    apiFetch(`/api/admin/pairing-pin-lockouts/${encodeURIComponent(ip)}`, { method: 'DELETE' }),
+
+  // Forensic connection log — every pairing attempt, wrong-PIN guess,
+  // lockout, and authenticated request flush is logged. The CSV bundle is
+  // intended as an incident-response artefact (admin downloads it after a
+  // suspicious lockout to identify the attacker).
+  getConnectionLog: (limit = 200) =>
+    apiFetch(`/api/admin/connection-log?limit=${encodeURIComponent(limit)}`),
+  clearConnectionLog: () =>
+    apiFetch('/api/admin/connection-log', { method: 'DELETE' }),
+  downloadConnectionLogCsv: async () => {
+    // Use fetch + blob so the X-Admin-Token header rides along. The server
+    // also accepts the token via `?t=` for when the user pastes the URL
+    // into a browser directly, but the SPA-driven flow goes through here.
+    const adminToken = getAdminToken();
+    if (!adminToken) throw new Error('Admin session required');
+    const resp = await fetch(`${getServerUrl()}/api/admin/connection-log.csv`, {
+      headers: { 'X-Admin-Token': adminToken },
+    });
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); if (j?.error) msg = j.error; } catch (_) { /* not JSON */ }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const cd   = resp.headers.get('Content-Disposition') || '';
+    const m    = /filename="([^"]+)"/.exec(cd);
+    const filename = m ? m[1] : 'momotaro-connection-log.csv';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
 
   // ── Port forwarding (UPnP) ─────────────────────────────────────────────
   // Backs the Port Forwarding section. `getNetworkStatus` is what the UI

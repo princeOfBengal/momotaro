@@ -4,11 +4,12 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { generateToken, hashToken, generatePin, safeEqual } = require('../auth/crypto');
 const rateLimit = require('../auth/rateLimit');
+const pinLockout = require('../auth/pinLockout');
+const connectionLog = require('../auth/connectionLog');
 
 const router = express.Router();
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
-const MAX_PIN_ATTEMPTS = 5;
 const MAX_DEVICE_NAME_LEN = 64;
 const MAX_PLATFORM_LEN = 32;
 const REQUEST_LIMIT_PER_MIN = 10;
@@ -45,7 +46,15 @@ function sanitizeString(value, maxLen) {
  * therefore returns only `pairing_id`; the PIN ships out via the admin UI.
  */
 router.post('/pairing/request', asyncWrapper(async (req, res) => {
+  const fp = connectionLog.fingerprint(req);
+
   if (!rateLimit.check(`pair-req:${req.ip}`, REQUEST_LIMIT_PER_MIN, 60_000)) {
+    connectionLog.recordEvent('request_rate_limited', {
+      ...fp,
+      platform:    sanitizeString(req.body?.platform, MAX_PLATFORM_LEN),
+      device_name: sanitizeString(req.body?.device_name, MAX_DEVICE_NAME_LEN),
+      detail:      `rate cap ${REQUEST_LIMIT_PER_MIN}/min`,
+    });
     return res.status(429).json({ error: 'Too many pairing requests. Try again in a minute.' });
   }
 
@@ -63,9 +72,21 @@ router.post('/pairing/request', asyncWrapper(async (req, res) => {
   const expiresAt = Math.floor((Date.now() + PAIRING_TTL_MS) / 1000);
 
   db.prepare(`
-    INSERT INTO pending_pairings (id, pin, device_name, platform, ip, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(pairingId, pin, deviceName, platform, req.ip || '', expiresAt);
+    INSERT INTO pending_pairings
+      (id, pin, device_name, platform, ip, expires_at,
+       user_agent, os, browser, device_type)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    pairingId, pin, deviceName, platform, req.ip || '', expiresAt,
+    fp.user_agent, fp.os, fp.browser, fp.device_type,
+  );
+
+  connectionLog.recordEvent('pairing_request', {
+    ...fp,
+    platform,
+    device_name: deviceName,
+    pairing_id:  pairingId,
+  });
 
   console.log(`[Pairing] Request "${deviceName}" (${platform || 'unknown'}) from ${req.ip} → pairing_id=${pairingId.slice(0, 8)}…`);
 
@@ -130,16 +151,42 @@ router.get('/pairing/status/:id', asyncWrapper(async (req, res) => {
  * never written to disk in plaintext form.
  *
  * Wrong-PIN handling:
- *   - increments `attempts`
- *   - after 5 wrong attempts the pending row is deleted (force restart)
+ *   - increments the per-pending-pairing `attempts` counter
+ *   - records the failure against the source IP via `pinLockout`. When the
+ *     IP hits the admin-configured cap (default 5) the IP is locked out of
+ *     pairing for 24 hours and the pending row is deleted.
  *   - rate-limited per IP to slow distributed brute force
  */
 router.post('/pairing/submit-pin', asyncWrapper(async (req, res) => {
+  const fp = connectionLog.fingerprint(req);
+  const submittedPairingId = sanitizeString(req.body?.pairing_id, 64);
+
   if (!rateLimit.check(`pair-sub:${req.ip}`, SUBMIT_LIMIT_PER_MIN, 60_000)) {
+    connectionLog.recordEvent('pair_rate_limited', {
+      ...fp,
+      pairing_id: submittedPairingId || null,
+      detail:     `rate cap ${SUBMIT_LIMIT_PER_MIN}/min`,
+    });
     return res.status(429).json({ error: 'Too many attempts. Try again in a minute.' });
   }
 
-  const pairingId = sanitizeString(req.body?.pairing_id, 64);
+  // Per-IP lockout. Checked before doing any DB work so a locked-out IP
+  // can't keep probing pairing_ids to learn which ones exist.
+  const lockStatus = pinLockout.status(req.ip);
+  if (lockStatus.locked) {
+    connectionLog.recordEvent('lockout_blocked', {
+      ...fp,
+      pairing_id: submittedPairingId || null,
+      detail:     `unlocks at ${lockStatus.locked_until}`,
+    });
+    return res.status(429).json({
+      error: 'Too many wrong PINs from this IP. Pairing is locked for 24 hours.',
+      locked_until: lockStatus.locked_until,
+      seconds_remaining: lockStatus.seconds_remaining,
+    });
+  }
+
+  const pairingId = submittedPairingId;
   const pin       = sanitizeString(req.body?.pin, 12);
   if (!pairingId || !pin) {
     return res.status(400).json({ error: 'pairing_id and pin are required' });
@@ -161,28 +208,81 @@ router.post('/pairing/submit-pin', asyncWrapper(async (req, res) => {
   }
 
   if (!safeEqual(pin, row.pin)) {
-    const attempts = row.attempts + 1;
-    if (attempts >= MAX_PIN_ATTEMPTS) {
+    const ipResult = pinLockout.recordFailure(req.ip);
+    db.prepare('UPDATE pending_pairings SET attempts = ? WHERE id = ?')
+      .run(row.attempts + 1, pairingId);
+
+    connectionLog.recordEvent('pin_wrong', {
+      ...fp,
+      platform:    row.platform,
+      device_name: row.device_name,
+      pairing_id:  pairingId,
+      detail:      `attempt ${ipResult.attempts}/${ipResult.max_attempts}`,
+    });
+
+    if (ipResult.locked) {
+      // Cap reached: kill the pending row so a future unlocked attempt can't
+      // be replayed against the same PIN.
       db.prepare('DELETE FROM pending_pairings WHERE id = ?').run(pairingId);
-      console.warn(`[Pairing] Too many wrong PINs for ${pairingId.slice(0, 8)}… — pairing invalidated`);
-      return res.status(429).json({ error: 'Too many wrong attempts. Restart pairing.' });
+      connectionLog.recordEvent('lockout', {
+        ...fp,
+        platform:    row.platform,
+        device_name: row.device_name,
+        pairing_id:  pairingId,
+        detail:      `locked 24h after ${ipResult.attempts} wrong PINs`,
+      });
+      console.warn(
+        `[Pairing] IP ${req.ip} hit the ${ipResult.max_attempts}-wrong-PIN cap — ` +
+        `locked out for 24 h.`
+      );
+      return res.status(429).json({
+        error: `Too many wrong PINs from this IP. Pairing is locked for 24 hours.`,
+        locked_until: ipResult.locked_until,
+        seconds_remaining: ipResult.locked_until - Math.floor(Date.now() / 1000),
+      });
     }
-    db.prepare('UPDATE pending_pairings SET attempts = ? WHERE id = ?').run(attempts, pairingId);
-    return res.status(401).json({ error: 'Wrong PIN', attempts_remaining: MAX_PIN_ATTEMPTS - attempts });
+
+    return res.status(401).json({
+      error: 'Wrong PIN',
+      attempts_remaining: ipResult.attempts_remaining,
+    });
   }
+
+  // Correct PIN — wipe any accumulated IP-failure counter so a future paired
+  // user from the same address isn't penalised for prior fumbles.
+  pinLockout.clear(req.ip);
 
   const token = generateToken();
   const tokenHash = hashToken(token);
+  let newClientId = null;
 
   const insertTx = db.transaction(() => {
-    db.prepare(`
-      INSERT INTO paired_clients (device_name, platform, token_hash, last_seen_at, last_seen_ip)
-      VALUES (?, ?, ?, unixepoch(), ?)
-    `).run(row.device_name, row.platform, tokenHash, req.ip || '');
+    const info = db.prepare(`
+      INSERT INTO paired_clients
+        (device_name, platform, token_hash,
+         last_seen_at, last_seen_ip,
+         first_seen_at, first_seen_ip,
+         user_agent, os, browser, device_type)
+      VALUES (?, ?, ?, unixepoch(), ?, unixepoch(), ?, ?, ?, ?, ?)
+    `).run(
+      row.device_name, row.platform, tokenHash,
+      req.ip || '',
+      req.ip || '',
+      fp.user_agent, fp.os, fp.browser, fp.device_type,
+    );
+    newClientId = info.lastInsertRowid;
 
     db.prepare('UPDATE pending_pairings SET approved_token = ? WHERE id = ?').run(token, pairingId);
   });
   insertTx();
+
+  connectionLog.recordEvent('pin_correct', {
+    ...fp,
+    platform:         row.platform,
+    device_name:      row.device_name,
+    pairing_id:       pairingId,
+    paired_client_id: newClientId,
+  });
 
   console.log(`[Pairing] Approved "${row.device_name}" (${row.platform || 'unknown'}) from ${req.ip}`);
 

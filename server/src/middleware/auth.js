@@ -1,6 +1,7 @@
 const { getDb } = require('../db/database');
 const { hashToken } = require('../auth/crypto');
 const adminSession = require('../auth/adminSession');
+const connectionLog = require('../auth/connectionLog');
 
 /**
  * Authentication middleware for Phase 1 remote-access support.
@@ -94,21 +95,10 @@ function isLanBypassEnabled(db) {
   return getSetting(db, 'lan_bypass_enabled') !== '0';
 }
 
-const lastSeenWriteAt = new Map(); // client_id -> timestamp; throttles last_seen updates
-
-function touchLastSeen(db, clientId, ip) {
-  const now = Date.now();
-  const previous = lastSeenWriteAt.get(clientId) || 0;
-  if (now - previous < 60_000) return;
-  lastSeenWriteAt.set(clientId, now);
-  try {
-    db.prepare(
-      'UPDATE paired_clients SET last_seen_at = unixepoch(), last_seen_ip = ? WHERE id = ?'
-    ).run(ip || '', clientId);
-  } catch {
-    // best-effort — never fail a request because of telemetry
-  }
-}
+// Per-request bookkeeping is delegated to `connectionLog.recordClientRequest`
+// — it buffers counters in memory and writes them to `paired_clients` at most
+// once a minute, while emitting a 'client_request' forensic event at each
+// flush boundary so the CSV export has periodic heartbeats per device.
 
 /**
  * Gate for regular API routes. Allows the request through when:
@@ -149,7 +139,7 @@ function requireClientOrAdmin(req, res, next) {
     return res.status(401).json({ error: 'Invalid or revoked token' });
   }
 
-  touchLastSeen(db, row.id, req.ip);
+  connectionLog.recordClientRequest(row.id, req);
   req.auth = { kind: 'client', clientId: row.id, deviceName: row.device_name };
   return next();
 }

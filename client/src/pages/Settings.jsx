@@ -3012,18 +3012,21 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
   const [now, setNow]         = useState(() => Math.floor(Date.now() / 1000));
   const [savingToggle, setSavingToggle] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [pinSettings, setPinSettings] = useState(null);
   const inFlight = useRef(false);
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const [p, c] = await Promise.all([
+      const [p, c, ps] = await Promise.all([
         api.listPendingPairings().catch(() => []),
         api.listPairedClients().catch(() => []),
+        api.getPairingPinSettings().catch(() => null),
       ]);
       setPending(Array.isArray(p) ? p : []);
       setClients(Array.isArray(c) ? c : []);
+      if (ps) setPinSettings(ps);
     } finally {
       inFlight.current = false;
     }
@@ -3146,6 +3149,12 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
             <span className="toggle-thumb" />
           </button>
         </div>
+
+        <PinLockoutControl
+          settings={pinSettings}
+          onChanged={() => { refresh(); }}
+          setStatusMsg={setStatusMsg}
+        />
       </div>
 
       <div className="cm-divider" />
@@ -3207,9 +3216,17 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
               <div className="cm-card-main">
                 <div className="cm-device-name">{c.device_name}</div>
                 <div className="cm-device-meta">
-                  <span>{c.platform || 'unknown platform'}</span>
+                  <span>{c.platform || c.device_type || 'unknown platform'}</span>
+                  {c.os && <span>{c.os}</span>}
+                  {c.browser && <span>{c.browser}</span>}
                   <span>last seen {formatRelativeTime(c.last_seen_at)}</span>
                   {c.last_seen_ip && <span>from {c.last_seen_ip}</span>}
+                  {typeof c.request_count === 'number' && (
+                    <span>{c.request_count.toLocaleString()} requests</span>
+                  )}
+                  {c.first_seen_ip && c.first_seen_ip !== c.last_seen_ip && (
+                    <span>first IP {c.first_seen_ip}</span>
+                  )}
                 </div>
               </div>
               <button
@@ -3232,7 +3249,12 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
                 <div key={c.id} className="cm-card" style={{ opacity: 0.6 }}>
                   <div className="cm-card-main">
                     <div className="cm-device-name">{c.device_name}</div>
-                    <div className="cm-device-meta cm-device-meta-revoked">revoked</div>
+                    <div className="cm-device-meta cm-device-meta-revoked">
+                      <span>revoked</span>
+                      {c.os && <span>{c.os}</span>}
+                      {c.browser && <span>{c.browser}</span>}
+                      {c.last_seen_ip && <span>last IP {c.last_seen_ip}</span>}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -3240,6 +3262,11 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
           </details>
         )}
       </div>
+
+      <div className="cm-divider" />
+
+      {/* ── Connection log (forensic CSV export) ────────────────────── */}
+      <ConnectionLogBlock setStatusMsg={setStatusMsg} />
 
       <div className="cm-divider" />
 
@@ -3275,6 +3302,294 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
         )}
       </div>
     </>
+  );
+}
+
+function PinLockoutControl({ settings, onChanged, setStatusMsg }) {
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (settings && typeof settings.max_attempts === 'number') {
+      setDraft(String(settings.max_attempts));
+    }
+  }, [settings?.max_attempts]);
+
+  if (!settings) {
+    return (
+      <div className="cm-toggle-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div className="cm-toggle-label">Pairing PIN brute-force protection</div>
+        <div className="cm-toggle-help">Loading…</div>
+      </div>
+    );
+  }
+
+  const min = settings.min_max_attempts || 1;
+  const max = settings.max_max_attempts || 100;
+  const def = settings.default_max_attempts || 5;
+  const parsed = parseInt(draft, 10);
+  const valid = Number.isFinite(parsed) && parsed >= min && parsed <= max;
+  const dirty = String(settings.max_attempts) !== draft.trim();
+
+  async function handleSave() {
+    if (!valid || saving) return;
+    setSaving(true);
+    try {
+      await api.savePairingPinSettings({ max_attempts: parsed });
+      setStatusMsg({ type: 'success', text: `Pairing PIN attempt cap set to ${parsed}.` });
+      onChanged();
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Save failed: ' + err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleClearLockout(ip) {
+    if (!confirm(`Clear the 24-hour pairing lockout for ${ip}?`)) return;
+    try {
+      await api.clearPairingPinLockout(ip);
+      setStatusMsg({ type: 'success', text: `Cleared lockout for ${ip}.` });
+      onChanged();
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Clear failed: ' + err.message });
+    }
+  }
+
+  const lockouts = Array.isArray(settings.active_lockouts) ? settings.active_lockouts : [];
+
+  return (
+    <>
+      <div className="cm-toggle-row" style={{ flexWrap: 'wrap', rowGap: 10 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div className="cm-toggle-label">Max wrong PIN attempts before lockout</div>
+          <div className="cm-toggle-help">
+            After this many wrong PIN guesses from the same IP, pairing is
+            blocked from that IP for 24 hours. Default is {def}.
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="number"
+            className="pf-port-input"
+            value={draft}
+            min={min}
+            max={max}
+            onChange={e => setDraft(e.target.value.replace(/[^\d]/g, '').slice(0, 3))}
+            style={{ width: 80 }}
+          />
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={handleSave}
+            disabled={!valid || !dirty || saving}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      {!valid && draft !== '' && (
+        <div className="cm-warning" style={{ marginTop: -2 }}>
+          Enter an integer between {min} and {max}.
+        </div>
+      )}
+
+      {lockouts.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div className="cm-toggle-help" style={{ marginBottom: 6 }}>
+            Currently locked out:
+          </div>
+          {lockouts.map(l => {
+            const remaining = Math.max(0, l.locked_until - Math.floor(Date.now() / 1000));
+            const hrs = Math.floor(remaining / 3600);
+            const mins = Math.floor((remaining % 3600) / 60);
+            return (
+              <div key={l.ip} className="cm-card">
+                <div className="cm-card-main">
+                  <div className="cm-device-name">{l.ip}</div>
+                  <div className="cm-device-meta">
+                    <span>{l.failed_attempts} wrong attempts</span>
+                    <span>unlocks in {hrs}h {mins}m</span>
+                  </div>
+                </div>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => handleClearLockout(l.ip)}
+                >
+                  Clear
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ConnectionLogBlock({ setStatusMsg }) {
+  const [summary, setSummary] = useState(null); // { entries, total }
+  const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getConnectionLog(25);
+      setSummary(data || { entries: [], total: 0 });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Connection log load failed: ' + err.message });
+    } finally {
+      setLoading(false);
+    }
+  }, [setStatusMsg]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  async function handleDownload() {
+    setDownloading(true);
+    try {
+      await api.downloadConnectionLogCsv();
+      setStatusMsg({ type: 'success', text: 'Connection log CSV downloaded.' });
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Download failed: ' + err.message });
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function handleClear() {
+    if (!confirm('Delete every entry from the connection log? This cannot be undone — export the CSV first if you might need it later.')) return;
+    setClearing(true);
+    try {
+      await api.clearConnectionLog();
+      setStatusMsg({ type: 'success', text: 'Connection log cleared.' });
+      refresh();
+    } catch (err) {
+      setStatusMsg({ type: 'error', text: 'Clear failed: ' + err.message });
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  const entries = summary?.entries || [];
+  const total   = summary?.total || 0;
+
+  function eventLabel(t) {
+    switch (t) {
+      case 'pairing_request':      return 'Pairing requested';
+      case 'pin_correct':          return 'PIN correct (paired)';
+      case 'pin_wrong':            return 'Wrong PIN';
+      case 'lockout':              return 'IP locked out (24h)';
+      case 'lockout_blocked':      return 'Locked IP blocked';
+      case 'pair_rate_limited':    return 'Rate-limited PIN submit';
+      case 'request_rate_limited': return 'Rate-limited pairing request';
+      case 'client_request':       return 'Client request (heartbeat)';
+      case 'admin_login_ok':       return 'Admin login';
+      case 'admin_login_fail':     return 'Admin login failed';
+      case 'admin_login_rate_limited': return 'Rate-limited admin login';
+      case 'connection_log_exported':  return 'Connection log CSV exported';
+      default: return t;
+    }
+  }
+
+  function eventStyle(t) {
+    if (t === 'pin_wrong' || t === 'lockout' || t === 'lockout_blocked' ||
+        t === 'admin_login_fail' || t === 'pair_rate_limited' ||
+        t === 'request_rate_limited' || t === 'admin_login_rate_limited') {
+      return { color: '#e6a17a' };
+    }
+    if (t === 'pin_correct' || t === 'admin_login_ok') {
+      return { color: '#7adba6' };
+    }
+    return {};
+  }
+
+  return (
+    <div className="cm-block">
+      <p className="cm-block-title">
+        Connection log
+        <span className="cm-block-count">{total ? `(${total.toLocaleString()})` : ''}</span>
+      </p>
+      <div className="cm-toggle-help" style={{ marginBottom: 10 }}>
+        Every pairing attempt, wrong-PIN guess, lockout, and authenticated
+        request flush is logged with the source IP, OS, browser, device type
+        and user agent. Export the CSV if you need to identify an attacker
+        or hand the data off to law enforcement after an incident.
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={handleDownload}
+          disabled={downloading}
+        >
+          {downloading ? 'Preparing CSV…' : 'Download connection log (CSV)'}
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={refresh}
+          disabled={loading}
+        >
+          {loading ? 'Refreshing…' : 'Refresh'}
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={handleClear}
+          disabled={clearing || total === 0}
+        >
+          {clearing ? 'Clearing…' : 'Clear log'}
+        </button>
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="cm-empty">
+          {loading ? 'Loading…' : 'No connection events yet.'}
+        </div>
+      ) : (
+        <div style={{ maxHeight: 360, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left' }}>
+                <th style={{ padding: '8px 10px' }}>When</th>
+                <th style={{ padding: '8px 10px' }}>Event</th>
+                <th style={{ padding: '8px 10px' }}>IP</th>
+                <th style={{ padding: '8px 10px' }}>OS</th>
+                <th style={{ padding: '8px 10px' }}>Browser</th>
+                <th style={{ padding: '8px 10px' }}>Device</th>
+                <th style={{ padding: '8px 10px' }}>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(e => (
+                <tr key={e.id} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 10px', whiteSpace: 'nowrap' }}>
+                    {formatRelativeTime(e.occurred_at)}
+                  </td>
+                  <td style={{ padding: '6px 10px', whiteSpace: 'nowrap', ...eventStyle(e.event_type) }}>
+                    {eventLabel(e.event_type)}
+                  </td>
+                  <td style={{ padding: '6px 10px', fontFamily: 'monospace' }}>{e.ip || ''}</td>
+                  <td style={{ padding: '6px 10px' }}>{e.os || ''}</td>
+                  <td style={{ padding: '6px 10px' }}>{e.browser || ''}</td>
+                  <td style={{ padding: '6px 10px' }}>
+                    {[e.device_type, e.device_name, e.platform].filter(Boolean).join(' · ')}
+                  </td>
+                  <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{e.detail || ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {entries.length > 0 && entries.length < total && (
+        <div className="cm-toggle-help" style={{ marginTop: 8 }}>
+          Showing {entries.length} of {total.toLocaleString()} events. The CSV
+          download contains all of them.
+        </div>
+      )}
+    </div>
   );
 }
 

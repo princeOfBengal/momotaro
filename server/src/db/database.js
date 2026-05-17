@@ -255,7 +255,61 @@ function createAuthTables(db) {
       approved_token TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_pending_pairings_expires ON pending_pairings(expires_at);
+
+    -- Tracks wrong-PIN guesses per source IP across pending pairings so a
+    -- brute-forcer can't reset the per-pairing counter by restarting the
+    -- handshake. When failed_attempts reaches the admin-configured cap, the
+    -- IP is locked out of pairing for 24 h via locked_until. A successful
+    -- PIN submission clears the row for that IP.
+    CREATE TABLE IF NOT EXISTS pin_lockouts (
+      ip               TEXT    PRIMARY KEY,
+      failed_attempts  INTEGER NOT NULL DEFAULT 0,
+      locked_until     INTEGER NOT NULL DEFAULT 0,
+      updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    -- Forensic event log for every connection attempt against the pairing /
+    -- auth surface. Both successful and unsuccessful events are captured so
+    -- an admin can later identify a malicious actor by IP, user agent, OS,
+    -- browser, and device-type fingerprint. Free-form detail column is
+    -- reserved for event-specific notes (e.g. lockout duration, error reason).
+    CREATE TABLE IF NOT EXISTS connection_attempts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type        TEXT    NOT NULL,
+      ip                TEXT,
+      user_agent        TEXT,
+      os                TEXT,
+      browser           TEXT,
+      device_type       TEXT,
+      platform          TEXT,
+      device_name       TEXT,
+      pairing_id        TEXT,
+      paired_client_id  INTEGER,
+      occurred_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+      detail            TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_connection_attempts_ip          ON connection_attempts(ip);
+    CREATE INDEX IF NOT EXISTS idx_connection_attempts_occurred_at ON connection_attempts(occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_connection_attempts_event_type  ON connection_attempts(event_type);
   `);
+
+  // Forensic columns on paired_clients — populated when pairing completes and
+  // refreshed on subsequent authenticated requests. Added incrementally so
+  // pre-existing installs upgrade in place.
+  addColumnIfMissing(db, 'paired_clients', 'user_agent',     'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'os',             'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'browser',        'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'device_type',    'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'first_seen_at',  'INTEGER');
+  addColumnIfMissing(db, 'paired_clients', 'first_seen_ip',  'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'request_count',  'INTEGER NOT NULL DEFAULT 0');
+
+  // Forensic columns on pending_pairings — captured at the start of the
+  // handshake so even failed attempts have a fingerprint in the log.
+  addColumnIfMissing(db, 'pending_pairings', 'user_agent',  'TEXT');
+  addColumnIfMissing(db, 'pending_pairings', 'os',          'TEXT');
+  addColumnIfMissing(db, 'pending_pairings', 'browser',     'TEXT');
+  addColumnIfMissing(db, 'pending_pairings', 'device_type', 'TEXT');
 }
 
 /**

@@ -5,6 +5,7 @@ import Library from './pages/Library';
 import MangaDetail from './pages/MangaDetail';
 import InstallPrompt from './components/InstallPrompt';
 import UpdateBanner from './components/UpdateBanner';
+import AdminTaskBanner from './components/AdminTaskBanner';
 import { api } from './api/client';
 
 // Routes off the primary browse path are loaded on demand. The PWA
@@ -122,6 +123,14 @@ function RouteFallback() {
 export default function App() {
   return (
     <BrowserRouter>
+      {/* Top-of-app degradation banner. Polls /api/admin/tasks/list every
+          5s when an admin session is active, shows a thin warning bar
+          while a global-locking task (VACUUM, clear-cache, reset-
+          thumbnails) is running. Self-hides when no admin token exists,
+          so non-admin paired clients never see infra noise. Mounted
+          inside BrowserRouter so it sits above the Routes <Suspense>
+          fallback. */}
+      <AdminTaskBanner />
       <Suspense fallback={<RouteFallback />}>
         <FirstLaunchGate>
           <Routes>

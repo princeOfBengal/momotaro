@@ -9,6 +9,7 @@ const { generateThumbnail } = require('../scanner/thumbnailGenerator');
 const { reinforceAllCovers } = require('../scanner/coverResolver');
 const cbzCache = require('../scanner/cbzCache');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
+const taskRegistry = require('../admin/taskRegistry');
 
 const router = express.Router();
 
@@ -67,10 +68,28 @@ router.get('/admin/cbz-cache-size', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/admin/clear-cbz-cache
+//
+// Returns 202 with the initial task state. The actual wipe runs in the
+// background — `cbzCache.wipe()` is synchronous and iterates `fs.rmSync`
+// across every cached chapter directory, which can take 30s+ on a 20 GB
+// cache. Poll GET /api/admin/clear-cbz-cache/status for completion.
+//
+// 409 if a previous wipe is still running.
 router.post('/admin/clear-cbz-cache', asyncWrapper(async (req, res) => {
-  cbzCache.wipe();
-  console.log('[Admin] CBZ cache cleared');
-  res.json({ data: { size_bytes: 0 } });
+  const result = taskRegistry.start('clear-cbz-cache', null, async () => {
+    const before = cbzCache.stats().size_bytes;
+    cbzCache.wipe();
+    console.log('[Admin] CBZ cache cleared');
+    return { size_bytes: 0, freed_bytes: before };
+  });
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Cache clear already in progress', status: result.state });
+  }
+  res.status(202).json({ data: { status: result.state } });
+}));
+
+router.get('/admin/clear-cbz-cache/status', asyncWrapper(async (req, res) => {
+  res.json({ data: taskRegistry.get('clear-cbz-cache', null) });
 }));
 
 // GET /api/admin/cbz-cache-settings
@@ -140,22 +159,27 @@ router.put('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
 // ── Thumbnail Regeneration ────────────────────────────────────────────────────
 
 // POST /api/admin/regenerate-thumbnails
-// Responds immediately; regeneration runs in the background.
+//
+// Returns 202 with the initial task state. The runner walks every manga
+// and, for each one, restores the AniList cover from disk when available
+// or generates a fresh thumbnail from the first page of the first chapter.
+// Progress (i / N) is reported through the registry so the UI can show
+// "Regenerated 242 / 1,847". 409 if a regeneration is already running.
+//
 // For each manga:
 //   1. If anilist_cover file exists on disk → restore it as the active cover
 //   2. Otherwise → regenerate from the first page of the first chapter
 router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
-  const db = getDb();
-  const allManga = db.prepare('SELECT id, anilist_cover FROM manga').all();
-
-  res.json({ data: { message: 'Thumbnail regeneration started', total: allManga.length } });
-
-  // Fire-and-forget background task
-  ;(async () => {
+  const result = taskRegistry.start('regenerate-thumbnails', null, async (report) => {
+    const db = getDb();
+    const allManga = db.prepare('SELECT id, anilist_cover FROM manga').all();
     let regenerated = 0;
     let errors = 0;
 
-    for (const manga of allManga) {
+    report(0, allManga.length, 'Starting…');
+
+    for (let i = 0; i < allManga.length; i++) {
+      const manga = allManga[i];
       try {
         const activeName = `${manga.id}.webp`;
         const activePath = thumbnailPath(activeName);
@@ -169,6 +193,7 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
             db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
               .run(`${manga.id}.webp`, manga.id);
             regenerated++;
+            report(i + 1, allManga.length, `Regenerated ${regenerated}, ${errors} errors`);
             continue;
           }
         }
@@ -229,13 +254,24 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
         errors++;
         console.warn(`[Admin] Thumbnail regen error for manga ${manga.id}: ${err.message}`);
       }
+      report(i + 1, allManga.length, `Regenerated ${regenerated}, ${errors} errors`);
     }
 
     console.log(
       `[Admin] Thumbnail regeneration complete: ` +
       `${regenerated} regenerated, ${errors} errors (${allManga.length} total)`
     );
-  })();
+    return { regenerated, errors, total: allManga.length };
+  });
+
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Thumbnail regeneration already in progress', status: result.state });
+  }
+  res.status(202).json({ data: { status: result.state } });
+}));
+
+router.get('/admin/regenerate-thumbnails/status', asyncWrapper(async (req, res) => {
+  res.json({ data: taskRegistry.get('regenerate-thumbnails', null) });
 }));
 
 // POST /api/admin/reset-thumbnails
@@ -254,44 +290,71 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
 // it copies whichever source-specific files are already on disk from previous
 // metadata fetches.
 router.post('/admin/reset-thumbnails', asyncWrapper(async (req, res) => {
-  const db = getDb();
-  console.log('[Admin] Reset Thumbnails: enforcing cover priority across the library (force=true).');
-  const counters = reinforceAllCovers(db, { force: true });
-  console.log(
-    `[Admin] Reset Thumbnails complete: ` +
-    `${counters.changed_to_anilist} → AniList, ` +
-    `${counters.changed_to_mal} → MAL, ` +
-    `${counters.changed_to_mu} → MangaUpdates, ` +
-    `${counters.changed_to_doujinshi} → Doujinshi, ` +
-    `${counters.changed_to_original} → original, ` +
-    `${counters.kept_no_source} no source on disk, ` +
-    `${counters.errors} errors (${counters.total} total)`
-  );
-  res.json({ data: counters });
+  const result = taskRegistry.start('reset-thumbnails', null, async () => {
+    const db = getDb();
+    console.log('[Admin] Reset Thumbnails: enforcing cover priority across the library (force=true).');
+    const counters = reinforceAllCovers(db, { force: true });
+    console.log(
+      `[Admin] Reset Thumbnails complete: ` +
+      `${counters.changed_to_anilist} → AniList, ` +
+      `${counters.changed_to_mal} → MAL, ` +
+      `${counters.changed_to_mu} → MangaUpdates, ` +
+      `${counters.changed_to_doujinshi} → Doujinshi, ` +
+      `${counters.changed_to_original} → original, ` +
+      `${counters.kept_no_source} no source on disk, ` +
+      `${counters.errors} errors (${counters.total} total)`
+    );
+    return counters;
+  });
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Reset thumbnails already in progress', status: result.state });
+  }
+  res.status(202).json({ data: { status: result.state } });
+}));
+
+router.get('/admin/reset-thumbnails/status', asyncWrapper(async (req, res) => {
+  res.json({ data: taskRegistry.get('reset-thumbnails', null) });
 }));
 
 // ── Database Vacuum ───────────────────────────────────────────────────────────
 
 // POST /api/admin/vacuum-db
-// Runs VACUUM on the SQLite database to reclaim disk space from deleted rows.
-// Returns the database file size before and after.
+//
+// Runs VACUUM in the background and returns 202 with the initial task
+// state. VACUUM holds an exclusive write lock for the duration of the
+// rewrite (~10–30s on a multi-TB DB), so the actual work continues blocking
+// other DB writers — but the HTTP request returns immediately, which is
+// the user-visible fix. Poll GET /api/admin/vacuum-db/status for completion.
+//
+// This is the one task whose state is persisted to `admin_tasks` so that an
+// operator who restarts the server thinking VACUUM is hung doesn't lose
+// the answer to "did it actually run?" The on-startup reconciliation in
+// taskRegistry.init() flips any 'running' row to 'interrupted'.
+//
+// 409 if a vacuum is already in progress.
 router.post('/admin/vacuum-db', asyncWrapper(async (req, res) => {
-  const sizeBefore = (() => {
-    try { return fs.statSync(config.DB_PATH).size; } catch { return 0; }
-  })();
+  const result = taskRegistry.start('vacuum-db', null, async () => {
+    const sizeBefore = (() => {
+      try { return fs.statSync(config.DB_PATH).size; } catch { return 0; }
+    })();
+    getDb().exec('VACUUM');
+    const sizeAfter = (() => {
+      try { return fs.statSync(config.DB_PATH).size; } catch { return 0; }
+    })();
+    console.log(
+      `[Admin] Database vacuumed: ` +
+      `${(sizeBefore / 1024 / 1024).toFixed(1)} MB → ${(sizeAfter / 1024 / 1024).toFixed(1)} MB`
+    );
+    return { size_before_bytes: sizeBefore, size_after_bytes: sizeAfter };
+  });
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Vacuum already in progress', status: result.state });
+  }
+  res.status(202).json({ data: { status: result.state } });
+}));
 
-  const db = getDb();
-  db.exec('VACUUM');
-
-  const sizeAfter = (() => {
-    try { return fs.statSync(config.DB_PATH).size; } catch { return 0; }
-  })();
-
-  console.log(
-    `[Admin] Database vacuumed: ` +
-    `${(sizeBefore / 1024 / 1024).toFixed(1)} MB → ${(sizeAfter / 1024 / 1024).toFixed(1)} MB`
-  );
-  res.json({ data: { size_before_bytes: sizeBefore, size_after_bytes: sizeAfter } });
+router.get('/admin/vacuum-db/status', asyncWrapper(async (req, res) => {
+  res.json({ data: taskRegistry.get('vacuum-db', null) });
 }));
 
 // ── Series List Export ───────────────────────────────────────────────────────
@@ -394,6 +457,21 @@ router.get('/admin/export-series-list', asyncWrapper(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="momotaro-series-list-${stamp}.csv"`);
   res.setHeader('Cache-Control', 'no-store');
   res.send(body);
+}));
+
+// ── Background tasks ──────────────────────────────────────────────────────────
+//
+// GET /api/admin/tasks/list
+//
+// Snapshot of every long-running admin action currently tracked in the
+// in-process task registry (vacuum-db, clear-cbz-cache, reset-thumbnails,
+// regenerate-thumbnails, optimize-manga:*, bulk-optimize-library:*).
+// Used by the "what's running" UI banner so the operator can see what's
+// happening even while navigating the rest of the app. Persisted history
+// (admin_tasks rows from prior runs) is not included — that's a separate
+// query if a history view is ever added.
+router.get('/admin/tasks/list', asyncWrapper(async (req, res) => {
+  res.json({ data: taskRegistry.list() });
 }));
 
 // ── System Logs ───────────────────────────────────────────────────────────────

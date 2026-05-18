@@ -316,6 +316,9 @@ router.get('/admin/clients', requireAdmin, asyncWrapper(async (req, res) => {
            last_seen_at, last_seen_ip,
            first_seen_at, first_seen_ip,
            user_agent, os, browser, device_type,
+           accept_language, last_real_ip, last_reverse_dns,
+           last_country, last_region, last_city, last_timezone,
+           last_client_hints,
            request_count, revoked
       FROM paired_clients
      ORDER BY (revoked = 1) ASC, COALESCE(last_seen_at, created_at) DESC
@@ -325,26 +328,248 @@ router.get('/admin/clients', requireAdmin, asyncWrapper(async (req, res) => {
 
 /**
  * GET /api/admin/connection-log
- * Returns the most recent forensic events. Used by the UI to preview what
- * the CSV download will contain. `limit` query param caps the number of
- * rows (default 200, max 5000).
+ *
+ * Returns connection events newest-first. Used by the Connection Log UI
+ * to render the timeline view and by the CSV preview.
+ *
+ * Query params (all optional):
+ *   limit          — page size, default 100, max 5000
+ *   cursor         — opaque cursor from a previous response (`next_cursor`)
+ *                    for "Load more" pagination
+ *   event_type     — comma-separated event type filter (e.g.
+ *                    `pin_wrong,lockout,request_denied`)
+ *   severity       — 'all' (default), 'failures' (denied/error/rate-limit
+ *                    /wrong-PIN/lockout/admin-fail), 'successes' (pair OK,
+ *                    admin login OK, client heartbeat, admin action)
+ *   ip             — substring match against ip or real_ip
+ *   q              — case-insensitive substring across device_name,
+ *                    user_agent, reverse_dns, country, city, path, detail
+ *   paired_client_id — restrict to events tied to one paired client
+ *   since          — unix-seconds inclusive lower bound on occurred_at
+ *   until          — unix-seconds inclusive upper bound on occurred_at
+ *
+ * Response: { entries, total, filtered_total, next_cursor }.
  */
+const FAILURE_EVENTS = [
+  'pin_wrong', 'lockout', 'lockout_blocked', 'pair_rate_limited',
+  'request_rate_limited', 'admin_login_fail', 'admin_login_rate_limited',
+  'request_denied', 'request_error',
+];
+const SUCCESS_EVENTS = [
+  'pairing_request', 'pin_correct', 'admin_login_ok', 'client_request',
+  'admin_action', 'connection_log_exported',
+];
+
+function buildFilters(query) {
+  const where = [];
+  const params = [];
+
+  const eventType = typeof query.event_type === 'string' ? query.event_type.trim() : '';
+  if (eventType) {
+    const types = eventType.split(',').map(s => s.trim()).filter(Boolean);
+    if (types.length > 0) {
+      where.push(`event_type IN (${types.map(() => '?').join(',')})`);
+      params.push(...types);
+    }
+  }
+
+  const severity = typeof query.severity === 'string' ? query.severity : 'all';
+  if (severity === 'failures') {
+    where.push(`event_type IN (${FAILURE_EVENTS.map(() => '?').join(',')})`);
+    params.push(...FAILURE_EVENTS);
+  } else if (severity === 'successes') {
+    where.push(`event_type IN (${SUCCESS_EVENTS.map(() => '?').join(',')})`);
+    params.push(...SUCCESS_EVENTS);
+  }
+
+  const ip = typeof query.ip === 'string' ? query.ip.trim() : '';
+  if (ip) {
+    where.push('(ip LIKE ? OR real_ip LIKE ? OR forwarded_for LIKE ?)');
+    const like = `%${ip}%`;
+    params.push(like, like, like);
+  }
+
+  const q = typeof query.q === 'string' ? query.q.trim() : '';
+  if (q) {
+    const like = `%${q}%`;
+    where.push(`(
+      COALESCE(device_name, '')  LIKE ? OR
+      COALESCE(user_agent,  '')  LIKE ? OR
+      COALESCE(reverse_dns, '')  LIKE ? OR
+      COALESCE(country,     '')  LIKE ? OR
+      COALESCE(city,        '')  LIKE ? OR
+      COALESCE(path,        '')  LIKE ? OR
+      COALESCE(detail,      '')  LIKE ? OR
+      COALESCE(referer,     '')  LIKE ?
+    )`);
+    params.push(like, like, like, like, like, like, like, like);
+  }
+
+  const pairedClientId = parseInt(query.paired_client_id, 10);
+  if (Number.isFinite(pairedClientId)) {
+    where.push('paired_client_id = ?');
+    params.push(pairedClientId);
+  }
+
+  const since = parseInt(query.since, 10);
+  if (Number.isFinite(since)) {
+    where.push('occurred_at >= ?');
+    params.push(since);
+  }
+  const until = parseInt(query.until, 10);
+  if (Number.isFinite(until)) {
+    where.push('occurred_at <= ?');
+    params.push(until);
+  }
+
+  return {
+    clause: where.length === 0 ? '' : ' WHERE ' + where.join(' AND '),
+    params,
+  };
+}
+
+function encodeCursor(occurredAt, id) {
+  return Buffer.from(`${occurredAt}:${id}`).toString('base64url');
+}
+function decodeCursor(token) {
+  try {
+    const s = Buffer.from(String(token), 'base64url').toString('utf8');
+    const [a, b] = s.split(':');
+    const ts = parseInt(a, 10);
+    const id = parseInt(b, 10);
+    if (!Number.isFinite(ts) || !Number.isFinite(id)) return null;
+    return { ts, id };
+  } catch { return null; }
+}
+
 router.get('/admin/connection-log', requireAdmin, asyncWrapper(async (req, res) => {
   connectionLog.flushAll();
   const db = getDb();
+
   let limit = parseInt(req.query?.limit, 10);
-  if (!Number.isFinite(limit) || limit <= 0) limit = 200;
+  if (!Number.isFinite(limit) || limit <= 0) limit = 100;
   if (limit > 5000) limit = 5000;
-  const rows = db.prepare(`
-    SELECT id, event_type, ip, user_agent, os, browser, device_type,
+
+  const filters = buildFilters(req.query || {});
+
+  // Keyset cursor: (occurred_at, id) lex-less-than the previous tail.
+  let keyset = '';
+  const keysetParams = [];
+  if (typeof req.query?.cursor === 'string' && req.query.cursor) {
+    const c = decodeCursor(req.query.cursor);
+    if (!c) return res.status(400).json({ error: 'Invalid cursor' });
+    keyset = filters.clause
+      ? ' AND (occurred_at < ? OR (occurred_at = ? AND id < ?))'
+      : ' WHERE (occurred_at < ? OR (occurred_at = ? AND id < ?))';
+    keysetParams.push(c.ts, c.ts, c.id);
+  }
+
+  const sql = `
+    SELECT id, event_type, ip, real_ip, user_agent, os, browser, device_type,
            platform, device_name, pairing_id, paired_client_id,
-           occurred_at, detail
+           occurred_at, detail,
+           accept_language, referer, origin, forwarded_for,
+           client_hints, method, path, status_code, protocol, host,
+           reverse_dns, country, region, city, timezone, dnt, auth_kind
       FROM connection_attempts
+      ${filters.clause}${keyset}
      ORDER BY occurred_at DESC, id DESC
      LIMIT ?
-  `).all(limit);
+  `;
+  // Fetch limit+1 to detect "has more" without a COUNT.
+  const rows = db.prepare(sql).all(...filters.params, ...keysetParams, limit + 1);
+
+  let entries = rows;
+  let nextCursor = null;
+  if (rows.length > limit) {
+    entries = rows.slice(0, limit);
+    const last = entries[entries.length - 1];
+    nextCursor = encodeCursor(last.occurred_at, last.id);
+  }
+
+  // Two counts: filtered (matches WHERE) and total (every row). The UI
+  // uses the latter for the section badge and the former for "showing X of Y".
+  const filteredTotal = filters.clause
+    ? db.prepare(`SELECT COUNT(*) AS n FROM connection_attempts${filters.clause}`).get(...filters.params).n
+    : null;
   const total = db.prepare('SELECT COUNT(*) AS n FROM connection_attempts').get().n;
-  res.json({ data: { entries: rows, total } });
+
+  res.json({
+    data: {
+      entries,
+      total,
+      filtered_total: filteredTotal == null ? total : filteredTotal,
+      next_cursor:    nextCursor,
+    },
+  });
+}));
+
+/**
+ * GET /api/admin/connection-log/sources
+ *
+ * Grouped-by-source view: collapses the raw event log into one row per
+ * unique (real_ip, browser fingerprint) pair, with first/last seen,
+ * event counts, and the most recent device name and authentication
+ * outcome. This is the view the admin uses to spot "who is hitting my
+ * server" without scrolling a 10,000-row event timeline.
+ *
+ * Identity heuristic — sources are grouped by COALESCE(real_ip, ip), with
+ * a secondary key on a stable hash of (user_agent || accept_language) so
+ * two devices NATted behind one IP appear as two rows. Pairings show
+ * paired_client_id when available so authenticated devices roll up
+ * exactly to their client row.
+ *
+ * Window: defaults to the last 30 days. Pass `?since=<unix>` to extend.
+ */
+router.get('/admin/connection-log/sources', requireAdmin, asyncWrapper(async (req, res) => {
+  connectionLog.flushAll();
+  const db = getDb();
+
+  const sinceParam = parseInt(req.query?.since, 10);
+  const since = Number.isFinite(sinceParam)
+    ? sinceParam
+    : Math.floor(Date.now() / 1000) - 30 * 86400;
+
+  const rows = db.prepare(`
+    SELECT
+      COALESCE(NULLIF(real_ip, ''), ip)                AS source_ip,
+      MAX(reverse_dns)                                 AS reverse_dns,
+      MAX(country)                                     AS country,
+      MAX(region)                                      AS region,
+      MAX(city)                                        AS city,
+      MAX(timezone)                                    AS timezone,
+      MAX(os)                                          AS os,
+      MAX(browser)                                     AS browser,
+      MAX(device_type)                                 AS device_type,
+      MAX(platform)                                    AS platform,
+      MAX(device_name)                                 AS device_name,
+      MAX(user_agent)                                  AS user_agent,
+      MAX(accept_language)                             AS accept_language,
+      MAX(forwarded_for)                               AS forwarded_for,
+      MAX(client_hints)                                AS client_hints,
+      MAX(paired_client_id)                            AS paired_client_id,
+      MIN(occurred_at)                                 AS first_seen,
+      MAX(occurred_at)                                 AS last_seen,
+      COUNT(*)                                         AS event_count,
+      SUM(CASE WHEN event_type IN ('pin_wrong','lockout','lockout_blocked',
+                                   'pair_rate_limited','request_rate_limited',
+                                   'admin_login_fail','admin_login_rate_limited',
+                                   'request_denied','request_error')
+               THEN 1 ELSE 0 END)                      AS failure_count,
+      SUM(CASE WHEN event_type = 'pin_correct' THEN 1 ELSE 0 END)
+                                                       AS pair_count,
+      SUM(CASE WHEN event_type = 'admin_login_ok' THEN 1 ELSE 0 END)
+                                                       AS admin_login_count
+    FROM connection_attempts
+    WHERE occurred_at >= ?
+      AND COALESCE(NULLIF(real_ip, ''), ip) IS NOT NULL
+      AND COALESCE(NULLIF(real_ip, ''), ip) != ''
+    GROUP BY source_ip, COALESCE(user_agent, ''), COALESCE(paired_client_id, 0)
+    ORDER BY last_seen DESC
+    LIMIT 500
+  `).all(since);
+
+  res.json({ data: { sources: rows, since } });
 }));
 
 function csvEscape(v) {
@@ -405,15 +630,21 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
            first_seen_at, first_seen_ip,
            last_seen_at, last_seen_ip,
            user_agent, os, browser, device_type,
+           accept_language, last_real_ip, last_reverse_dns,
+           last_country, last_region, last_city, last_timezone,
+           last_client_hints,
            request_count, revoked
       FROM paired_clients
      ORDER BY (revoked = 1) ASC, COALESCE(last_seen_at, created_at) DESC
   `).all();
 
   const events = db.prepare(`
-    SELECT id, event_type, ip, user_agent, os, browser, device_type,
+    SELECT id, event_type, ip, real_ip, user_agent, os, browser, device_type,
            platform, device_name, pairing_id, paired_client_id,
-           occurred_at, detail
+           occurred_at, detail,
+           accept_language, referer, origin, forwarded_for,
+           client_hints, method, path, status_code, protocol, host,
+           reverse_dns, country, region, city, timezone, dnt, auth_kind
       FROM connection_attempts
      ORDER BY occurred_at DESC, id DESC
   `).all();
@@ -425,9 +656,12 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
   lines.push(csvEscape('SECTION: PAIRED DEVICES'));
   const clientHeader = [
     'ID', 'Device name', 'Platform', 'Device type', 'OS', 'Browser',
-    'User agent', 'First seen (UTC)', 'First seen IP',
-    'Last seen (UTC)', 'Last seen IP', 'Paired at (UTC)',
-    'Request count', 'Status',
+    'User agent', 'Accept-Language',
+    'First seen (UTC)', 'First seen IP',
+    'Last seen (UTC)', 'Last seen IP', 'Last real IP', 'Last reverse DNS',
+    'Last country', 'Last region', 'Last city', 'Last timezone',
+    'Last client hints (JSON)',
+    'Paired at (UTC)', 'Request count', 'Status',
   ];
   lines.push(clientHeader.map(csvEscape).join(','));
   for (const c of clients) {
@@ -439,10 +673,18 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
       c.os || '',
       c.browser || '',
       c.user_agent || '',
+      c.accept_language || '',
       formatUnix(c.first_seen_at || c.created_at),
       c.first_seen_ip || '',
       formatUnix(c.last_seen_at),
       c.last_seen_ip || '',
+      c.last_real_ip || '',
+      c.last_reverse_dns || '',
+      c.last_country || '',
+      c.last_region || '',
+      c.last_city || '',
+      c.last_timezone || '',
+      c.last_client_hints || '',
       formatUnix(c.created_at),
       c.request_count || 0,
       c.revoked ? 'revoked' : 'active',
@@ -452,8 +694,13 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
   lines.push('');
   lines.push(csvEscape('SECTION: CONNECTION EVENTS (newest first)'));
   const eventHeader = [
-    'Event ID', 'Occurred at (UTC)', 'Event type', 'IP', 'Device type',
-    'OS', 'Browser', 'Platform', 'Device name', 'User agent',
+    'Event ID', 'Occurred at (UTC)', 'Event type',
+    'IP (req.ip)', 'Real IP', 'Forwarded-For', 'Reverse DNS',
+    'Country', 'Region', 'City', 'Timezone',
+    'Device type', 'OS', 'Browser', 'Platform', 'Device name',
+    'Accept-Language', 'User agent', 'Client hints (JSON)',
+    'Method', 'Path', 'Status', 'Protocol', 'Host', 'Origin', 'Referer',
+    'DNT', 'Auth kind',
     'Pairing ID', 'Paired client ID', 'Detail',
   ];
   lines.push(eventHeader.map(csvEscape).join(','));
@@ -463,12 +710,30 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
       formatUnix(e.occurred_at),
       e.event_type || '',
       e.ip || '',
+      e.real_ip || '',
+      e.forwarded_for || '',
+      e.reverse_dns || '',
+      e.country || '',
+      e.region || '',
+      e.city || '',
+      e.timezone || '',
       e.device_type || '',
       e.os || '',
       e.browser || '',
       e.platform || '',
       e.device_name || '',
+      e.accept_language || '',
       e.user_agent || '',
+      e.client_hints || '',
+      e.method || '',
+      e.path || '',
+      e.status_code == null ? '' : e.status_code,
+      e.protocol || '',
+      e.host || '',
+      e.origin || '',
+      e.referer || '',
+      e.dnt == null ? '' : (e.dnt ? '1' : '0'),
+      e.auth_kind || '',
       e.pairing_id || '',
       e.paired_client_id == null ? '' : e.paired_client_id,
       e.detail || '',

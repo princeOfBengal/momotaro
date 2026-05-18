@@ -1,10 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useAdminTask } from '../hooks/useAdminTask';
 import { getResume, clearResume } from '../utils/readingProgress';
 import './MangaDetail.css';
 
 const CHAPTERS_COLLAPSED_COUNT = 5;
+
+// "0:14", "1:23" — shown next to the spinner while optimize is running so
+// the user has feedback that things are progressing even with no per-chapter
+// progress signal coming from the server (per-manga optimize is a single
+// pass; bulk-optimize-library is the one that emits per-item progress).
+function formatOptimizeElapsed(sec) {
+  if (sec == null) return '0:00';
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
 
 // ── Thumbnail Picker Modal ─────────────────────────────────────────────────────
 function ThumbOption({ src, label, applying, onUse }) {
@@ -1443,8 +1455,12 @@ export default function MangaDetail() {
 
   // Optimize
   const [showOptimize, setShowOptimize] = useState(false);
-  const [optimizePhase, setOptimizePhase] = useState('confirm'); // 'confirm' | 'running' | 'done'
-  const [optimizeResult, setOptimizeResult] = useState(null);
+  // The modal's phase derives from the live task state below — 'confirm' until
+  // the user clicks Start, then 'running' / 'done' / 'failed' from the hook.
+  const optimizeTask = useAdminTask({
+    startUrl:  `/api/manga/${id}/optimize`,
+    statusUrl: `/api/manga/${id}/optimize/status`,
+  });
 
   // Refresh — single-folder rescan triggered from the navbar refresh button.
   // `refreshing` controls the spinner state on the icon; `refreshFlash`
@@ -1856,25 +1872,44 @@ export default function MangaDetail() {
   const hasMetadata = manga.metadata_source && manga.metadata_source !== 'none';
 
   async function handleOptimize() {
-    setOptimizePhase('running');
-    try {
-      const result = await api.optimizeManga(id);
-      setOptimizeResult(result);
-      setOptimizePhase('done');
-      // Reload manga so chapter list reflects new names
-      const updated = await api.getManga(id);
-      setManga(prev => ({ ...prev, ...updated }));
-    } catch (err) {
-      setOptimizeResult({ error: err.message });
-      setOptimizePhase('done');
-    }
+    try { await optimizeTask.start(); }
+    catch (_) { /* surfaced via optimizeTask.lastError */ }
   }
 
+  // When the per-manga optimize completes, pull the manga fresh so the
+  // chapter list reflects the renames. Once per running→done transition.
+  const prevOptimizeDoneRef = useRef(false);
+  useEffect(() => {
+    if (optimizeTask.isDone && !prevOptimizeDoneRef.current) {
+      api.getManga(id).then(updated => {
+        setManga(prev => ({ ...prev, ...updated }));
+      }).catch(() => {});
+    }
+    prevOptimizeDoneRef.current = optimizeTask.isDone;
+  }, [optimizeTask.isDone, id]);
+
   function openOptimizeModal() {
-    setOptimizePhase('confirm');
-    setOptimizeResult(null);
+    // Clear any badge from a previous completion so the modal opens in
+    // the 'confirm' phase. No-op while a task is currently running, in
+    // which case the modal adopts the live 'running' state instead.
+    optimizeTask.reset();
     setShowOptimize(true);
   }
+
+  function closeOptimizeModal() {
+    if (optimizeTask.isRunning) return; // can't close mid-run
+    setShowOptimize(false);
+  }
+
+  // Drive the modal phase off the live task state. `confirm` is the
+  // initial-mount default and what the modal returns to after reset().
+  const optimizePhase = optimizeTask.isRunning ? 'running'
+                      : optimizeTask.isDone    ? 'done'
+                      : optimizeTask.isFailed  ? 'failed'
+                      : optimizeTask.lastError ? 'failed'
+                      : 'confirm';
+  const optimizeResult = optimizeTask.result;
+  const optimizeError  = optimizeTask.error || optimizeTask.lastError;
 
   async function openNavDrawer() {
     setShowNavDrawer(true);
@@ -2673,12 +2708,12 @@ export default function MangaDetail() {
       )}
 
       {showOptimize && (
-        <div className="modal-backdrop" onClick={() => optimizePhase !== 'running' && setShowOptimize(false)}>
+        <div className="modal-backdrop" onClick={closeOptimizeModal}>
           <div className="modal-box optimize-modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">Optimize Chapters</h2>
               {optimizePhase !== 'running' && (
-                <button className="modal-close" onClick={() => setShowOptimize(false)}>✕</button>
+                <button className="modal-close" onClick={closeOptimizeModal}>✕</button>
               )}
             </div>
 
@@ -2695,7 +2730,7 @@ export default function MangaDetail() {
                 </ul>
                 <p className="optimize-warning">Original folders and non-CBZ archives will be deleted. This cannot be undone.</p>
                 <div className="optimize-actions">
-                  <button className="btn btn-ghost" onClick={() => setShowOptimize(false)}>Cancel</button>
+                  <button className="btn btn-ghost" onClick={closeOptimizeModal}>Cancel</button>
                   <button className="btn btn-primary" onClick={handleOptimize}>Start Optimization</button>
                 </div>
               </div>
@@ -2704,54 +2739,63 @@ export default function MangaDetail() {
             {optimizePhase === 'running' && (
               <div className="optimize-body optimize-running">
                 <div className="spinner" />
-                <p className="optimize-running-label">Optimizing… please wait</p>
+                <p className="optimize-running-label">
+                  Optimizing… {formatOptimizeElapsed(optimizeTask.elapsedSec)}
+                </p>
+                <p className="optimize-running-hint">
+                  You can close this dialog and come back — the operation continues in the background.
+                </p>
+              </div>
+            )}
+
+            {optimizePhase === 'failed' && (
+              <div className="optimize-body">
+                <p className="optimize-error">Error: {optimizeError || 'unknown error'}</p>
+                <div className="optimize-actions">
+                  <button className="btn btn-ghost" onClick={() => optimizeTask.reset()}>Try Again</button>
+                  <button className="btn btn-primary" onClick={closeOptimizeModal}>Close</button>
+                </div>
               </div>
             )}
 
             {optimizePhase === 'done' && optimizeResult && (
               <div className="optimize-body">
-                {optimizeResult.error ? (
-                  <p className="optimize-error">Error: {optimizeResult.error}</p>
-                ) : (
-                  <>
-                    <div className="optimize-results">
-                      <div className="optimize-stat">
-                        <span className="optimize-stat-value">{optimizeResult.renamed}</span>
-                        <span className="optimize-stat-label">Renamed</span>
-                      </div>
-                      <div className="optimize-stat">
-                        <span className="optimize-stat-value">{optimizeResult.converted}</span>
-                        <span className="optimize-stat-label">Converted to CBZ</span>
-                      </div>
-                      <div className="optimize-stat">
-                        <span className="optimize-stat-value">{optimizeResult.skipped.length}</span>
-                        <span className="optimize-stat-label">Skipped</span>
-                      </div>
-                      <div className="optimize-stat">
-                        <span className="optimize-stat-value">{optimizeResult.errors.length}</span>
-                        <span className="optimize-stat-label">Errors</span>
-                      </div>
-                    </div>
-                    {optimizeResult.skipped.length > 0 && (
-                      <div className="optimize-log">
-                        <p className="optimize-log-title">Skipped</p>
-                        {optimizeResult.skipped.map((s, i) => (
-                          <p key={i} className="optimize-log-item"><span className="optimize-log-name">{s.name}</span> — {s.reason}</p>
-                        ))}
-                      </div>
-                    )}
-                    {optimizeResult.errors.length > 0 && (
-                      <div className="optimize-log optimize-log-errors">
-                        <p className="optimize-log-title">Errors</p>
-                        {optimizeResult.errors.map((e, i) => (
-                          <p key={i} className="optimize-log-item"><span className="optimize-log-name">{e.name}</span> — {e.error}</p>
-                        ))}
-                      </div>
-                    )}
-                  </>
+                <div className="optimize-results">
+                  <div className="optimize-stat">
+                    <span className="optimize-stat-value">{optimizeResult.renamed}</span>
+                    <span className="optimize-stat-label">Renamed</span>
+                  </div>
+                  <div className="optimize-stat">
+                    <span className="optimize-stat-value">{optimizeResult.converted}</span>
+                    <span className="optimize-stat-label">Converted to CBZ</span>
+                  </div>
+                  <div className="optimize-stat">
+                    <span className="optimize-stat-value">{(optimizeResult.skipped || []).length}</span>
+                    <span className="optimize-stat-label">Skipped</span>
+                  </div>
+                  <div className="optimize-stat">
+                    <span className="optimize-stat-value">{(optimizeResult.errors || []).length}</span>
+                    <span className="optimize-stat-label">Errors</span>
+                  </div>
+                </div>
+                {(optimizeResult.skipped || []).length > 0 && (
+                  <div className="optimize-log">
+                    <p className="optimize-log-title">Skipped</p>
+                    {optimizeResult.skipped.map((s, i) => (
+                      <p key={i} className="optimize-log-item"><span className="optimize-log-name">{s.name}</span> — {s.reason}</p>
+                    ))}
+                  </div>
+                )}
+                {(optimizeResult.errors || []).length > 0 && (
+                  <div className="optimize-log optimize-log-errors">
+                    <p className="optimize-log-title">Errors</p>
+                    {optimizeResult.errors.map((e, i) => (
+                      <p key={i} className="optimize-log-item"><span className="optimize-log-name">{e.name}</span> — {e.error}</p>
+                    ))}
+                  </div>
                 )}
                 <div className="optimize-actions">
-                  <button className="btn btn-primary" onClick={() => setShowOptimize(false)}>Done</button>
+                  <button className="btn btn-primary" onClick={closeOptimizeModal}>Done</button>
                 </div>
               </div>
             )}

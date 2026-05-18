@@ -1,10 +1,181 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
+import { useAdminTask } from '../hooks/useAdminTask';
 import { APP_VERSION } from '../version';
 import './Settings.css';
 import './Libraries.css';
 import '../components/ReaderControls.css';
+
+// ── Long-running admin action button helper ───────────────────────────────────
+//
+// Each of the heavy admin endpoints (Compact DB, Clear Cache, Reset / Regenerate
+// Thumbnails, Bulk Optimize, per-manga Optimize) is now wired through the
+// Phase 2 fire-and-forget + status-poll API via the `useAdminTask` hook. This
+// helper wraps the hook with the visual state machine the Phase 5 plan
+// specified:
+//
+//   idle                   → render the original button label
+//   running, no progress   → "<runningLabel>… 0:14"   (button disabled)
+//   running, w/ progress   → "<runningLabel> 242 / 1,847"
+//   done, recent           → green badge with formatted result + dismiss ×
+//   failed                 → red badge with the server error + dismiss ×
+//   done, stale (>5 min)   → revert to idle (the result is from a previous
+//                            session; don't keep showing it as fresh)
+//
+// Returns `{ task, button, badge }`. Cards mount the badge inside the
+// description column and the button at the right edge, matching the
+// pre-existing card layout.
+function formatElapsed(sec) {
+  if (sec == null) return '0:00';
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
+const STALE_BADGE_MS    = 5 * 60 * 1000;   // older than this → don't show 'done' badge after re-mount
+const AUTO_DISMISS_MS   = 30 * 1000;        // newly-done badge auto-clears after this
+
+function useAdminTaskButton({
+  startUrl,
+  statusUrl,
+  idleLabel,
+  runningLabel = 'Running',
+  formatResult,            // (result) => string
+  confirmMessage,          // optional window.confirm() text before start
+  buttonClassName = 'btn btn-ghost btn-sm',
+  buttonStyle     = { flexShrink: 0, alignSelf: 'flex-start' },
+  buttonTitle,
+  disabled: extraDisabled = false,
+  onDone,                  // optional side-effect callback when result arrives
+}) {
+  const task = useAdminTask({ startUrl, statusUrl });
+
+  // Auto-dismiss done badges so the UI doesn't sit on a stale "✓ Done" line
+  // indefinitely. Failed badges stick until the user explicitly dismisses.
+  useEffect(() => {
+    if (!task.isDone || !task.state?.finished_at) return;
+    const ageMs = Date.now() - task.state.finished_at;
+    if (ageMs >= STALE_BADGE_MS) {
+      // Re-mounted onto an old completion — clear silently.
+      task.reset();
+      return;
+    }
+    const remaining = Math.max(0, AUTO_DISMISS_MS - ageMs);
+    const t = setTimeout(() => task.reset(), remaining);
+    return () => clearTimeout(t);
+  }, [task.isDone, task.state?.finished_at, task.reset]);
+
+  // Fire the `onDone` callback once per running→done transition.
+  const prevDoneRef = useRef(false);
+  useEffect(() => {
+    if (task.isDone && !prevDoneRef.current && onDone) {
+      try { onDone(task.result); } catch (_) { /* swallowed — telemetry */ }
+    }
+    prevDoneRef.current = task.isDone;
+  }, [task.isDone, task.result, onDone]);
+
+  async function handleClick() {
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    try { await task.start(); } catch (_) { /* surfaced via task.lastError */ }
+  }
+
+  // Compose the button label from the live state.
+  let label = idleLabel;
+  if (task.isRunning) {
+    const p = task.progress;
+    if (p && p.current != null && p.total) {
+      label = `${runningLabel} ${p.current.toLocaleString()} / ${p.total.toLocaleString()}…`;
+    } else {
+      label = `${runningLabel}… ${formatElapsed(task.elapsedSec)}`;
+    }
+  }
+
+  const button = (
+    <button
+      className={buttonClassName}
+      style={buttonStyle}
+      onClick={handleClick}
+      disabled={task.isRunning || extraDisabled}
+      title={
+        task.isRunning
+          ? `Started ${formatElapsed(task.elapsedSec)} ago`
+          : buttonTitle
+      }
+    >
+      {label}
+    </button>
+  );
+
+  // Decide whether to render any badge. `lastError` (POST-time error) is
+  // shown only when the task isn't otherwise reporting a state — e.g. a
+  // 500 from the server before any state was applied.
+  const isStaleFinish = task.state?.finished_at &&
+                        Date.now() - task.state.finished_at > STALE_BADGE_MS;
+  let badge = null;
+  if (!task.isRunning && !isStaleFinish) {
+    if (task.isDone) {
+      badge = (
+        <p className="db-op-status db-op-status-ok db-op-status-row">
+          <span>
+            ✓ {formatResult ? formatResult(task.result) : 'Done'}
+            {task.elapsedSec > 1 && <span className="db-op-elapsed"> ({formatElapsed(task.elapsedSec)})</span>}
+          </span>
+          <button
+            type="button"
+            className="db-op-dismiss"
+            onClick={() => task.reset()}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >×</button>
+        </p>
+      );
+    } else if (task.isFailed) {
+      badge = (
+        <p className="db-op-status db-op-status-err db-op-status-row">
+          <span>✗ Failed: {task.error || 'unknown error'}</span>
+          <button
+            type="button"
+            className="db-op-dismiss"
+            onClick={() => task.reset()}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >×</button>
+        </p>
+      );
+    } else if (task.lastError) {
+      badge = (
+        <p className="db-op-status db-op-status-err db-op-status-row">
+          <span>✗ {task.lastError}</span>
+          <button
+            type="button"
+            className="db-op-dismiss"
+            onClick={() => task.reset()}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >×</button>
+        </p>
+      );
+    }
+  }
+
+  return { task, button, badge };
+}
+
+// Per-library bulk optimize. Each library row mounts its own instance so
+// the hook state is scoped to that library — two libraries can show
+// independent progress at the same time.
+function BulkOptimizeButton({ libraryId, disabled }) {
+  const { button } = useAdminTaskButton({
+    startUrl:     `/api/libraries/${libraryId}/bulk-optimize`,
+    statusUrl:    `/api/libraries/${libraryId}/bulk-optimize/status`,
+    idleLabel:    'Bulk Optimize',
+    runningLabel: 'Optimizing',
+    buttonTitle:  'Rename and convert all chapters in this library to standardized CBZ format',
+    disabled,
+  });
+  return button;
+}
 
 // ── Shared library form ───────────────────────────────────────────────────────
 
@@ -73,7 +244,6 @@ function LibrariesSection() {
   const [scanning, setScanning] = useState(null);
   const [bulkPulling, setBulkPulling] = useState(null);
   const [bulkStatus, setBulkStatus] = useState(null); // { libId, message }
-  const [bulkOptimizing, setBulkOptimizing] = useState(null);
   const [bulkSourceDropdown, setBulkSourceDropdown] = useState(null); // lib.id of open dropdown
   const [exporting, setExporting] = useState(null); // lib.id being exported
   const [exportStatus, setExportStatus] = useState(null); // { libId, message }
@@ -177,17 +347,6 @@ function LibrariesSection() {
       alert('Bulk metadata pull failed: ' + err.message);
     } finally {
       setBulkPulling(null);
-    }
-  }
-
-  async function handleBulkOptimize(lib) {
-    setBulkOptimizing(lib.id);
-    try {
-      await api.bulkOptimize(lib.id);
-    } catch (err) {
-      alert('Bulk optimize failed: ' + err.message);
-    } finally {
-      setBulkOptimizing(null);
     }
   }
 
@@ -382,14 +541,7 @@ function LibrariesSection() {
                         </div>
                       )}
                     </div>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => handleBulkOptimize(lib)}
-                      disabled={bulkOptimizing === lib.id || scanning === lib.id}
-                      title="Rename and convert all chapters in this library to standardized CBZ format"
-                    >
-                      {bulkOptimizing === lib.id ? 'Optimizing…' : 'Bulk Optimize'}
-                    </button>
+                    <BulkOptimizeButton libraryId={lib.id} disabled={scanning === lib.id} />
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleExportMetadata(lib)}
@@ -1416,7 +1568,6 @@ function formatNextRun(iso) {
 
 function DatabaseSection() {
   const [cacheSize, setCacheSize] = useState(null);   // bytes | null = loading
-  const [clearing, setClearing] = useState(false);
 
   // Cache settings (limit + auto-clear schedule)
   const [cacheSettings, setCacheSettings] = useState(null);
@@ -1427,19 +1578,72 @@ function DatabaseSection() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsMsg, setSettingsMsg]     = useState(null); // { type, text }
 
-  const [thumbStatus, setThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
-  const [thumbTotal, setThumbTotal] = useState(null);
-
-  const [resetThumbStatus, setResetThumbStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
-  const [resetThumbResult, setResetThumbResult] = useState(null);   // counters from the API
-
-  const [vacuumStatus, setVacuumStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
-  const [vacuumResult, setVacuumResult] = useState(null); // { before, after }
-
   const [importStatus, setImportStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
   const [importResult, setImportResult] = useState(null);   // { counts, warnings, total_warnings }
   const [importError, setImportError]   = useState(null);
   const importFileRef = useRef(null);
+
+  // ── Long-running admin tasks ────────────────────────────────────────────────
+  // Each wraps the new Phase 2 endpoint pair (POST + GET status). The hook
+  // handles polling, elapsed-time display, badge state, and 409-adopt-on-
+  // duplicate-click. Result formatters render the per-task success message.
+
+  const refreshCacheSize = useCallback(() => {
+    api.getCbzCacheSize().then(d => setCacheSize(d.size_bytes)).catch(() => {});
+  }, []);
+
+  const clearCacheTask = useAdminTaskButton({
+    startUrl:     '/api/admin/clear-cbz-cache',
+    statusUrl:    '/api/admin/clear-cbz-cache/status',
+    idleLabel:    'Clear Cache',
+    runningLabel: 'Clearing',
+    formatResult: r => r && r.freed_bytes
+      ? `Cleared — freed ${fmtMB(r.freed_bytes)}`
+      : 'Cleared',
+    onDone:       refreshCacheSize,
+    disabled:     cacheSize === null,
+  });
+
+  const regenTask = useAdminTaskButton({
+    startUrl:     '/api/admin/regenerate-thumbnails',
+    statusUrl:    '/api/admin/regenerate-thumbnails/status',
+    idleLabel:    'Regenerate All',
+    runningLabel: 'Regenerating',
+    formatResult: r => r
+      ? `Regenerated ${(r.regenerated || 0).toLocaleString()} of ${(r.total || 0).toLocaleString()}` +
+        (r.errors ? `, ${r.errors} errors` : '')
+      : 'Done',
+  });
+
+  const resetThumbsTask = useAdminTaskButton({
+    startUrl:     '/api/admin/reset-thumbnails',
+    statusUrl:    '/api/admin/reset-thumbnails/status',
+    idleLabel:    'Reset Thumbnails',
+    runningLabel: 'Resetting',
+    formatResult: r => r
+      ? `Reset: ${r.changed_to_anilist} → AniList, ${r.changed_to_mal} → MAL, ` +
+        `${r.changed_to_mu} → MangaUpdates, ${r.changed_to_doujinshi} → Doujinshi, ` +
+        `${r.changed_to_original} → original` +
+        (r.kept_no_source ? `; ${r.kept_no_source} had no source on disk` : '') +
+        (r.errors ? `; ${r.errors} errors` : '') +
+        ` (${r.total} total)`
+      : 'Done',
+    confirmMessage:
+      'Reset all thumbnails to their priority-default cover?\n\n' +
+      'This will overwrite every manually-picked cover and re-align all manga to:\n' +
+      'AniList → MyAnimeList → MangaUpdates → Doujinshi.info → original scan.\n\n' +
+      'No upstream is contacted — only existing source-specific cover files are used.',
+  });
+
+  const vacuumTask = useAdminTaskButton({
+    startUrl:     '/api/admin/vacuum-db',
+    statusUrl:    '/api/admin/vacuum-db/status',
+    idleLabel:    'Compact Database',
+    runningLabel: 'Compacting',
+    formatResult: r => r
+      ? `Compacted: ${fmtMB(r.size_before_bytes)} → ${fmtMB(r.size_after_bytes)}`
+      : 'Done',
+  });
 
   useEffect(() => {
     api.getCbzCacheSize()
@@ -1456,18 +1660,6 @@ function DatabaseSection() {
       })
       .catch(() => {});
   }, []);
-
-  async function handleClearCache() {
-    setClearing(true);
-    try {
-      const d = await api.clearCbzCache();
-      setCacheSize(d.size_bytes);
-    } catch (err) {
-      alert('Failed to clear cache: ' + err.message);
-    } finally {
-      setClearing(false);
-    }
-  }
 
   async function handleSaveCacheSettings() {
     setSettingsMsg(null);
@@ -1501,48 +1693,6 @@ function DatabaseSection() {
       setSettingsMsg({ type: 'error', text: 'Failed to save: ' + err.message });
     } finally {
       setSavingSettings(false);
-    }
-  }
-
-  async function handleRegenerate() {
-    setThumbStatus('loading');
-    setThumbTotal(null);
-    try {
-      const d = await api.regenerateThumbnails();
-      setThumbTotal(d.total);
-      setThumbStatus('done');
-    } catch (err) {
-      setThumbStatus('error');
-    }
-  }
-
-  async function handleResetThumbnails() {
-    if (!confirm(
-      'Reset all thumbnails to their priority-default cover?\n\n' +
-      'This will overwrite every manually-picked cover and re-align all manga to:\n' +
-      'AniList → MyAnimeList → MangaUpdates → Doujinshi.info → original scan.\n\n' +
-      'No upstream is contacted — only existing source-specific cover files are used.'
-    )) return;
-    setResetThumbStatus('loading');
-    setResetThumbResult(null);
-    try {
-      const d = await api.resetThumbnails();
-      setResetThumbResult(d);
-      setResetThumbStatus('done');
-    } catch (err) {
-      setResetThumbStatus('error');
-    }
-  }
-
-  async function handleVacuum() {
-    setVacuumStatus('loading');
-    setVacuumResult(null);
-    try {
-      const d = await api.vacuumDb();
-      setVacuumResult({ before: d.size_before_bytes, after: d.size_after_bytes });
-      setVacuumStatus('done');
-    } catch (err) {
-      setVacuumStatus('error');
     }
   }
 
@@ -1653,15 +1803,9 @@ function DatabaseSection() {
                 <> &nbsp;/&nbsp; Limit: <strong>{(cacheSettings.limit_bytes / GB).toFixed(1)} GB</strong></>
               )}
             </p>
+            {clearCacheTask.badge}
           </div>
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
-            onClick={handleClearCache}
-            disabled={clearing || cacheSize === null}
-          >
-            {clearing ? 'Clearing…' : 'Clear Cache'}
-          </button>
+          {clearCacheTask.button}
         </div>
 
         {/* Cache limit + auto-clear schedule */}
@@ -1781,23 +1925,9 @@ function DatabaseSection() {
               pulled for a title, its AniList cover is restored as the active thumbnail.
               Otherwise, a new thumbnail is generated from the first page of the first chapter.
             </p>
-            {thumbStatus === 'done' && (
-              <p className="db-op-status db-op-status-ok">
-                Regeneration started for {thumbTotal} manga. Thumbnails will update in the background.
-              </p>
-            )}
-            {thumbStatus === 'error' && (
-              <p className="db-op-status db-op-status-err">Failed — try again.</p>
-            )}
+            {regenTask.badge}
           </div>
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
-            onClick={handleRegenerate}
-            disabled={thumbStatus === 'loading'}
-          >
-            {thumbStatus === 'loading' ? 'Starting…' : 'Regenerate All'}
-          </button>
+          {regenTask.button}
         </div>
       </div>
 
@@ -1813,34 +1943,9 @@ function DatabaseSection() {
               this only re-uses cover files already on disk from earlier metadata fetches.
               The same priority pass also runs automatically at the end of every library scan.
             </p>
-            {resetThumbStatus === 'done' && resetThumbResult && (
-              <p className="db-op-status db-op-status-ok">
-                Reset complete: {resetThumbResult.changed_to_anilist} → AniList,{' '}
-                {resetThumbResult.changed_to_mal} → MAL,{' '}
-                {resetThumbResult.changed_to_mu} → MangaUpdates,{' '}
-                {resetThumbResult.changed_to_doujinshi} → Doujinshi,{' '}
-                {resetThumbResult.changed_to_original} → original
-                {resetThumbResult.kept_no_source > 0
-                  ? `; ${resetThumbResult.kept_no_source} had no source on disk`
-                  : ''}
-                {resetThumbResult.errors > 0
-                  ? `; ${resetThumbResult.errors} errors`
-                  : ''}
-                {' '}({resetThumbResult.total} total).
-              </p>
-            )}
-            {resetThumbStatus === 'error' && (
-              <p className="db-op-status db-op-status-err">Failed — try again.</p>
-            )}
+            {resetThumbsTask.badge}
           </div>
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
-            onClick={handleResetThumbnails}
-            disabled={resetThumbStatus === 'loading'}
-          >
-            {resetThumbStatus === 'loading' ? 'Resetting…' : 'Reset Thumbnails'}
-          </button>
+          {resetThumbsTask.button}
         </div>
       </div>
 
@@ -1947,23 +2052,9 @@ function DatabaseSection() {
               deleted records. Safe to run at any time — most useful after removing a large
               number of manga or chapters.
             </p>
-            {vacuumStatus === 'done' && vacuumResult && (
-              <p className="db-op-status db-op-status-ok">
-                Compacted: {fmtMB(vacuumResult.before)} → {fmtMB(vacuumResult.after)}
-              </p>
-            )}
-            {vacuumStatus === 'error' && (
-              <p className="db-op-status db-op-status-err">Failed — try again.</p>
-            )}
+            {vacuumTask.badge}
           </div>
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ flexShrink: 0, alignSelf: 'flex-start' }}
-            onClick={handleVacuum}
-            disabled={vacuumStatus === 'loading'}
-          >
-            {vacuumStatus === 'loading' ? 'Compacting…' : 'Compact Database'}
-          </button>
+          {vacuumTask.button}
         </div>
       </div>
     </div>
@@ -3427,25 +3518,93 @@ function PinLockoutControl({ settings, onChanged, setStatusMsg }) {
   );
 }
 
+// ── Connection log helpers ──────────────────────────────────────────────────
+
+const EVENT_LABELS = {
+  pairing_request:           'Pairing requested',
+  pin_correct:               'PIN correct (paired)',
+  pin_wrong:                 'Wrong PIN',
+  lockout:                   'IP locked out (24h)',
+  lockout_blocked:           'Locked IP blocked',
+  pair_rate_limited:         'Rate-limited PIN submit',
+  request_rate_limited:      'Rate-limited pairing request',
+  client_request:            'Client heartbeat',
+  admin_login_ok:            'Admin login',
+  admin_login_fail:          'Admin login failed',
+  admin_login_rate_limited:  'Rate-limited admin login',
+  connection_log_exported:   'Connection log CSV exported',
+  admin_action:              'Admin action',
+  request_denied:            'Request denied',
+  request_error:             'Request error (4xx/5xx)',
+};
+
+const FAILURE_TYPES = new Set([
+  'pin_wrong', 'lockout', 'lockout_blocked', 'pair_rate_limited',
+  'request_rate_limited', 'admin_login_fail', 'admin_login_rate_limited',
+  'request_denied', 'request_error',
+]);
+
+const SUCCESS_TYPES = new Set([
+  'pairing_request', 'pin_correct', 'admin_login_ok', 'client_request',
+  'admin_action', 'connection_log_exported',
+]);
+
+const TIME_WINDOWS = [
+  { value: 'all',  label: 'All time' },
+  { value: '1h',   label: 'Last hour',  seconds: 3600 },
+  { value: '24h',  label: 'Last 24h',   seconds: 86400 },
+  { value: '7d',   label: 'Last 7d',    seconds: 7 * 86400 },
+  { value: '30d',  label: 'Last 30d',   seconds: 30 * 86400 },
+];
+
+function eventLabel(t)  { return EVENT_LABELS[t] || t; }
+function eventColor(t)  {
+  if (FAILURE_TYPES.has(t)) return '#e6a17a';
+  if (SUCCESS_TYPES.has(t)) return '#7adba6';
+  return undefined;
+}
+
+function formatAbsoluteTime(unixSec) {
+  if (!unixSec) return '';
+  try {
+    return new Date(unixSec * 1000).toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch { return new Date(unixSec * 1000).toISOString(); }
+}
+
+// ISO-2 country code → flag emoji. Falls back to the raw code on unknowns.
+function countryFlag(code) {
+  if (!code || typeof code !== 'string' || code.length !== 2) return '';
+  const A = 0x1F1E6;
+  const cc = code.toUpperCase();
+  const a = cc.charCodeAt(0);
+  const b = cc.charCodeAt(1);
+  if (a < 65 || a > 90 || b < 65 || b > 90) return '';
+  return String.fromCodePoint(A + a - 65) + String.fromCodePoint(A + b - 65);
+}
+
+function summariseLocation(e) {
+  const parts = [];
+  if (e.city)    parts.push(e.city);
+  if (e.region && e.region !== e.city) parts.push(e.region);
+  if (e.country) parts.push(e.country);
+  return parts.join(', ');
+}
+
+function tryParseClientHints(json) {
+  if (!json) return null;
+  try {
+    const o = JSON.parse(json);
+    return typeof o === 'object' && o !== null ? o : null;
+  } catch { return null; }
+}
+
 function ConnectionLogBlock({ setStatusMsg }) {
-  const [summary, setSummary] = useState(null); // { entries, total }
-  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState('events'); // 'events' | 'sources'
   const [downloading, setDownloading] = useState(false);
   const [clearing, setClearing] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api.getConnectionLog(25);
-      setSummary(data || { entries: [], total: 0 });
-    } catch (err) {
-      setStatusMsg({ type: 'error', text: 'Connection log load failed: ' + err.message });
-    } finally {
-      setLoading(false);
-    }
-  }, [setStatusMsg]);
-
-  useEffect(() => { refresh(); }, [refresh]);
 
   async function handleDownload() {
     setDownloading(true);
@@ -3465,7 +3624,8 @@ function ConnectionLogBlock({ setStatusMsg }) {
     try {
       await api.clearConnectionLog();
       setStatusMsg({ type: 'success', text: 'Connection log cleared.' });
-      refresh();
+      // Bump a refresh signal — pass through via a key on the inner views.
+      window.dispatchEvent(new CustomEvent('momotaro:connection-log-cleared'));
     } catch (err) {
       setStatusMsg({ type: 'error', text: 'Clear failed: ' + err.message });
     } finally {
@@ -3473,123 +3633,546 @@ function ConnectionLogBlock({ setStatusMsg }) {
     }
   }
 
-  const entries = summary?.entries || [];
-  const total   = summary?.total || 0;
-
-  function eventLabel(t) {
-    switch (t) {
-      case 'pairing_request':      return 'Pairing requested';
-      case 'pin_correct':          return 'PIN correct (paired)';
-      case 'pin_wrong':            return 'Wrong PIN';
-      case 'lockout':              return 'IP locked out (24h)';
-      case 'lockout_blocked':      return 'Locked IP blocked';
-      case 'pair_rate_limited':    return 'Rate-limited PIN submit';
-      case 'request_rate_limited': return 'Rate-limited pairing request';
-      case 'client_request':       return 'Client request (heartbeat)';
-      case 'admin_login_ok':       return 'Admin login';
-      case 'admin_login_fail':     return 'Admin login failed';
-      case 'admin_login_rate_limited': return 'Rate-limited admin login';
-      case 'connection_log_exported':  return 'Connection log CSV exported';
-      default: return t;
-    }
-  }
-
-  function eventStyle(t) {
-    if (t === 'pin_wrong' || t === 'lockout' || t === 'lockout_blocked' ||
-        t === 'admin_login_fail' || t === 'pair_rate_limited' ||
-        t === 'request_rate_limited' || t === 'admin_login_rate_limited') {
-      return { color: '#e6a17a' };
-    }
-    if (t === 'pin_correct' || t === 'admin_login_ok') {
-      return { color: '#7adba6' };
-    }
-    return {};
-  }
-
   return (
     <div className="cm-block">
-      <p className="cm-block-title">
-        Connection log
-        <span className="cm-block-count">{total ? `(${total.toLocaleString()})` : ''}</span>
-      </p>
+      <p className="cm-block-title">Connection log</p>
       <div className="cm-toggle-help" style={{ marginBottom: 10 }}>
-        Every pairing attempt, wrong-PIN guess, lockout, and authenticated
-        request flush is logged with the source IP, OS, browser, device type
-        and user agent. Export the CSV if you need to identify an attacker
-        or hand the data off to law enforcement after an incident.
+        Every pairing attempt, wrong-PIN guess, lockout, denied API request,
+        and admin action is logged. For each event we capture the IP, real
+        IP (forwarded headers), reverse-DNS hostname, GeoIP country / city,
+        OS, browser, device type, Accept-Language, Sec-CH-UA client hints,
+        request method + path, response status, and how the request was
+        authorised. Switch to <strong>Sources</strong> for a one-row-per-source
+        rollup that surfaces unique visitors at a glance.
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button
+          className={`btn ${tab === 'events' ? 'btn-primary' : 'btn-ghost'} btn-sm`}
+          onClick={() => setTab('events')}
+        >
+          Events
+        </button>
+        <button
+          className={`btn ${tab === 'sources' ? 'btn-primary' : 'btn-ghost'} btn-sm`}
+          onClick={() => setTab('sources')}
+        >
+          Sources
+        </button>
+        <div style={{ flex: 1 }} />
         <button
           className="btn btn-primary btn-sm"
           onClick={handleDownload}
           disabled={downloading}
         >
-          {downloading ? 'Preparing CSV…' : 'Download connection log (CSV)'}
-        </button>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={refresh}
-          disabled={loading}
-        >
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {downloading ? 'Preparing CSV…' : 'Download full CSV'}
         </button>
         <button
           className="btn btn-ghost btn-sm"
           onClick={handleClear}
-          disabled={clearing || total === 0}
+          disabled={clearing}
         >
           {clearing ? 'Clearing…' : 'Clear log'}
         </button>
       </div>
 
+      {tab === 'events' ? <ConnectionEventsView /> : <ConnectionSourcesView />}
+    </div>
+  );
+}
+
+function ConnectionEventsView() {
+  const [entries, setEntries] = useState([]);
+  const [nextCursor, setNextCursor] = useState(null);
+  const [total, setTotal] = useState(0);
+  const [filteredTotal, setFilteredTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(() => new Set());
+
+  // Filters
+  const [severity, setSeverity]   = useState('all');
+  const [ip, setIp]               = useState('');
+  const [q, setQ]                 = useState('');
+  const [timeWindow, setTimeWindow] = useState('all');
+  const [eventTypes, setEventTypes] = useState([]); // empty = all
+
+  // Debounce text filters
+  const [debouncedIp, setDebouncedIp] = useState('');
+  const [debouncedQ,  setDebouncedQ]  = useState('');
+  useEffect(() => { const t = setTimeout(() => setDebouncedIp(ip), 300); return () => clearTimeout(t); }, [ip]);
+  useEffect(() => { const t = setTimeout(() => setDebouncedQ(q),   300); return () => clearTimeout(t); }, [q]);
+
+  const filters = useMemoFilters({ severity, ip: debouncedIp, q: debouncedQ, timeWindow, eventTypes });
+
+  const load = useCallback(async (cursor = null) => {
+    if (cursor) setLoadingMore(true); else setLoading(true);
+    try {
+      const data = await api.getConnectionLog({
+        ...filters,
+        limit: 100,
+        cursor: cursor || undefined,
+      });
+      const next = data?.entries || [];
+      if (cursor) {
+        setEntries(prev => [...prev, ...next]);
+      } else {
+        setEntries(next);
+        setExpanded(new Set());
+      }
+      setNextCursor(data?.next_cursor || null);
+      setTotal(data?.total || 0);
+      setFilteredTotal(data?.filtered_total || 0);
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      if (cursor) setLoadingMore(false); else setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => { load(null); }, [load]);
+
+  useEffect(() => {
+    const onCleared = () => load(null);
+    window.addEventListener('momotaro:connection-log-cleared', onCleared);
+    return () => window.removeEventListener('momotaro:connection-log-cleared', onCleared);
+  }, [load]);
+
+  function toggleExpanded(id) {
+    setExpanded(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  function toggleEventType(t) {
+    setEventTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
+  }
+
+  const allEventTypes = Object.keys(EVENT_LABELS);
+
+  return (
+    <>
+      <div className="cm-cl-filters">
+        <input
+          type="text"
+          className="settings-input cm-cl-input"
+          placeholder="Filter by IP (substring, includes forwarded-for)"
+          value={ip}
+          onChange={e => setIp(e.target.value)}
+        />
+        <input
+          type="text"
+          className="settings-input cm-cl-input"
+          placeholder="Search device name, user agent, country, path, referer…"
+          value={q}
+          onChange={e => setQ(e.target.value)}
+        />
+        <select
+          className="settings-input cm-cl-input cm-cl-input-narrow"
+          value={severity}
+          onChange={e => setSeverity(e.target.value)}
+        >
+          <option value="all">All events</option>
+          <option value="failures">Failures only</option>
+          <option value="successes">Successes only</option>
+        </select>
+        <select
+          className="settings-input cm-cl-input cm-cl-input-narrow"
+          value={timeWindow}
+          onChange={e => setTimeWindow(e.target.value)}
+        >
+          {TIME_WINDOWS.map(w => (
+            <option key={w.value} value={w.value}>{w.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="cm-cl-chips">
+        {allEventTypes.map(t => {
+          const active = eventTypes.includes(t);
+          return (
+            <button
+              key={t}
+              type="button"
+              className={`cm-cl-chip${active ? ' cm-cl-chip-on' : ''}`}
+              onClick={() => toggleEventType(t)}
+              style={active ? { borderColor: eventColor(t) || undefined, color: eventColor(t) || undefined } : undefined}
+            >
+              {eventLabel(t)}
+            </button>
+          );
+        })}
+        {eventTypes.length > 0 && (
+          <button type="button" className="cm-cl-chip-clear" onClick={() => setEventTypes([])}>
+            Clear ({eventTypes.length})
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="cm-warning" style={{ marginBottom: 8 }}>
+          Load failed: {error}
+        </div>
+      )}
+
+      <div className="cm-cl-meta">
+        {loading
+          ? 'Loading…'
+          : filteredTotal === total
+            ? `${total.toLocaleString()} events`
+            : `${filteredTotal.toLocaleString()} matching of ${total.toLocaleString()} total`}
+      </div>
+
       {entries.length === 0 ? (
         <div className="cm-empty">
-          {loading ? 'Loading…' : 'No connection events yet.'}
+          {loading ? 'Loading…' : 'No events match these filters.'}
         </div>
       ) : (
-        <div style={{ maxHeight: 360, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <div className="cm-cl-table-wrap">
+          <table className="cm-cl-table">
             <thead>
-              <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left' }}>
-                <th style={{ padding: '8px 10px' }}>When</th>
-                <th style={{ padding: '8px 10px' }}>Event</th>
-                <th style={{ padding: '8px 10px' }}>IP</th>
-                <th style={{ padding: '8px 10px' }}>OS</th>
-                <th style={{ padding: '8px 10px' }}>Browser</th>
-                <th style={{ padding: '8px 10px' }}>Device</th>
-                <th style={{ padding: '8px 10px' }}>Details</th>
+              <tr>
+                <th>When</th>
+                <th>Event</th>
+                <th>Source</th>
+                <th>Device</th>
+                <th>Request</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              {entries.map(e => (
-                <tr key={e.id} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td style={{ padding: '6px 10px', whiteSpace: 'nowrap' }}>
-                    {formatRelativeTime(e.occurred_at)}
-                  </td>
-                  <td style={{ padding: '6px 10px', whiteSpace: 'nowrap', ...eventStyle(e.event_type) }}>
-                    {eventLabel(e.event_type)}
-                  </td>
-                  <td style={{ padding: '6px 10px', fontFamily: 'monospace' }}>{e.ip || ''}</td>
-                  <td style={{ padding: '6px 10px' }}>{e.os || ''}</td>
-                  <td style={{ padding: '6px 10px' }}>{e.browser || ''}</td>
-                  <td style={{ padding: '6px 10px' }}>
-                    {[e.device_type, e.device_name, e.platform].filter(Boolean).join(' · ')}
-                  </td>
-                  <td style={{ padding: '6px 10px', color: 'var(--text-muted)' }}>{e.detail || ''}</td>
-                </tr>
-              ))}
+              {entries.map(e => {
+                const isOpen = expanded.has(e.id);
+                const flag = countryFlag(e.country);
+                const loc  = summariseLocation(e);
+                return (
+                  <React.Fragment key={e.id}>
+                    <tr className={`cm-cl-row${isOpen ? ' cm-cl-row-open' : ''}`}>
+                      <td title={formatAbsoluteTime(e.occurred_at)}>
+                        {formatRelativeTime(e.occurred_at)}
+                      </td>
+                      <td style={{ color: eventColor(e.event_type) }}>
+                        {eventLabel(e.event_type)}
+                      </td>
+                      <td>
+                        <div className="cm-cl-mono">{e.real_ip || e.ip || '—'}</div>
+                        {(loc || e.reverse_dns) && (
+                          <div className="cm-cl-sub">
+                            {flag && <span style={{ marginRight: 4 }}>{flag}</span>}
+                            {loc}
+                            {e.reverse_dns && <span className="cm-cl-rdns"> · {e.reverse_dns}</span>}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <div>{[e.device_name, e.platform].filter(Boolean).join(' · ') || '—'}</div>
+                        <div className="cm-cl-sub">
+                          {[e.device_type, e.os, e.browser].filter(Boolean).join(' · ')}
+                        </div>
+                      </td>
+                      <td>
+                        {e.method && e.path ? (
+                          <div className="cm-cl-mono cm-cl-path">
+                            <span className="cm-cl-method">{e.method}</span> {e.path}
+                            {e.status_code != null && (
+                              <span className="cm-cl-status"> {e.status_code}</span>
+                            )}
+                          </div>
+                        ) : e.detail ? (
+                          <div className="cm-cl-sub">{e.detail}</div>
+                        ) : (
+                          <span className="cm-cl-sub">—</span>
+                        )}
+                      </td>
+                      <td className="cm-cl-expand-col">
+                        <button
+                          type="button"
+                          className="cm-cl-expand-btn"
+                          onClick={() => toggleExpanded(e.id)}
+                          aria-label={isOpen ? 'Collapse' : 'Expand'}
+                        >
+                          {isOpen ? '▾' : '▸'}
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="cm-cl-detail-row">
+                        <td colSpan={6}>
+                          <EventDetail event={e} />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
-      {entries.length > 0 && entries.length < total && (
-        <div className="cm-toggle-help" style={{ marginTop: 8 }}>
-          Showing {entries.length} of {total.toLocaleString()} events. The CSV
-          download contains all of them.
+
+      {nextCursor && (
+        <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => load(nextCursor)}
+            disabled={loadingMore}
+          >
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Wrap filter-object construction in a stable reference so `load`'s
+// useCallback doesn't recreate on every keystroke pass-through.
+function useMemoFilters(args) {
+  return React.useMemo(() => {
+    const out = {};
+    if (args.severity && args.severity !== 'all') out.severity = args.severity;
+    if (args.ip)        out.ip = args.ip;
+    if (args.q)         out.q  = args.q;
+    if (args.eventTypes && args.eventTypes.length > 0) out.event_type = args.eventTypes.join(',');
+    if (args.timeWindow && args.timeWindow !== 'all') {
+      const def = TIME_WINDOWS.find(w => w.value === args.timeWindow);
+      if (def?.seconds) out.since = Math.floor(Date.now() / 1000) - def.seconds;
+    }
+    return out;
+  }, [args.severity, args.ip, args.q, args.timeWindow, args.eventTypes.join(',')]);
+}
+
+function EventDetail({ event: e }) {
+  const hints = tryParseClientHints(e.client_hints);
+  const rows = [
+    ['Occurred at',     formatAbsoluteTime(e.occurred_at)],
+    ['Event type',      e.event_type],
+    ['Auth kind',       e.auth_kind || '—'],
+    ['IP (req.ip)',     e.ip],
+    ['Real IP',         e.real_ip],
+    ['Forwarded-For',   e.forwarded_for],
+    ['Reverse DNS',     e.reverse_dns],
+    ['Country',         e.country ? `${countryFlag(e.country)} ${e.country}` : ''],
+    ['Region',          e.region],
+    ['City',            e.city],
+    ['Timezone',        e.timezone],
+    ['OS',              e.os],
+    ['Browser',         e.browser],
+    ['Device type',     e.device_type],
+    ['Platform',        e.platform],
+    ['Device name',     e.device_name],
+    ['Accept-Language', e.accept_language],
+    ['DNT',             e.dnt == null ? '' : (e.dnt ? '1 (Do-Not-Track)' : '0')],
+    ['Method',          e.method],
+    ['Path',            e.path],
+    ['Status code',     e.status_code == null ? '' : String(e.status_code)],
+    ['Protocol',        e.protocol],
+    ['Host',            e.host],
+    ['Origin',          e.origin],
+    ['Referer',         e.referer],
+    ['Pairing ID',      e.pairing_id],
+    ['Paired client',   e.paired_client_id == null ? '' : `#${e.paired_client_id}`],
+    ['Detail',          e.detail],
+    ['User agent',      e.user_agent],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== '');
+
+  return (
+    <div className="cm-cl-detail">
+      <dl className="cm-cl-detail-grid">
+        {rows.map(([label, value]) => (
+          <React.Fragment key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      {hints && (
+        <div className="cm-cl-detail-hints">
+          <div className="cm-cl-detail-hints-title">Sec-CH-UA client hints</div>
+          <pre className="cm-cl-detail-hints-pre">
+            {JSON.stringify(hints, null, 2)}
+          </pre>
         </div>
       )}
     </div>
+  );
+}
+
+function ConnectionSourcesView() {
+  const [sources, setSources] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+  const [filter, setFilter]     = useState('');
+  const [sort, setSort]             = useState('last_seen'); // last_seen | event_count | failure_count | first_seen
+  const [timeWindow, setTimeWindow] = useState('30d');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const def = TIME_WINDOWS.find(w => w.value === timeWindow);
+      const since = def?.seconds
+        ? Math.floor(Date.now() / 1000) - def.seconds
+        : undefined;
+      const data = await api.getConnectionSources(since);
+      setSources(data?.sources || []);
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [timeWindow]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const onCleared = () => load();
+    window.addEventListener('momotaro:connection-log-cleared', onCleared);
+    return () => window.removeEventListener('momotaro:connection-log-cleared', onCleared);
+  }, [load]);
+
+  const filtered = React.useMemo(() => {
+    const f = filter.trim().toLowerCase();
+    let rows = sources;
+    if (f) {
+      rows = rows.filter(s =>
+        [s.source_ip, s.reverse_dns, s.country, s.city, s.region,
+         s.device_name, s.user_agent, s.os, s.browser, s.platform]
+          .some(v => v && String(v).toLowerCase().includes(f))
+      );
+    }
+    const sorted = rows.slice().sort((a, b) => {
+      const av = a[sort] ?? 0;
+      const bv = b[sort] ?? 0;
+      return bv - av;
+    });
+    return sorted;
+  }, [sources, filter, sort]);
+
+  return (
+    <>
+      <div className="cm-cl-filters">
+        <input
+          type="text"
+          className="settings-input cm-cl-input"
+          placeholder="Filter by IP, hostname, country, device, browser…"
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+        />
+        <select
+          className="settings-input cm-cl-input cm-cl-input-narrow"
+          value={sort}
+          onChange={e => setSort(e.target.value)}
+        >
+          <option value="last_seen">Sort: most recent</option>
+          <option value="first_seen">Sort: oldest</option>
+          <option value="event_count">Sort: most events</option>
+          <option value="failure_count">Sort: most failures</option>
+        </select>
+        <select
+          className="settings-input cm-cl-input cm-cl-input-narrow"
+          value={timeWindow}
+          onChange={e => setTimeWindow(e.target.value)}
+        >
+          {TIME_WINDOWS.filter(w => w.value !== 'all').map(w => (
+            <option key={w.value} value={w.value}>{w.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {error && (
+        <div className="cm-warning" style={{ marginBottom: 8 }}>
+          Load failed: {error}
+        </div>
+      )}
+
+      <div className="cm-cl-meta">
+        {loading ? 'Loading…' :
+          `${filtered.length.toLocaleString()} unique source${filtered.length === 1 ? '' : 's'}` +
+          (filter ? ` matching "${filter}"` : '')
+        }
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="cm-empty">
+          {loading ? 'Loading…' : 'No sources in this window.'}
+        </div>
+      ) : (
+        <div className="cm-cl-table-wrap">
+          <table className="cm-cl-table">
+            <thead>
+              <tr>
+                <th>Source IP / hostname</th>
+                <th>Location</th>
+                <th>Device</th>
+                <th>Events</th>
+                <th>First seen</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(s => {
+                const flag = countryFlag(s.country);
+                const loc  = summariseLocation(s);
+                return (
+                  <tr key={`${s.source_ip}|${s.paired_client_id ?? ''}|${s.user_agent ?? ''}`}>
+                    <td>
+                      <div className="cm-cl-mono">{s.source_ip || '—'}</div>
+                      {s.reverse_dns && <div className="cm-cl-sub">{s.reverse_dns}</div>}
+                      {s.paired_client_id && (
+                        <div className="cm-cl-sub cm-cl-paired-badge">
+                          Paired client #{s.paired_client_id}
+                          {s.device_name ? ` · ${s.device_name}` : ''}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {flag && <span style={{ marginRight: 4 }}>{flag}</span>}
+                      {loc || <span className="cm-cl-sub">—</span>}
+                      {s.timezone && <div className="cm-cl-sub">{s.timezone}</div>}
+                    </td>
+                    <td>
+                      <div>{[s.device_type, s.platform].filter(Boolean).join(' · ') || '—'}</div>
+                      <div className="cm-cl-sub">
+                        {[s.os, s.browser].filter(Boolean).join(' · ')}
+                      </div>
+                    </td>
+                    <td>
+                      <div>{(s.event_count || 0).toLocaleString()} total</div>
+                      {s.failure_count > 0 && (
+                        <div className="cm-cl-sub" style={{ color: '#e6a17a' }}>
+                          {s.failure_count} failure{s.failure_count === 1 ? '' : 's'}
+                        </div>
+                      )}
+                      {s.pair_count > 0 && (
+                        <div className="cm-cl-sub" style={{ color: '#7adba6' }}>
+                          {s.pair_count} pair{s.pair_count === 1 ? '' : 's'}
+                        </div>
+                      )}
+                      {s.admin_login_count > 0 && (
+                        <div className="cm-cl-sub">
+                          {s.admin_login_count} admin login{s.admin_login_count === 1 ? '' : 's'}
+                        </div>
+                      )}
+                    </td>
+                    <td title={formatAbsoluteTime(s.first_seen)}>
+                      {formatRelativeTime(s.first_seen)}
+                    </td>
+                    <td title={formatAbsoluteTime(s.last_seen)}>
+                      {formatRelativeTime(s.last_seen)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

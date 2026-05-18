@@ -465,6 +465,36 @@
 .db-op-status-ok  { color: var(--accent); }
 .db-op-status-err { color: #f44336; }
 
+/* Inline status badge with dismiss ×. Set to flex so the × hugs the right
+   edge regardless of message length. */
+.db-op-status-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.db-op-elapsed {
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+.db-op-dismiss {
+  flex-shrink: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.db-op-dismiss:hover {
+  opacity: 1;
+}
+
 /* ── System Logs viewer ── */
 .logs-viewer {
   background: var(--bg-card);
@@ -823,4 +853,211 @@
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 12px;
+}
+
+/* ── Connection log (Events + Sources) ─────────────────────────────────── */
+
+.cm-cl-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.cm-cl-input {
+  flex: 1 1 220px;
+  min-width: 160px;
+  font-size: 12px;
+}
+
+.cm-cl-input-narrow {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+
+.cm-cl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.cm-cl-chip {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cm-cl-chip:hover {
+  background: var(--bg-hover, var(--bg-secondary));
+  color: var(--text-primary);
+}
+
+.cm-cl-chip-on {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.cm-cl-chip-clear {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  cursor: pointer;
+}
+
+.cm-cl-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.cm-cl-table-wrap {
+  max-height: 480px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.cm-cl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.cm-cl-table thead th {
+  background: var(--bg-secondary);
+  text-align: left;
+  padding: 8px 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.cm-cl-table tbody td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.cm-cl-row:hover {
+  background: var(--bg-secondary);
+}
+
+.cm-cl-row-open {
+  background: var(--bg-secondary);
+}
+
+.cm-cl-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.cm-cl-mono {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.cm-cl-rdns {
+  color: var(--text-muted);
+}
+
+.cm-cl-path {
+  word-break: break-all;
+}
+
+.cm-cl-method {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.cm-cl-status {
+  color: var(--text-muted);
+}
+
+.cm-cl-expand-col {
+  width: 32px;
+  text-align: right;
+}
+
+.cm-cl-expand-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+
+.cm-cl-expand-btn:hover {
+  color: var(--text-primary);
+}
+
+.cm-cl-detail-row td {
+  background: var(--bg-tertiary, var(--bg-secondary));
+  border-top: 0;
+  padding-top: 0;
+}
+
+.cm-cl-detail {
+  padding: 8px 4px 14px;
+}
+
+.cm-cl-detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 14px;
+  row-gap: 4px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.cm-cl-detail-grid dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.cm-cl-detail-grid dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+  font-family: 'Courier New', monospace;
+}
+
+.cm-cl-detail-hints {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.cm-cl-detail-hints-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.cm-cl-detail-hints-pre {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-primary);
+  font-family: 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.cm-cl-paired-badge {
+  color: var(--accent);
 }

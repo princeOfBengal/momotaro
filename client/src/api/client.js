@@ -606,11 +606,30 @@ export const api = {
     apiFetch(`/api/admin/pairing-pin-lockouts/${encodeURIComponent(ip)}`, { method: 'DELETE' }),
 
   // Forensic connection log — every pairing attempt, wrong-PIN guess,
-  // lockout, and authenticated request flush is logged. The CSV bundle is
-  // intended as an incident-response artefact (admin downloads it after a
-  // suspicious lockout to identify the attacker).
-  getConnectionLog: (limit = 200) =>
-    apiFetch(`/api/admin/connection-log?limit=${encodeURIComponent(limit)}`),
+  // lockout, denied request, and admin write is logged with the
+  // requesting IP, OS, browser, device type, Accept-Language, reverse-DNS,
+  // GeoIP country/city, client hints, request path + response status.
+  // The CSV bundle is intended as an incident-response artefact (admin
+  // downloads it after a suspicious lockout to identify the attacker).
+  //
+  // `filters` accepts: limit, cursor, event_type (comma-separated),
+  // severity ('all' | 'failures' | 'successes'), ip, q, paired_client_id,
+  // since (unix sec), until (unix sec).
+  getConnectionLog: (filters = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return apiFetch(`/api/admin/connection-log${suffix}`);
+  },
+  // Grouped-by-source rollup: one row per unique (real_ip, UA) pair with
+  // first/last seen, country, browser, event counts, and a paired-client
+  // link when the source is authenticated.
+  getConnectionSources: (since) => {
+    const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+    return apiFetch(`/api/admin/connection-log/sources${qs}`);
+  },
   clearConnectionLog: () =>
     apiFetch('/api/admin/connection-log', { method: 'DELETE' }),
   downloadConnectionLogCsv: async () => {

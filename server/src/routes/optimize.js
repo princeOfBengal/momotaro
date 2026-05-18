@@ -7,6 +7,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { parseChapterInfo, detectChapterType } = require('../scanner/chapterParser');
 const { scanMangaDirectory } = require('../scanner/libraryScanner');
+const taskRegistry = require('../admin/taskRegistry');
 
 const router = express.Router();
 
@@ -195,42 +196,87 @@ async function performOptimize(manga) {
 }
 
 // POST /api/manga/:id/optimize
+//
+// Returns 202 with the initial task state. Runs in the background — disk
+// I/O for a folder-to-CBZ conversion can take a while on a large manga
+// with hundreds of chapters. Keyed by manga_id so two different manga can
+// optimize concurrently; a second start for the same manga returns 409.
 router.post('/manga/:id/optimize', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  const mangaId = parseInt(req.params.id, 10);
+  if (!Number.isFinite(mangaId)) return res.status(400).json({ error: 'Invalid manga id' });
+
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(mangaId);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
   if (!fs.existsSync(manga.path)) {
     return res.status(400).json({ error: 'Manga directory not found on disk' });
   }
 
-  const summary = await performOptimize(manga);
-  res.json({ data: summary });
+  const result = taskRegistry.start('optimize-manga', mangaId, async () => {
+    return await performOptimize(manga);
+  });
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Optimize already in progress for this manga', status: result.state });
+  }
+  res.status(202).json({ data: { status: result.state } });
+}));
+
+router.get('/manga/:id/optimize/status', asyncWrapper(async (req, res) => {
+  const mangaId = parseInt(req.params.id, 10);
+  if (!Number.isFinite(mangaId)) return res.status(400).json({ error: 'Invalid manga id' });
+  res.json({ data: taskRegistry.get('optimize-manga', mangaId) });
 }));
 
 // POST /api/libraries/:id/bulk-optimize — optimize every manga in a library
+//
+// Returns 202 with the initial task state. The runner walks the library
+// and reports progress as `(processed, total, currentMangaName)` so the UI
+// can show "Optimizing 242 / 1,847 — One Piece". Keyed by library_id so
+// two libraries can bulk-optimize concurrently; a second start for the
+// same library returns 409.
 router.post('/libraries/:id/bulk-optimize', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
+  const libraryId = parseInt(req.params.id, 10);
+  if (!Number.isFinite(libraryId)) return res.status(400).json({ error: 'Invalid library id' });
+
+  const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(libraryId);
   if (!library) return res.status(404).json({ error: 'Library not found' });
 
   const mangaList = db.prepare('SELECT * FROM manga WHERE library_id = ? AND path IS NOT NULL').all(library.id);
 
-  // Respond immediately — the optimize runs in the background
-  res.json({ message: 'Bulk optimize started', total: mangaList.length });
-
-  for (const manga of mangaList) {
-    if (!fs.existsSync(manga.path)) {
-      console.warn(`[BulkOptimize] Skipping "${manga.folder_name}" — path not found`);
-      continue;
+  const result = taskRegistry.start('bulk-optimize-library', libraryId, async (report) => {
+    let processed = 0;
+    let errors = 0;
+    report(0, mangaList.length, library.name);
+    for (const manga of mangaList) {
+      processed++;
+      if (!fs.existsSync(manga.path)) {
+        console.warn(`[BulkOptimize] Skipping "${manga.folder_name}" — path not found`);
+        report(processed, mangaList.length, manga.folder_name);
+        continue;
+      }
+      try {
+        const summary = await performOptimize(manga);
+        console.log(`[BulkOptimize] "${manga.folder_name}": renamed=${summary.renamed} converted=${summary.converted} errors=${summary.errors.length}`);
+      } catch (err) {
+        errors++;
+        console.warn(`[BulkOptimize] Error for "${manga.folder_name}": ${err.message}`);
+      }
+      report(processed, mangaList.length, manga.folder_name);
     }
-    try {
-      const summary = await performOptimize(manga);
-      console.log(`[BulkOptimize] "${manga.folder_name}": renamed=${summary.renamed} converted=${summary.converted} errors=${summary.errors.length}`);
-    } catch (err) {
-      console.warn(`[BulkOptimize] Error for "${manga.folder_name}": ${err.message}`);
-    }
+    console.log(`[BulkOptimize] Finished for library "${library.name}" (${mangaList.length} entries)`);
+    return { total: mangaList.length, errors };
+  });
+  if (!result.ok) {
+    return res.status(409).json({ error: 'Bulk optimize already in progress for this library', status: result.state });
   }
-  console.log(`[BulkOptimize] Finished for library "${library.name}" (${mangaList.length} entries)`);
+  res.status(202).json({ data: { status: result.state } });
+}));
+
+router.get('/libraries/:id/bulk-optimize/status', asyncWrapper(async (req, res) => {
+  const libraryId = parseInt(req.params.id, 10);
+  if (!Number.isFinite(libraryId)) return res.status(400).json({ error: 'Invalid library id' });
+  res.json({ data: taskRegistry.get('bulk-optimize-library', libraryId) });
 }));
 
 module.exports = router;

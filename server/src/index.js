@@ -8,12 +8,13 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { getDb } = require('./db/database');
-const { runFullScan } = require('./scanner/libraryScanner');
+const { runFullScan, getScanStatus } = require('./scanner/libraryScanner');
 const { migrateToSharded } = require('./scanner/thumbnailPaths');
 const cbzCache = require('./scanner/cbzCache');
 const cbzCacheSchedule = require('./scanner/cbzCacheSchedule');
 const downloader = require('./downloader/queue');
 const scheduler = require('./scheduler');
+const taskRegistry = require('./admin/taskRegistry');
 const { startWatcher } = require('./watcher');
 const { errorHandler } = require('./middleware/errorHandler');
 
@@ -33,6 +34,7 @@ const adminAuthRoutes = require('./routes/adminAuth');
 const networkRoutes = require('./routes/network');
 const appVersionRoutes = require('./routes/appVersion');
 const { requireClientOrAdmin, enforceLanOnlyMode } = require('./middleware/auth');
+const { requestLogger } = require('./middleware/requestLogger');
 const upnp = require('./network/upnp');
 
 const app = express();
@@ -97,6 +99,13 @@ app.use('/thumbnails', requireClientOrAdmin, express.static(config.THUMBNAIL_DIR
 // `version.json`); no other paths leak.
 fs.mkdirSync(config.DOWNLOADS_DIR, { recursive: true });
 app.use('/downloads', express.static(config.DOWNLOADS_DIR));
+
+// Forensic request logger. Mounted before any /api router so a request
+// denied at the auth layer (401 / 403) still has its outcome captured.
+// Successful 2xx reads are deliberately NOT logged here — they would
+// flood the table with no security value. See middleware/requestLogger.js
+// for the full filter rules.
+app.use('/api', requestLogger);
 
 // Health check — public, used by clients to probe whether a host is a
 // Momotaro server before attempting pairing.
@@ -166,6 +175,13 @@ async function start() {
   // Initialize database first so cache init can read the user-configured
   // cache cap from the settings table.
   const db = getDb();
+
+  // Reconcile persisted admin-task state. Any row still marked 'running'
+  // means the process died mid-task (e.g., a multi-minute VACUUM the
+  // operator force-restarted). Flip it to 'interrupted' so a status poll
+  // from the UI returns an honest answer instead of a stale heartbeat.
+  taskRegistry.init();
+
   const savedLimitRow = db.prepare(
     "SELECT value FROM settings WHERE key = 'cbz_cache_limit_bytes'"
   ).pluck().get();
@@ -243,6 +259,34 @@ async function start() {
     runFullScan({ trigger: 'startup' })
       .catch(err => console.error('[Scan] Startup scan error:', err.message));
   }
+
+  // Daily PRAGMA optimize. Keeps the query-planner stats fresh on a
+  // long-lived connection per SQLite's recommendation for apps that hold
+  // a single connection across years of uptime. Most calls are millisecond
+  // no-ops; ANALYZE only re-runs on tables SQLite considers stale.
+  //
+  // Defer the first run by 5 min so cold-boot perceived speed isn't
+  // affected by the initial pass (which can take a few seconds on a
+  // never-analyzed DB). Skip if a scan is currently in progress —
+  // ANALYZE briefly write-locks sqlite_stat1, and the scan is the most
+  // write-heavy op in the app; cheaper to wait until tomorrow.
+  let optimizeRunCount = 0;
+  function runDbOptimize() {
+    try {
+      if (getScanStatus().running) return; // try again on the next tick
+      db.pragma('optimize');
+      optimizeRunCount++;
+      if (optimizeRunCount === 1) {
+        console.log('[DB] PRAGMA optimize ran (first run after startup).');
+      }
+    } catch (err) {
+      console.warn(`[DB] PRAGMA optimize failed: ${err.message}`);
+    }
+  }
+  setTimeout(() => {
+    runDbOptimize();
+    setInterval(runDbOptimize, 24 * 60 * 60 * 1000).unref();
+  }, 5 * 60 * 1000).unref();
 }
 
 start().catch(err => {

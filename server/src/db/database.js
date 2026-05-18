@@ -213,6 +213,38 @@ function migrate(db) {
   createMangaSourceUrlsTable(db);
   createMangaSchedulesTable(db);
   createAuthTables(db);
+  createAdminTasksTable(db);
+}
+
+/**
+ * Durable state for long-running admin actions (VACUUM, cache wipe, manga
+ * optimize, thumbnail regeneration). One row per task kind — kind is the
+ * primary key, so re-running an op overwrites the previous result. State
+ * lives here only for the kinds the in-process registry opts into
+ * persisting (see [server/src/admin/taskRegistry.js]); short, cheap ops
+ * keep their state in memory only.
+ *
+ * On startup `taskRegistry.init()` flips any row still marked 'running' to
+ * 'interrupted' with a synthetic error, so a user who restarts the server
+ * mid-VACUUM doesn't see a ghost "Running…" indicator forever.
+ *
+ * status values:
+ *   'running'      — task started; runner has not yet resolved/rejected
+ *   'done'         — runner resolved; result_json holds its return value
+ *   'failed'       — runner rejected; error holds the message
+ *   'interrupted'  — process died while the task was running (set at boot)
+ */
+function createAdminTasksTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS admin_tasks (
+      kind         TEXT    PRIMARY KEY,
+      status       TEXT    NOT NULL,
+      started_at   INTEGER,
+      finished_at  INTEGER,
+      result_json  TEXT,
+      error        TEXT
+    );
+  `);
 }
 
 /**
@@ -303,6 +335,17 @@ function createAuthTables(db) {
   addColumnIfMissing(db, 'paired_clients', 'first_seen_at',  'INTEGER');
   addColumnIfMissing(db, 'paired_clients', 'first_seen_ip',  'TEXT');
   addColumnIfMissing(db, 'paired_clients', 'request_count',  'INTEGER NOT NULL DEFAULT 0');
+  // Extended fingerprint on the per-client row. These mirror the latest
+  // values seen on `connection_attempts` so the Paired Devices list can
+  // show country / hostname / language without joining the event table.
+  addColumnIfMissing(db, 'paired_clients', 'accept_language',   'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_real_ip',      'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_reverse_dns',  'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_country',      'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_region',       'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_city',         'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_timezone',     'TEXT');
+  addColumnIfMissing(db, 'paired_clients', 'last_client_hints', 'TEXT');
 
   // Forensic columns on pending_pairings — captured at the start of the
   // handshake so even failed attempts have a fingerprint in the log.
@@ -310,6 +353,48 @@ function createAuthTables(db) {
   addColumnIfMissing(db, 'pending_pairings', 'os',          'TEXT');
   addColumnIfMissing(db, 'pending_pairings', 'browser',     'TEXT');
   addColumnIfMissing(db, 'pending_pairings', 'device_type', 'TEXT');
+
+  // Extended forensic captures on every connection_attempts row. The base
+  // schema in createAuthTables() above keeps the minimal set; everything
+  // added below is appended via ALTER so pre-existing installs upgrade in
+  // place without losing the historical event stream.
+  //
+  //   accept_language  — first language tag from Accept-Language (e.g. "en-US")
+  //   referer / origin — where the request claims to come from
+  //   forwarded_for    — raw X-Forwarded-For chain when behind a proxy
+  //   real_ip          — best-guess true source IP (CF-Connecting-IP > X-Real-IP > XFF[0])
+  //   client_hints     — JSON of Sec-CH-UA-* hints (platform, mobile, model, ...)
+  //   method / path    — request line (request-level events only)
+  //   status_code      — response status (request-level events only)
+  //   protocol / host  — scheme + host header at request time
+  //   reverse_dns      — best-effort PTR lookup of real_ip (cached)
+  //   country/region/city/timezone — GeoIP lookup of real_ip (offline DB)
+  //   dnt              — Do-Not-Track header (1 if set)
+  //   auth_kind        — open|admin|lan|client|none — how the request was authorised
+  addColumnIfMissing(db, 'connection_attempts', 'accept_language', 'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'referer',         'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'origin',          'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'forwarded_for',   'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'real_ip',         'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'client_hints',    'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'method',          'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'path',            'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'status_code',     'INTEGER');
+  addColumnIfMissing(db, 'connection_attempts', 'protocol',        'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'host',            'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'reverse_dns',     'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'country',         'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'region',          'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'city',            'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'timezone',        'TEXT');
+  addColumnIfMissing(db, 'connection_attempts', 'dnt',             'INTEGER');
+  addColumnIfMissing(db, 'connection_attempts', 'auth_kind',       'TEXT');
+
+  // Compound index for the "Sources" rollup view (group by real_ip + UA).
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connection_attempts_real_ip
+      ON connection_attempts(real_ip);
+  `);
 }
 
 /**

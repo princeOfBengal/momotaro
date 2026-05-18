@@ -1,0 +1,67 @@
+/* Top-of-app degradation banner. Sticky so it stays visible while the
+   user navigates / scrolls; visually subordinate to the main app chrome
+   but loud enough to explain why the rest of the UI is slow. */
+
+.admin-task-banner {
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: #4a3a14;
+  color: #ffe18b;
+  border-bottom: 1px solid #6b5520;
+  font-size: 13px;
+  line-height: 1.4;
+  /* Subtle entrance — slides down once when the banner first appears.
+     No exit animation; on completion the banner just unmounts. */
+  animation: admin-task-banner-in 200ms ease-out;
+}
+
+@keyframes admin-task-banner-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+.admin-task-banner-icon {
+  flex-shrink: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.admin-task-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-task-banner-other {
+  opacity: 0.85;
+}
+
+.admin-task-banner-detail {
+  opacity: 0.8;
+  font-weight: normal;
+}
+
+.admin-task-banner-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  font-size: 12px;
+}
+
+/* Mobile: drop the secondary detail so the line stays one row tall. */
+@media (max-width: 640px) {
+  .admin-task-banner-detail {
+    display: none;
+  }
+  .admin-task-banner {
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+}

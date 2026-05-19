@@ -13,25 +13,36 @@ Android SDK on your local machine.
 | Tool | Version | Notes |
 | --- | --- | --- |
 | Node.js | 18+ | You already have it; same Node that builds the web client. |
-| **JDK 17 or 21** | LTS | Capacitor 6/7 require 17+. JDK 13 (current on this box) will *not* work — install Temurin 17 from [adoptium.net](https://adoptium.net/) and set `JAVA_HOME` to that install. |
+| **JDK 21 (LTS)** | exactly 21 | `@capacitor/filesystem` 8.x declares `kotlin { jvmToolchain(21) }`, which Gradle's toolchain matcher refuses to satisfy with any other major. JDK 17 is no longer enough; JDK 24+ breaks AGP 8.x's `JdkImageTransform` (jlink fails on Android SDK 36's `core-for-system-modules.jar`). Install Microsoft OpenJDK 21 via `winget install Microsoft.OpenJDK.21`, or grab Temurin 21 from [adoptium.net](https://adoptium.net/). |
 | **Android Studio** | latest | Easiest way to get the Android SDK, build-tools, and an emulator. [developer.android.com/studio](https://developer.android.com/studio) |
 | `ANDROID_HOME` env var | — | After installing Android Studio, set this to e.g. `C:\Users\<you>\AppData\Local\Android\Sdk`. |
+| `JAVA_HOME` env var | points at JDK 21 | Even if you have a newer JDK on PATH, pin `JAVA_HOME` to the JDK 21 install before running Gradle (see commands below). On Windows the path is typically `C:\Program Files\Microsoft\jdk-21.x.y.z-hotspot`. |
 
-In Android Studio, open the SDK Manager and ensure **SDK Platform 34** (or
+In Android Studio, open the SDK Manager and ensure **SDK Platform 36** (or
 whatever Capacitor's `compileSdkVersion` says) and the latest **Build Tools**
 are installed.
 
 ## Build steps
 
 ```bash
+# 0. Pin Gradle's JDK to 21. JDK 26+ breaks AGP 8's JdkImageTransform; JDK 17
+#    no longer satisfies @capacitor/filesystem's toolchain. On Windows:
+#    set JAVA_HOME="C:\Program Files\Microsoft\jdk-21.0.11.10-hotspot"
+#    On macOS/Linux:
+#    export JAVA_HOME="$(/usr/libexec/java_home -v 21)"    # macOS
+#    export JAVA_HOME=/usr/lib/jvm/temurin-21-jdk          # Linux
+
 # 1. Build the React app (always do this first; the APK packs whatever is
 #    currently in client/dist).
 cd client
 npm install
 npm run build
 
-# 2. Copy the freshly built web assets into the Android project.
-npx cap copy android
+# 2. Sync web assets + Capacitor plugin registrations into the Android
+#    project. Use `sync` (not `copy`) whenever package.json's dependencies
+#    changed since the last build — `copy` skips the plugin step and the
+#    new native plugins won't be linked.
+npx cap sync android
 
 # 3. Build the debug APK.
 cd android
@@ -70,8 +81,11 @@ cp client/android/key.properties.example client/android/key.properties
 #    key; without it, the task fails with a clear error rather than
 #    silently producing an unsigned APK.
 
-# 4. Build the signed release APK:
-cd client && npm run build && npx cap copy android
+# 4. Build the signed release APK. Same JDK 21 pin + `cap sync` rules as
+#    Build steps above.
+export JAVA_HOME=...              # macOS / Linux  (pin to JDK 21)
+$env:JAVA_HOME="..."              # PowerShell    (same idea)
+cd client && npm run build && npx cap sync android
 cd android && ./gradlew assembleRelease
 ```
 
@@ -98,12 +112,26 @@ cp client/android/app/build/outputs/apk/release/app-release.apk \
    data/downloads/momotaro.apk
 cat > data/downloads/version.json <<'EOF'
 {
-  "version": "1.1",
-  "released_at": "2026-05-15",
+  "version": "1.5",
+  "released_at": "2026-05-19",
   "notes": "Brief change summary shown in the update banner."
 }
 EOF
 ```
+
+After dropping the files, double-check the APK manifest matches what
+`version.json` claims:
+
+```bash
+"$ANDROID_HOME/build-tools/<latest>/aapt" dump badging data/downloads/momotaro.apk \
+  | grep ^package:
+# Expected (for v1.5):
+# package: name='dev.momotaro.app' versionCode='6' versionName='1.5' ...
+```
+
+Mismatched `versionName` between the APK manifest and `version.json` is the
+classic release foot-gun — every paired client will see the update banner
+forever because the in-app check compares `data.version` to `APP_VERSION`.
 
 Existing paired clients will see the "Update available" banner on their next
 launch and tapping it opens the APK URL in the system browser — Android
@@ -173,24 +201,67 @@ request as `Authorization: Bearer <token>`.
 After any change to the web code:
 
 ```bash
+# Pin JAVA_HOME at JDK 21 first (see Build steps above).
 cd client
 npm run build
-npx cap copy android
+npx cap sync android        # prefer `sync` over `copy` — see note below
 cd android && ./gradlew assembleDebug
 ```
 
-`npx cap copy` is fast — it just refreshes `android/app/src/main/assets/public`.
-Use `npx cap sync` instead if you also added or upgraded a Capacitor plugin.
+`npx cap copy` is fast — it just refreshes
+`android/app/src/main/assets/public` — but it does NOT re-register Capacitor
+plugins. Use `npx cap sync` whenever `package.json`'s dependencies have
+changed, otherwise newly-installed native plugins won't be linked into the
+APK and JS calls to them will silently no-op at runtime. Pure web-code
+changes (no plugin changes) can use `cap copy` for speed.
 
 ## Troubleshooting
 
-- **"unsupported class file version"** during Gradle: your JDK is older than
-  17. Install Temurin 17 and update `JAVA_HOME`.
+- **"unsupported class file version"** during Gradle: your JDK is too old.
+  Capacitor 8 + the Filesystem plugin require JDK 21 specifically — install
+  Microsoft OpenJDK 21 (`winget install Microsoft.OpenJDK.21` on Windows,
+  Temurin 21 from [adoptium.net](https://adoptium.net/) elsewhere) and
+  pin `JAVA_HOME` at it before running Gradle.
+- **"Cannot add extension with name 'kotlin', as there is an extension already
+  registered with that name"**: AGP 9.x integrated Kotlin DSL registration
+  conflicts with the explicit `apply plugin: 'kotlin-android'` that
+  `@capacitor/filesystem` does in its own build.gradle. Keep
+  [client/android/build.gradle](client/android/build.gradle)'s buildscript
+  classpath at AGP **8.13.0** (not 9.x) and declare a single
+  `kotlin-gradle-plugin` classpath at the root so every subproject shares
+  one Kotlin plugin instance.
+- **"Cannot find a Java installation … matching languageVersion=21"**: the
+  `@capacitor/filesystem` plugin's `kotlin { jvmToolchain(21) }` demands
+  exactly JDK 21 and Gradle's matcher is strict — JDK 17, 22, 26 etc. all
+  refuse to substitute. Either install JDK 21 (see first bullet) or keep
+  the `subprojects { afterEvaluate { … } }` override in the root
+  build.gradle that retargets every `kotlin-android` subproject at the JDK
+  Gradle is actually running on. The override is already in place; don't
+  remove it without understanding why it exists.
+- **"Error while executing process … jlink.exe" / "Failed to transform
+  core-for-system-modules.jar"**: AGP 8.x's `JdkImageTransform` calls
+  `jlink` from your active JDK against Android SDK 36's
+  `core-for-system-modules.jar`. JDK 24+'s stricter module system rejects
+  the transform; the fix is to run Gradle under JDK 21 (`JAVA_HOME`
+  override). No code change needed.
+- **`PluginCall.reject(String, Throwable)` doesn't exist**: Capacitor 8's
+  `PluginCall.reject` only has `(String)`, `(String, String)`,
+  `(String, JSObject)`, and `(String, Exception)` overloads. Catch
+  `Exception` (not `Throwable`) in plugin code so `t` matches the
+  expected overload. Older JDKs were lenient about the
+  Throwable→Exception inference; JDK 21 isn't.
 - **"SDK location not found"**: set `ANDROID_HOME` (or create
   `client/android/local.properties` with `sdk.dir=/path/to/sdk`).
 - **"Manifest merger failed"** after changing `appId`: run
   `npx cap sync android` and rebuild — Capacitor rewrites the manifest
   from the config.
+- **Update banner keeps appearing after install**: `versionName` in the
+  installed APK doesn't match what `data/downloads/version.json` advertises.
+  Verify with the `aapt dump badging` snippet in Self-hosted distribution
+  above. Common cause: re-running `assembleRelease` after editing
+  `version.json` but forgetting to bump `versionCode`/`versionName` in
+  [client/android/app/build.gradle](client/android/app/build.gradle) +
+  [client/src/version.js](client/src/version.js).
 - **APK installs but pairing fails with a network error**: the WebView
   can't reach your server URL. From the Android device, try opening the
   same URL in Chrome. Common causes: server bound to `127.0.0.1` (use

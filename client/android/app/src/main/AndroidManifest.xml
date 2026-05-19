@@ -29,9 +29,36 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
+
+        <!--
+            Headless foreground service that keeps the JS download queue
+            alive while the user has the app backgrounded. The actual
+            queue runs in the WebView (see DownloadKeepAlivePlugin.java);
+            the service just holds the process foreground so Android
+            doesn't reclaim it under Doze / memory pressure.
+
+            foregroundServiceType="dataSync" matches the Android 10+
+            requirement to declare WHY a service is foreground — our work
+            is "transferring user data over the network", which `dataSync`
+            covers without pulling in location / media-playback perms.
+        -->
+        <service
+            android:name=".DownloadKeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required for the headless download-keepalive service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 (API 34) split FOREGROUND_SERVICE into typed variants. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ requires a runtime grant to actually show a notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets the queue observe network-type changes (Wi-Fi only mode). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 </manifest>

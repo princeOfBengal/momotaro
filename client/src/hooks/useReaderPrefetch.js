@@ -4,6 +4,9 @@ import { api } from '../api/client';
 const NEXT_CHAPTER_TRIGGER_DISTANCE = 3;
 const NEXT_CHAPTER_PAGES_TO_WARM = 2;
 const PREFETCHED_URL_CAP = 200;
+// Local-storage flag the Settings → Offline panel writes. Default off so
+// existing users don't suddenly start consuming background data.
+const LS_PREFETCH_NEXT_OFFLINE = 'momotaro_prefetch_next_offline';
 
 function isMeteredConnection() {
   const c = typeof navigator !== 'undefined' ? navigator.connection : null;
@@ -11,6 +14,11 @@ function isMeteredConnection() {
   if (c.saveData === true) return true;
   if (c.effectiveType === 'slow-2g' || c.effectiveType === '2g') return true;
   return false;
+}
+
+function shouldPrefetchNextOffline() {
+  try { return localStorage.getItem(LS_PREFETCH_NEXT_OFFLINE) === '1'; }
+  catch { return false; }
 }
 
 function clamp(i, len) {
@@ -130,6 +138,26 @@ export function useReaderPrefetch({
         img.src = url;
       }
     }).catch(() => {});
+
+    // P3: when the user has the offline-prefetch setting enabled AND
+    // we're online + Wi-Fi-only-eligible, also enqueue the next chapter
+    // for full offline download. The downloader is idempotent — already-
+    // downloaded chapters short-circuit, and the Wi-Fi-only gate inside
+    // setNetworkAllowed pauses cellular pulls without needing a separate
+    // check here. The chapter id is deduped via the same
+    // `warmedNextChapters` set so we don't queue it twice per session.
+    if (shouldPrefetchNextOffline()) {
+      // Lazy import so the downloader module isn't pulled into the Reader
+      // chunk on devices that never enable the setting.
+      import('../api/downloader').then(({ queueChapter }) => {
+        if (cancelled) return;
+        // mangaId comes from the chapter row on the server side; the
+        // reader passes it through allChapters consistently.
+        const mangaId = next.manga_id || allChapters[idx]?.manga_id;
+        if (!mangaId) return;
+        queueChapter(mangaId, next.id).catch(() => { /* best-effort */ });
+      }).catch(() => { /* downloader unavailable on PWA — fine */ });
+    }
 
     return () => { cancelled = true; };
   }, [enabled, pages, currentPage, allChapters, chapterId]);

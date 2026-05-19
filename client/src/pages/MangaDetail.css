@@ -421,6 +421,14 @@
 /* Keep the button visible at full opacity even when the row is dimmed */
 .chapter-row.chapter-read .chapter-mark-btn { opacity: 1; }
 
+/* Download button (per chapter row) — same shape as the read button, with
+   distinct colour states so the user can tell at a glance which chapters
+   are downloaded vs. mid-download vs. failed. */
+.chapter-download-btn.is-downloaded { color: #56a8ff; }
+.chapter-download-btn.is-downloaded:hover { color: var(--text-muted); background: rgba(100, 100, 100, 0.15); }
+.chapter-download-btn.is-downloading { color: #f0b86e; }
+.chapter-download-btn.is-failed { color: #e87878; }
+
 .chapter-expand-btn {
   display: block;
   width: 100%;

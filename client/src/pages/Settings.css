@@ -56,6 +56,25 @@
   font-weight: 500;
 }
 
+/* Offline lockdown — sidebar item for a section that requires the server.
+   We keep the row visible (so the user can see what's there) but visibly
+   disabled and non-interactive. The click handler short-circuits to a
+   "reconnect to use this" panel in the content area. */
+.sp-nav-item-locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sp-nav-item-locked:hover {
+  background: none;
+  color: var(--text-secondary);
+}
+.sp-nav-item-lock {
+  margin-left: auto;
+  font-size: 1.2em;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
 .sp-nav-icon {
   width: 16px;
   height: 16px;

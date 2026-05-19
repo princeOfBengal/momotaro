@@ -2,10 +2,421 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAdminTask } from '../hooks/useAdminTask';
+import { useConnectivity } from '../context/ConnectivityContext';
+import {
+  queueChapter,
+  queueSeries,
+  cancelJob,
+  retryJob,
+  deleteChapter as downloaderDeleteChapter,
+  deleteSeries  as downloaderDeleteSeries,
+  refreshOfflineSnapshot,
+  isOfflineSnapshotStale,
+  onChange      as onDownloaderChange,
+} from '../api/downloader';
+import { getJobForChapter, listJobs, getOfflineChapter, listOfflineChaptersForManga } from '../api/offlineDb';
+import { isAvailable as offlineStorageAvailable } from '../api/offlineStorage';
 import { getResume, clearResume } from '../utils/readingProgress';
 import './MangaDetail.css';
 
 const CHAPTERS_COLLAPSED_COUNT = 5;
+
+// ── Offline-download status hooks ───────────────────────────────────────────
+// Tiny IDB-backed selectors used by the chapter/series download UI. They
+// re-read on every downloader event so we get push updates without polling.
+
+function useChapterDownloadStatus(chapterId) {
+  // Shape: { status: 'queued'|'running'|'done'|'failed'|'cancelled'|null,
+  //          progress: { current, total } | null, jobId, error }
+  const [state, setState] = useState({ status: null });
+  useEffect(() => {
+    // On the PWA / regular-browser path the offline downloader is a no-op
+    // (no filesystem access) and the only consumer of this hook —
+    // ChapterDownloadButton — returns null. Rules-of-hooks force the
+    // hook to still mount; we just skip the IDB work + subscription so
+    // a 200-chapter MangaDetail doesn't fire 200 background queries on
+    // a browser session.
+    if (!offlineStorageAvailable()) return;
+    if (!chapterId) return;
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const [job, ch] = await Promise.all([
+          getJobForChapter(chapterId),
+          getOfflineChapter(chapterId),
+        ]);
+        if (cancelled) return;
+        if (job) {
+          setState({ status: job.status, progress: job.progress, jobId: job.id, error: job.error });
+        } else if (ch && ch.status === 'done') {
+          setState({ status: 'done' });
+        } else {
+          setState({ status: null });
+        }
+      } catch {
+        if (!cancelled) setState({ status: null });
+      }
+    }
+    refresh();
+    const off = onDownloaderChange(refresh);
+    return () => { cancelled = true; off(); };
+  }, [chapterId]);
+  return state;
+}
+
+// Aggregate state for an entire series. Returns the count of chapters in
+// each terminal-or-active bucket plus an overall "phase":
+//   - 'none'        — nothing in the DB
+//   - 'partial'     — some chapters done, others not even queued
+//   - 'downloading' — at least one queued/running
+//   - 'complete'    — every known chapter is done
+function useSeriesDownloadSummary(mangaId, chapterIds) {
+  const [summary, setSummary] = useState({ phase: 'none', done: 0, active: 0, failed: 0, total: 0 });
+  useEffect(() => {
+    // Same rationale as useChapterDownloadStatus: SeriesDownloadButton
+    // already returns null on PWA, so don't fire IDB queries we'll throw
+    // away. Keeps PWA MangaDetail mount cost identical to pre-P1.
+    if (!offlineStorageAvailable()) {
+      setSummary({ phase: 'none', done: 0, active: 0, failed: 0, total: chapterIds?.length || 0 });
+      return;
+    }
+    if (!mangaId || !chapterIds || chapterIds.length === 0) {
+      setSummary({ phase: 'none', done: 0, active: 0, failed: 0, total: 0 });
+      return;
+    }
+    let cancelled = false;
+    const idSet = new Set(chapterIds.map(Number));
+    async function refresh() {
+      try {
+        // One scan of each store, no per-chapter round-trips. The series
+        // can have hundreds of chapters; firing one IDB get per chapter
+        // on every downloader event would dominate the render budget on
+        // mid-tier devices.
+        const [jobs, downloadedChapters] = await Promise.all([
+          listJobs(),
+          listOfflineChaptersForManga(Number(mangaId)),
+        ]);
+
+        const doneSet = new Set(
+          downloadedChapters.filter(c => c.status === 'done').map(c => Number(c.id))
+        );
+        let done = 0, active = 0, failed = 0;
+        for (const cid of idSet) if (doneSet.has(cid)) done++;
+
+        // Track chapters we've already attributed so a chapter with both
+        // a 'failed' job row and a follow-up 'done' job counts once.
+        const attributed = new Set(doneSet);
+        for (const j of jobs) {
+          const cid = Number(j.chapter_id);
+          if (!idSet.has(cid) || attributed.has(cid)) continue;
+          if (j.status === 'running' || j.status === 'queued') {
+            active++;
+            attributed.add(cid);
+          } else if (j.status === 'failed') {
+            failed++;
+            attributed.add(cid);
+          }
+        }
+        if (cancelled) return;
+        let phase = 'none';
+        if (active > 0) phase = 'downloading';
+        else if (done === idSet.size) phase = 'complete';
+        else if (done > 0) phase = 'partial';
+        setSummary({ phase, done, active, failed, total: idSet.size });
+      } catch {
+        if (!cancelled) setSummary({ phase: 'none', done: 0, active: 0, failed: 0, total: chapterIds.length });
+      }
+    }
+    refresh();
+    const off = onDownloaderChange(refresh);
+    return () => { cancelled = true; off(); };
+  }, [mangaId, chapterIds]);
+  return summary;
+}
+
+function chapterDownloadBadgeLabel(state, downloadsAllowed = true) {
+  if (!state) return null;
+  switch (state.status) {
+    case 'queued':    return downloadsAllowed ? 'Queued' : 'Paused';
+    case 'running':   return state.progress
+      ? `${state.progress.current}/${state.progress.total}`
+      : 'Downloading…';
+    case 'done':      return 'Downloaded';
+    case 'failed':    return 'Failed';
+    case 'cancelled': return 'Cancelled';
+    default:          return null;
+  }
+}
+
+// Series-level download CTA. Hidden when running in a non-native shell
+// (downloads need filesystem access). State machine:
+//   - none/partial → "Download series" (queues every missing chapter)
+//   - downloading → "Downloading X/Y…"  + Cancel
+//   - complete    → "Downloaded ✓"      + Remove
+//   - complete + stale → "Refresh offline copy" (server has newer data)
+function SeriesDownloadButton({ mangaId, chapters, serverUpdatedAt }) {
+  const { online } = useConnectivity();
+  const navigate = useNavigate();
+  const chapterIds = React.useMemo(
+    () => (chapters || []).map(c => Number(c.id)),
+    [chapters],
+  );
+  const summary = useSeriesDownloadSummary(mangaId, chapterIds);
+  const [busy, setBusy]       = useState(false);
+  const [errMsg, setErrMsg]   = useState(null);
+  const [stale, setStale]     = useState(false);
+
+  // Recheck stale status whenever the manga's server updated_at changes or
+  // a download finishes (which writes the new server_updated_at locally).
+  useEffect(() => {
+    let cancelled = false;
+    if (!mangaId || !serverUpdatedAt) {
+      setStale(false);
+      return;
+    }
+    isOfflineSnapshotStale(mangaId, serverUpdatedAt)
+      .then(v => { if (!cancelled) setStale(v); })
+      .catch(() => { if (!cancelled) setStale(false); });
+    return () => { cancelled = true; };
+  }, [mangaId, serverUpdatedAt, summary.done]);
+
+  if (!offlineStorageAvailable()) return null;
+  if (!chapters || chapters.length === 0) return null;
+
+  async function startDownload() {
+    if (!online) {
+      setErrMsg('Server unreachable — connect to download.');
+      return;
+    }
+    setBusy(true);
+    setErrMsg(null);
+    try { await queueSeries(mangaId); }
+    catch (e) {
+      // NO_FOLDER is the user-actionable case from the SAF gate. Offer
+      // to send them straight to Settings → Offline so they can pick.
+      if (e && e.code === 'NO_FOLDER') {
+        const go = window.confirm(
+          'Pick a download folder first.\n\n'
+          + 'Open Settings → Offline Downloads now?'
+        );
+        if (go) navigate('/settings', { state: { section: 'offline' } });
+        return;
+      }
+      setErrMsg(String(e?.message || e));
+    }
+    finally { setBusy(false); }
+  }
+
+  async function cancelAll() {
+    setBusy(true);
+    try {
+      const jobs = await listJobs();
+      const mine = jobs.filter(j =>
+        Number(j.manga_id) === Number(mangaId)
+        && (j.status === 'queued' || j.status === 'running'),
+      );
+      for (const j of mine) await cancelJob(j.id);
+    } finally { setBusy(false); }
+  }
+
+  async function removeAll() {
+    if (!window.confirm('Remove every downloaded chapter of this series from the device?')) return;
+    setBusy(true);
+    try { await downloaderDeleteSeries(mangaId); }
+    finally { setBusy(false); }
+  }
+
+  async function refreshSnapshot() {
+    setBusy(true);
+    setErrMsg(null);
+    try {
+      const summary = await refreshOfflineSnapshot(mangaId);
+      setStale(false);
+      const parts = [];
+      if (summary.newly_queued > 0) {
+        parts.push(`${summary.newly_queued} new`);
+      }
+      if (summary.restaged > 0) {
+        parts.push(`${summary.restaged} updated`);
+      }
+      if (parts.length > 0) {
+        // Toast-style — reuse the title attribute as a lightweight signal.
+        setErrMsg(`Queued ${parts.join(', ')} chapter${(summary.newly_queued + summary.restaged) === 1 ? '' : 's'}.`);
+      }
+    } catch (e) {
+      setErrMsg(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Render based on summary phase.
+  if (summary.phase === 'downloading') {
+    return (
+      <button
+        className="btn btn-ghost detail-action-btn"
+        onClick={cancelAll}
+        disabled={busy}
+        aria-label="Cancel downloads"
+        title="Cancel downloads"
+      >
+        <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="6" />
+          <line x1="6" y1="6" x2="10" y2="10" />
+          <line x1="10" y1="6" x2="6" y2="10" />
+        </svg>
+        <span className="detail-action-label">
+          Downloading {summary.done}/{summary.total}…
+        </span>
+      </button>
+    );
+  }
+
+  if (summary.phase === 'complete') {
+    if (stale && online) {
+      return (
+        <button
+          className="btn btn-ghost detail-action-btn"
+          onClick={refreshSnapshot}
+          disabled={busy}
+          aria-label="Refresh offline copy"
+          title={errMsg || 'New chapters or metadata available on the server.'}
+        >
+          <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 8a6 6 0 1 1-1.76-4.24" />
+            <polyline points="14 2 14 6 10 6" />
+          </svg>
+          <span className="detail-action-label">Refresh offline copy</span>
+        </button>
+      );
+    }
+    return (
+      <button
+        className="btn btn-ghost detail-action-btn"
+        onClick={removeAll}
+        disabled={busy}
+        aria-label="Remove downloaded series"
+        title="Remove downloaded series"
+      >
+        <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="3 6 5 6 13 6" />
+          <path d="M5 6l1 8a2 2 0 0 0 2 2h0a2 2 0 0 0 2-2l1-8" />
+        </svg>
+        <span className="detail-action-label">Downloaded ✓</span>
+      </button>
+    );
+  }
+
+  const label = summary.phase === 'partial'
+    ? `Resume download (${summary.total - summary.done} left)`
+    : 'Download series';
+
+  return (
+    <button
+      className="btn btn-ghost detail-action-btn"
+      onClick={startDownload}
+      disabled={busy || !online}
+      aria-label={label}
+      title={errMsg || label}
+    >
+      <svg className="detail-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M8 2v9" />
+        <polyline points="4 7 8 11 12 7" />
+        <path d="M2 13h12" />
+      </svg>
+      <span className="detail-action-label">{label}</span>
+    </button>
+  );
+}
+
+// Compact per-chapter download control. Renders a small icon button inside
+// each chapter row; clicking queues / cancels / removes that single chapter.
+function ChapterDownloadButton({ mangaId, chapterId }) {
+  const state = useChapterDownloadStatus(chapterId);
+  const { online, downloadsAllowed } = useConnectivity();
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  if (!offlineStorageAvailable()) return null;
+
+  async function handleClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    try {
+      switch (state.status) {
+        case 'done':
+          if (window.confirm('Remove this downloaded chapter?')) {
+            await downloaderDeleteChapter(mangaId, chapterId);
+          }
+          break;
+        case 'failed':
+          if (state.jobId) await retryJob(state.jobId);
+          break;
+        case 'queued':
+        case 'running':
+          if (state.jobId) await cancelJob(state.jobId);
+          break;
+        default:
+          if (!online) return;
+          try { await queueChapter(mangaId, chapterId); }
+          catch (err) {
+            // Same NO_FOLDER routing as the series-level button — offer
+            // a confirm + nav so the user isn't stuck reading a generic
+            // error in a tooltip.
+            if (err && err.code === 'NO_FOLDER') {
+              const go = window.confirm(
+                'Pick a download folder first.\n\n'
+                + 'Open Settings → Offline Downloads now?'
+              );
+              if (go) navigate('/settings', { state: { section: 'offline' } });
+            } else {
+              throw err;
+            }
+          }
+      }
+    } finally { setBusy(false); }
+  }
+
+  const label = chapterDownloadBadgeLabel(state, downloadsAllowed);
+  const isActive = state.status === 'queued' || state.status === 'running';
+  const isDone   = state.status === 'done';
+  const isFailed = state.status === 'failed';
+
+  return (
+    <button
+      className={`chapter-mark-btn chapter-download-btn`
+        + (isActive ? ' is-downloading' : '')
+        + (isDone   ? ' is-downloaded' : '')
+        + (isFailed ? ' is-failed' : '')}
+      onClick={handleClick}
+      disabled={busy || (!isDone && !isActive && !isFailed && !online)}
+      title={label || (online ? 'Download chapter' : 'Connect to download')}
+      aria-label={label || 'Download chapter'}
+    >
+      {isActive ? (
+        <div className="spinner" style={{ width: 14, height: 14, borderWidth: 1.5 }} />
+      ) : isDone ? (
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+          <circle cx="10" cy="10" r="8" fill="currentColor" />
+          <path d="M6 10l3 3 5-6" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        </svg>
+      ) : isFailed ? (
+        <svg viewBox="0 0 20 20" fill="none" width="16" height="16" aria-hidden="true">
+          <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="1.5" />
+          <line x1="10" y1="6" x2="10" y2="11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <circle cx="10" cy="14" r="0.8" fill="currentColor" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 20 20" fill="none" width="16" height="16" aria-hidden="true">
+          <path d="M10 4v8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <polyline points="6 9 10 13 14 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <path d="M5 15h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 // "0:14", "1:23" — shown next to the spinner while optimize is running so
 // the user has feedback that things are progressing even with no per-chapter
@@ -1461,6 +1872,20 @@ export default function MangaDetail() {
     startUrl:  `/api/manga/${id}/optimize`,
     statusUrl: `/api/manga/${id}/optimize/status`,
   });
+  // When the per-manga optimize completes, pull the manga fresh so the
+  // chapter list reflects the renames. Once per running→done transition.
+  // IMPORTANT: this useRef + useEffect pair must sit above the
+  // `if (loading)` / `if (error)` early returns further down — otherwise
+  // hook order changes across renders and React unmounts the tree.
+  const prevOptimizeDoneRef = useRef(false);
+  useEffect(() => {
+    if (optimizeTask.isDone && !prevOptimizeDoneRef.current) {
+      api.getManga(id).then(updated => {
+        setManga(prev => ({ ...prev, ...updated }));
+      }).catch(() => {});
+    }
+    prevOptimizeDoneRef.current = optimizeTask.isDone;
+  }, [optimizeTask.isDone, id]);
 
   // Refresh — single-folder rescan triggered from the navbar refresh button.
   // `refreshing` controls the spinner state on the icon; `refreshFlash`
@@ -1866,8 +2291,13 @@ export default function MangaDetail() {
     }
   }
 
-  const coverBase = manga.cover_image ? api.thumbnailUrl(manga.cover_image) : null;
-  const coverUrl = coverBase ? `${coverBase}${coverBust ? `?t=${coverBust}` : ''}` : null;
+  // Prefer the server-baked `cover_url` (already a usable URL — and the
+  // offline shim sets it to a local file:// URL via convertFileSrc) over
+  // re-deriving from the filename. Falls back to the legacy
+  // `thumbnailUrl(cover_image)` path for any response that doesn't include
+  // cover_url yet.
+  const coverBase = manga.cover_url || (manga.cover_image ? api.thumbnailUrl(manga.cover_image) : null);
+  const coverUrl = coverBase ? `${coverBase}${coverBust ? (coverBase.includes('?') ? '&' : '?') + `t=${coverBust}` : ''}` : null;
   const genres = Array.isArray(manga.genres) ? manga.genres : [];
   const hasMetadata = manga.metadata_source && manga.metadata_source !== 'none';
 
@@ -1875,18 +2305,6 @@ export default function MangaDetail() {
     try { await optimizeTask.start(); }
     catch (_) { /* surfaced via optimizeTask.lastError */ }
   }
-
-  // When the per-manga optimize completes, pull the manga fresh so the
-  // chapter list reflects the renames. Once per running→done transition.
-  const prevOptimizeDoneRef = useRef(false);
-  useEffect(() => {
-    if (optimizeTask.isDone && !prevOptimizeDoneRef.current) {
-      api.getManga(id).then(updated => {
-        setManga(prev => ({ ...prev, ...updated }));
-      }).catch(() => {});
-    }
-    prevOptimizeDoneRef.current = optimizeTask.isDone;
-  }, [optimizeTask.isDone, id]);
 
   function openOptimizeModal() {
     // Clear any badge from a previous completion so the modal opens in
@@ -2111,6 +2529,12 @@ export default function MangaDetail() {
                   <span className="detail-action-label">Reset Progress</span>
                 </button>
               )}
+              <SeriesDownloadButton
+                mangaId={id}
+                chapters={chapters}
+                serverUpdatedAt={manga.updated_at}
+              />
+
               {/* Desktop: individual buttons. Third Party Sources lives in
                   the navbar icon next to Optimize, so it's not duplicated here. */}
               <button className="btn btn-ghost detail-desktop-only" onClick={() => setShowMetaModal(true)}>
@@ -2268,6 +2692,7 @@ export default function MangaDetail() {
                       {isCurrent && <span className="chapter-badge badge-current">Reading</span>}
                       {isRead && !isCurrent && <span className="chapter-badge badge-read">Read</span>}
                       <span className="chapter-pages">{ch.page_count}p</span>
+                      <ChapterDownloadButton mangaId={id} chapterId={ch.id} />
                       <button
                         className={`chapter-mark-btn${isRead ? ' is-read' : ''}`}
                         onClick={e => { e.preventDefault(); e.stopPropagation(); handleMarkChapter(ch.id, !isRead); }}

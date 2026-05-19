@@ -507,6 +507,48 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
   });
 }));
 
+// GET /api/manga/:id/offline-package — single batched payload the Android
+// app's download queue uses to bootstrap an offline series snapshot. Returns
+// manga metadata + cover URL + the full chapter list in one round-trip,
+// versus the historical N round-trips (one per call to /manga/:id and
+// /manga/:id/chapters).
+//
+// Per-chapter page lists are intentionally NOT included. /chapters/:id/pages
+// is the only call that exercises the CBZ extractor, and pre-extracting an
+// entire series synchronously inside a single HTTP request would either
+// time out the client or starve the request queue. The downloader fetches
+// pages chapter-by-chapter, which keeps memory bounded and lets the user
+// cancel mid-series cheaply.
+//
+// `updated_at` is exposed at the top level so the client can compare against
+// its local `downloaded_at` and surface a "refresh offline copy" action when
+// the server-side row has been re-scanned / re-tagged.
+router.get('/manga/:id/offline-package', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
+  if (!manga) return res.status(404).json({ error: 'Manga not found' });
+
+  const chapters = db.prepare(
+    'SELECT id, manga_id, number, volume, title, folder_name, page_count, type, updated_at FROM chapters WHERE manga_id = ? ORDER BY number ASC NULLS LAST, folder_name ASC'
+  ).all(manga.id);
+
+  res.json({
+    data: {
+      manga: {
+        ...manga,
+        genres:    safeJsonParse(manga.genres, []),
+        cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image) : null,
+      },
+      chapters,
+      // Server-side timestamp the client can persist alongside the local
+      // snapshot. Compare against the local `downloaded_at` to decide
+      // whether the offline copy is stale.
+      server_updated_at: manga.updated_at,
+      fetched_at:        Math.floor(Date.now() / 1000),
+    },
+  });
+}));
+
 // PATCH /api/manga/:id — update per-manga settings or user-editable metadata
 router.patch('/manga/:id', asyncWrapper(async (req, res) => {
   const db = getDb();

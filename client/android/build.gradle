@@ -1,13 +1,23 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
-    
+    // Kotlin version is in lockstep with what @capacitor/filesystem ships
+    // (its own buildscript expects 2.2.x). Set here at the root so every
+    // Kotlin-aware subproject (us + Capacitor plugins) resolves the same
+    // version and the 'kotlin' DSL extension is only registered once.
+    ext.kotlin_version = '2.2.20'
+
     repositories {
         google()
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:9.2.1'
+        // AGP 8.13.0 matches what the @capacitor/filesystem 8.1.x buildscript
+        // was authored against. AGP 9.x integrated Kotlin DSL registration
+        // and collides with the kotlin-android plugin the Filesystem module
+        // applies explicitly ("Cannot add extension with name 'kotlin'…").
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath 'com.google.gms:google-services:4.4.4'
 
         // NOTE: Do not place your application dependencies here; they belong
@@ -21,6 +31,27 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+    }
+}
+
+// ── Toolchain override for Kotlin-using Capacitor plugins ──────────────────
+// @capacitor/filesystem 8.x declares `kotlin { jvmToolchain(21) }` in its
+// own build.gradle. Gradle's toolchain matcher is strict — it refuses to
+// run the build on this host's JDK 26 unless we explicitly say "this
+// language version is fine". Override after evaluation so the plugin's
+// build.gradle has already registered the kotlin extension; we then
+// upgrade its toolchain target to the JDK Gradle is actually running on.
+// Same fix applies to any future Kotlin-using Capacitor plugin we add.
+def runtimeJavaMajor = JavaVersion.current().majorVersion as Integer
+subprojects { proj ->
+    proj.afterEvaluate {
+        if (proj.plugins.hasPlugin('org.jetbrains.kotlin.android')) {
+            proj.kotlin {
+                jvmToolchain {
+                    languageVersion.set(JavaLanguageVersion.of(runtimeJavaMajor))
+                }
+            }
+        }
     }
 }
 

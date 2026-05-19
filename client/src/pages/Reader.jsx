@@ -8,6 +8,13 @@ import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
 import { enableImmersive, disableImmersive } from '../api/immersive';
+import {
+  isEncryptionEnabled as offlineIsEncryptionEnabled,
+  isUnlocked          as offlineIsUnlocked,
+  unlock              as offlineUnlock,
+} from '../api/offlineCrypto';
+import { getOfflineChapter as getOfflineChapterRow } from '../api/offlineDb';
+import { resumeAfterUnlock as downloaderResumeAfterUnlock } from '../api/downloader';
 import './Reader.css';
 
 // Resolve the page-transition style. Migrates the legacy boolean key
@@ -27,6 +34,87 @@ function clampAnimSpeed(n) {
 }
 
 const PROGRESS_DEBOUNCE_MS = 2000;
+
+// Renders the inline "Unlock to read" passphrase prompt when the user
+// opens an encrypted chapter without having unlocked the offline store
+// yet. Replaces the broken-image-soup the reader would otherwise show.
+//
+// Auto-focuses the passphrase input so the user can type immediately
+// without an extra tap — important on mobile where the on-screen
+// keyboard delays input by 100-200ms otherwise.
+function ReaderUnlockGate({ mangaId, onUnlocked }) {
+  const [pass, setPass]     = useState('');
+  const [error, setError]   = useState(null);
+  const [busy, setBusy]     = useState(false);
+  const inputRef            = useRef(null);
+
+  useEffect(() => {
+    // Tiny delay so the keyboard reliably pops on Android; focusing
+    // immediately on mount sometimes races with the route transition.
+    const t = setTimeout(() => inputRef.current?.focus(), 60);
+    return () => clearTimeout(t);
+  }, []);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!pass || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await offlineUnlock(pass);
+      setPass('');
+      onUnlocked();
+    } catch (err) {
+      setError(String(err?.message || err) || 'Wrong passphrase.');
+      // Re-focus + select so the user can correct quickly.
+      requestAnimationFrame(() => inputRef.current?.select());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="reader-loading">
+      <h2 style={{ margin: '0 0 12px' }}>Encrypted</h2>
+      <p style={{ margin: '0 0 18px', maxWidth: 380, textAlign: 'center', color: 'var(--text-muted)' }}>
+        This chapter was downloaded with at-rest encryption.
+        Enter your passphrase to read it.
+      </p>
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 280, maxWidth: '90%' }}>
+        <input
+          ref={inputRef}
+          type="password"
+          className="settings-input"
+          value={pass}
+          onChange={e => setPass(e.target.value)}
+          placeholder="Passphrase"
+          autoComplete="current-password"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          disabled={busy}
+        />
+        <button
+          type="submit"
+          className="btn btn-primary"
+          disabled={busy || !pass}
+        >
+          {busy ? 'Unlocking…' : 'Unlock'}
+        </button>
+      </form>
+      {error && (
+        <p style={{ marginTop: 12, color: '#e87878', fontSize: '0.9rem' }}>{error}</p>
+      )}
+      <Link
+        to={mangaId ? `/manga/${mangaId}` : '/'}
+        className="btn btn-ghost"
+        style={{ marginTop: 18 }}
+      >
+        Cancel
+      </Link>
+    </div>
+  );
+}
 
 export default function Reader() {
   const { chapterId } = useParams();
@@ -201,23 +289,79 @@ export default function Reader() {
   // Keep focus on container so arrow keys work
   useEffect(() => { containerRef.current?.focus(); }, []);
 
+  // ── Encryption gate ────────────────────────────────────────────────────
+  // When the user has at-rest encryption enabled and the chapter being
+  // opened was downloaded with it active, we need an unlocked store to
+  // render anything. `needsUnlock` drives the inline passphrase prompt
+  // below; reload (`reloadKey`) bumps the chapter-load effect after a
+  // successful unlock so it re-fetches with a working key.
+  const [needsUnlock, setNeedsUnlock] = useState(false);
+  const [reloadKey,   setReloadKey]   = useState(0);
+
   // Load chapter data
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([
-      api.getChapter(chapterId),
-      api.getPages(chapterId),
-    ]).then(([ch, pgs]) => {
-      if (cancelled) return;
-      setChapter(ch);
-      setPages(pgs);
-      setLoading(false);
-    }).catch(err => {
-      if (!cancelled) { setError(err.message); setLoading(false); }
-    });
-    return () => { cancelled = true; };
-  }, [chapterId]);
+
+    async function load() {
+      // Inspect the local chapter row before any decrypt-on-read happens
+      // so we can show the inline unlock prompt instead of broken-image
+      // icons. We only check on native shells with a stored chapter row;
+      // online sessions and pure-PWA paths skip this check.
+      try {
+        const enabled = await offlineIsEncryptionEnabled();
+        if (enabled && !offlineIsUnlocked()) {
+          const row = await getOfflineChapterRow(chapterId);
+          if (row && row.encrypted) {
+            if (!cancelled) {
+              setNeedsUnlock(true);
+              setLoading(false);
+            }
+            return;
+          }
+        }
+      } catch { /* IDB unavailable — fall through to the normal path */ }
+
+      if (!cancelled) setNeedsUnlock(false);
+      try {
+        const [ch, pgs] = await Promise.all([
+          api.getChapter(chapterId),
+          api.getPages(chapterId),
+        ]);
+        if (cancelled) return;
+        setChapter(ch);
+        setPages(pgs);
+        setLoading(false);
+      } catch (err) {
+        if (!cancelled) { setError(err.message); setLoading(false); }
+      }
+    }
+
+    load();
+
+    // When the user has at-rest encryption enabled, `offlineApi.getPages`
+    // populates the per-page URL map with `blob:` URLs created from the
+    // decrypted bytes. Release those when leaving the chapter so we don't
+    // accumulate memory across long reading sessions. No-op when
+    // encryption is off (the cache is plain file:// URLs in that case).
+    //
+    // Skip the dynamic import on PWA / regular browsers — the offline
+    // subsystem can't create encrypted downloads there (no filesystem),
+    // so the blob-URL set is provably empty and pulling in the
+    // offlineApi chunk just to call a no-op cleanup costs ~15 KB
+    // gzipped (offlineApi + offlineDb + idb) on first chapter open.
+    return () => {
+      cancelled = true;
+      const isNative = typeof window !== 'undefined'
+                    && window.Capacitor
+                    && typeof window.Capacitor.isNativePlatform === 'function'
+                    && window.Capacitor.isNativePlatform();
+      if (!isNative) return;
+      import('../api/offlineApi.js')
+        .then(m => m.releasePageBlobs && m.releasePageBlobs())
+        .catch(() => { /* shim not loaded — fine */ });
+    };
+  }, [chapterId, reloadKey]);
 
   // Load manga + sibling chapters
   useEffect(() => {
@@ -444,6 +588,19 @@ export default function Reader() {
       <div className="spinner" />
       <p>Loading chapter...</p>
     </div>
+  );
+
+  if (needsUnlock) return (
+    <ReaderUnlockGate
+      mangaId={mangaId}
+      onUnlocked={() => {
+        // Wake the download queue too — any chapters that were sitting
+        // in the locked-and-queued state can now drain.
+        try { downloaderResumeAfterUnlock(); } catch { /* non-fatal */ }
+        setNeedsUnlock(false);
+        setReloadKey(k => k + 1);
+      }}
+    />
   );
 
   if (error) return (

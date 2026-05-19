@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import AppSidebar from '../components/AppSidebar';
 import VirtualizedMangaGrid from '../components/VirtualizedMangaGrid';
 import { useScrollPosition } from '../hooks/useScrollPosition';
+import { useConnectivity } from '../context/ConnectivityContext';
 import './Library.css';
 // Reuse the skeleton classes (.skeleton-block, .skeleton-line, .skeleton-tile)
 // already defined for Home — same precedent as Home importing Library.css.
@@ -46,6 +47,7 @@ function LibrarySkeleton() {
 export default function Library() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { online } = useConnectivity();
 
   // ── Browse state ─────────────────────────────────────────────────────────
   // The full library/list grid. Loaded once on mount, refetched when the
@@ -370,7 +372,12 @@ export default function Library() {
           <option value="year">Year</option>
           <option value="rating">Rating</option>
         </select>
-        <button className="btn btn-ghost lib-desktop-only" onClick={handleScan} disabled={scanning}>
+        <button
+          className="btn btn-ghost lib-desktop-only"
+          onClick={handleScan}
+          disabled={scanning || !online}
+          title={!online ? 'Unavailable while offline' : undefined}
+        >
           {scanning ? 'Scanning...' : 'Scan Library'}
         </button>
         <button className="btn-settings" onClick={() => navigate('/settings')} aria-label="Open settings" title="Settings">
@@ -404,7 +411,12 @@ export default function Library() {
           <option value="year">Year</option>
           <option value="rating">Rating</option>
         </select>
-        <button className="btn btn-ghost btn-sm" onClick={handleScan} disabled={scanning}>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={handleScan}
+          disabled={scanning || !online}
+          title={!online ? 'Unavailable while offline' : undefined}
+        >
           {scanning ? 'Scanning…' : 'Scan'}
         </button>
       </div>

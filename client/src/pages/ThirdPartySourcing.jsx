@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import AppSidebar from '../components/AppSidebar';
+import { useConnectivity } from '../context/ConnectivityContext';
 import './Library.css';
 import './Home.css';
 import './ThirdPartySourcing.css';
@@ -40,9 +41,45 @@ function statusBadgeClass(status) {
   return `tps-status tps-status-${status}`;
 }
 
+// Renders a polite "needs server" block in place of the whole page when
+// the user is offline. The route stays mounted (it's still in the sidebar
+// and reachable by URL) but every server-only control would otherwise
+// crash on the first `api.listSources` call.
+function ThirdPartySourcingOfflinePanel() {
+  return (
+    <div className="library-page">
+      <nav className="navbar">
+        <Link to="/library" className="btn btn-ghost">← Library</Link>
+        <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
+      </nav>
+      <main style={{ padding: '2rem 1rem', maxWidth: 720, margin: '0 auto' }}>
+        <h1 style={{ margin: '0 0 8px' }}>Third Party Sourcing</h1>
+        <p style={{ color: 'var(--text-muted)' }}>
+          This page lets Momotaro search third-party sources and queue
+          chapters as new downloads on the server. It's <strong>unavailable
+          while offline</strong> — restore your server connection and reopen
+          the page to use it.
+        </p>
+      </main>
+    </div>
+  );
+}
+
+// Connectivity-aware wrapper. The real page is a heavyweight component
+// with dozens of hooks + auto-polling effects; mounting it offline would
+// violate rules-of-hooks (the early-return path) AND fire doomed API
+// calls. We instead pick one of two components based on connectivity —
+// each maintains a constant hook count for its own lifetime.
 export default function ThirdPartySourcing() {
+  const { online } = useConnectivity();
+  if (!online) return <ThirdPartySourcingOfflinePanel />;
+  return <ThirdPartySourcingInner />;
+}
+
+function ThirdPartySourcingInner() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+
   // When the page is opened from a specific manga's detail view we lock the
   // target picker to mode='existing' + that manga, and auto-search using its
   // title — saves the user from re-typing the same title and from accidentally

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useConnectivity } from '../context/ConnectivityContext';
 
 // Shared left-rail sidebar for Home and Library. Holds the Home shortcut,
 // the Libraries list, and the Reading Lists (with in-place create + delete).
@@ -36,6 +37,7 @@ export default function AppSidebar({
   onReadingListsChanged,
 }) {
   const navigate = useNavigate();
+  const { online } = useConnectivity();
   const [creatingList, setCreatingList] = useState(false);
   const [newListName, setNewListName]   = useState('');
   const [savingList, setSavingList]     = useState(false);
@@ -159,7 +161,7 @@ export default function AppSidebar({
       {/* Reading Lists */}
       <div className="library-sidebar-section-header">
         <p className="library-sidebar-heading">Reading List</p>
-        {!creatingList && (
+        {!creatingList && online && (
           <button
             className="library-sidebar-add-btn"
             onClick={() => setCreatingList(true)}
@@ -177,7 +179,7 @@ export default function AppSidebar({
             {list.name}
             <span className="library-sidebar-count">{list.manga_count}</span>
           </button>
-          {!list.is_default && (
+          {!list.is_default && online && (
             <button
               className="library-sidebar-delete-btn"
               onClick={e => handleDeleteList(e, list.id)}

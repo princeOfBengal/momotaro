@@ -203,13 +203,17 @@ async function apiFetch(path, options = {}) {
   }
 }
 
-export const api = {
+const _rawApi = {
   // Library
   getLibrary: (params = {}, options = {}) => {
     const q = new URLSearchParams(params).toString();
     return apiFetch(`/api/library${q ? '?' + q : ''}`, options);
   },
   getManga: (id) => apiFetch(`/api/manga/${id}`),
+  // Single batched payload for the offline-download bootstrap: manga +
+  // cover URL + full chapter list, plus a `server_updated_at` field the
+  // client persists to detect a stale local copy later.
+  getOfflinePackage: (id) => apiFetch(`/api/manga/${id}/offline-package`),
   updateManga: (id, body) =>
     apiFetch(`/api/manga/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteManga: (id) =>
@@ -747,3 +751,151 @@ function thumbnailUrl(filename) {
   const shard = (parseInt(m[1], 10) % 256).toString(16).padStart(2, '0');
   return `${getServerUrl()}/thumbnails/${shard}/${filename}${qs}`;
 }
+
+// ── Offline routing ────────────────────────────────────────────────────────
+// The user-facing `api` proxy delegates to `offlineApi` when the
+// ConnectivityContext reports offline. The raw (always-network) surface is
+// re-exported as `rawApi` for callers that must hit the server regardless
+// of mode — most notably the download queue, which has nothing to download
+// from when offline.
+//
+// `setConnectivityProbe` is called once by ConnectivityProvider on mount;
+// it hands us a `() => boolean` that returns true when we should route to
+// the offline shim. Until it's wired we default to "online" so the existing
+// PWA/browser flow is unaffected.
+//
+// `OFFLINE_METHOD_MAP` enumerates which methods get routed. Anything not
+// listed always uses the raw network path — for read endpoints that means
+// the call will fail with a fetch error when offline (and the calling
+// component is expected to handle it), and for write endpoints that's the
+// desired behaviour (we don't want to silently swallow a save attempt
+// while offline unless we explicitly buffer it).
+
+let _isOffline = () => false;
+
+export function setConnectivityProbe(fn) {
+  _isOffline = (typeof fn === 'function') ? fn : (() => false);
+}
+
+// Sync helper used by the few components that must branch on connectivity
+// from outside React (e.g. the page-image src builder).
+export function isOfflineNow() {
+  try { return !!_isOffline(); } catch { return false; }
+}
+
+// Build a `/api/pages/:id/image` URL with the auth-token query param. Used
+// by the downloader (which fetches the bytes directly via fetch) and by
+// the online pageImageUrl. Exported so downloader.js can call it without
+// having to know about token internals.
+export function buildPageImageUrl(pageId) {
+  const tok = getClientToken();
+  const qs  = tok ? `?t=${encodeURIComponent(tok)}` : '';
+  return `${getServerUrl()}/api/pages/${pageId}/image${qs}`;
+}
+
+// Same idea for thumbnails — downloader.js uses this to grab the cover
+// bytes during the manga snapshot step.
+export function buildThumbnailUrl(filename) {
+  return thumbnailUrl(filename);
+}
+
+// Allowlist of methods that have an offline equivalent. Anything not
+// listed here is left as-is on the routed `api` — calling such a method
+// while offline simply hits the network path and fails-fast, which is what
+// the UI lockdown code already handles. The allowlist approach avoids two
+// subtle traps:
+//
+//   1. Wrapping sync helpers like `getServerUrl` / `getClientToken` would
+//      otherwise have to deal with the case where the lazy offlineApi
+//      module hasn't resolved yet — returning a Promise instead of the
+//      expected string would break every caller (notably the connectivity
+//      ping itself).
+//   2. The wrapper would otherwise route methods to undefined shim
+//      implementations and then fall through, which obscures bugs where a
+//      method really *should* have offline support and we forgot.
+const OFFLINE_ROUTED_METHODS = new Set([
+  'getLibrary',
+  'getManga',
+  'getChapters',
+  'getChapter',
+  'getPages',
+  'getProgress',
+  'getHome',
+  'getLibraries',
+  'getReadingLists',
+  'getReadingListManga',
+  'getGenres',
+  'getAllGallery',
+  'updateProgress',
+  'markChapterRead',
+]);
+
+function createRoutedApi(raw) {
+  // Lazy-import the offline shim so the offline subsystem isn't loaded by
+  // every consumer of `api` — keeps the initial bundle of the PWA path
+  // unchanged. Once loaded the same instance is reused.
+  let _offlinePromise = null;
+  function loadOffline() {
+    if (!_offlinePromise) _offlinePromise = import('./offlineApi.js').then(m => m.offlineApi);
+    return _offlinePromise;
+  }
+
+  // Synchronous lookup populated on demand. `null` = not yet resolved,
+  // otherwise the offlineApi module reference. The first call from
+  // `isOfflineNow()==true` triggers the dynamic import; further calls hit
+  // the cached module. Eagerly importing here would pull the offline
+  // subsystem (idb + offlineDb + the shim) into the main bundle for every
+  // online session.
+  let _offline = null;
+  function primeOffline() {
+    if (_offline || _offlinePromise) return;
+    loadOffline().then(o => { _offline = o; }).catch(() => { /* not fatal */ });
+  }
+
+  const wrapped = {};
+  for (const key of Object.keys(raw)) {
+    const original = raw[key];
+    if (typeof original !== 'function' || !OFFLINE_ROUTED_METHODS.has(key)) {
+      wrapped[key] = original;
+      continue;
+    }
+    wrapped[key] = (...args) => {
+      if (isOfflineNow()) {
+        if (_offline && typeof _offline[key] === 'function') {
+          return _offline[key](...args);
+        }
+        // First-ever offline call: prime + await the chunk. Subsequent
+        // calls hit the cached shim. Every listed method already returns
+        // a Promise so the extra microtask is invisible.
+        primeOffline();
+        return loadOffline().then(off => {
+          if (typeof off[key] === 'function') return off[key](...args);
+          return original(...args);
+        });
+      }
+      return original(...args);
+    };
+  }
+
+  // Special-case `pageImageUrl`: synchronous, no async fallback, returns
+  // either the network URL or the locally-cached one populated by
+  // `getPages`. The offline shim keeps a small Map keyed by page_id.
+  // First call when offline primes the chunk so subsequent renders hit
+  // the cached map directly.
+  wrapped.pageImageUrl = (pageId) => {
+    if (isOfflineNow()) {
+      if (_offline) {
+        const local = _offline.pageImageUrl(pageId);
+        if (local) return local;
+      } else {
+        primeOffline();
+      }
+    }
+    return raw.pageImageUrl(pageId);
+  };
+
+  return wrapped;
+}
+
+export const rawApi = _rawApi;
+export const api    = createRoutedApi(_rawApi);

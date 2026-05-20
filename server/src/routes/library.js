@@ -528,8 +528,19 @@ router.get('/manga/:id/offline-package', asyncWrapper(async (req, res) => {
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
+  // The chapters table doesn't have a literal `updated_at` column —
+  // its modification timestamp is `file_mtime`, set by the library
+  // scanner from the CBZ archive's (or folder's) on-disk mtime and
+  // updated on every re-scan. Expose it under the same `updated_at`
+  // key the rest of the API uses so the offline downloader's
+  // stale-copy detector (see client/src/api/downloader.js,
+  // `isChapterStale`) can compare against it without branching.
   const chapters = db.prepare(
-    'SELECT id, manga_id, number, volume, title, folder_name, page_count, type, updated_at FROM chapters WHERE manga_id = ? ORDER BY number ASC NULLS LAST, folder_name ASC'
+    `SELECT id, manga_id, number, volume, title, folder_name, page_count, type,
+            file_mtime AS updated_at
+     FROM chapters
+     WHERE manga_id = ?
+     ORDER BY number ASC NULLS LAST, folder_name ASC`
   ).all(manga.id);
 
   res.json({

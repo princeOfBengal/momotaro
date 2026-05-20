@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 
 // Source of truth for "are we online and the server is reachable". Three
 // independent signals are combined:
@@ -249,7 +250,13 @@ export function ConnectivityProvider({ children, getServerUrl }) {
 
 export function ConnectivityBanner() {
   const { mode, retry, forceOffline } = useConnectivity();
+  const location = useLocation();
   if (mode === 'online') return null;
+  // Suppress on the Reader. It's the only full-screen route in the app;
+  // a thin status ribbon overlapping the top of every page disrupts the
+  // reading flow and clips the leading edge of the chapter title. Same
+  // self-gating pattern InstallPrompt uses for the same reason.
+  if (location.pathname.startsWith('/read/')) return null;
 
   const isForced = mode === 'offline-forced';
   const label = isForced

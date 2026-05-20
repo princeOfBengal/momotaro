@@ -220,6 +220,40 @@ public class OfflineFolderPlugin extends Plugin {
         }
     }
 
+    /**
+     * Enumerate the immediate children of a directory under the tree
+     * URI. Returns an array of `{ name, isDirectory }` entries. Powers
+     * the filesystem-as-source-of-truth chapter scanner — without this,
+     * IDB is the only way to know what's downloaded, and a "Clear data"
+     * wipes the app's awareness of bytes that are still on disk.
+     *
+     * Resolves to `{ entries: [] }` when the directory doesn't exist
+     * (callers treat absence + empty identically). Errors only when the
+     * tree URI itself is no longer accessible — in which case the user
+     * needs to re-pick the folder.
+     */
+    @PluginMethod
+    public void listFiles(PluginCall call) {
+        String relPath = call.getString("path", "");
+        try {
+            DocumentFile dir = resolveFile(relPath);
+            JSArray entries = new JSArray();
+            if (dir != null && dir.isDirectory()) {
+                for (DocumentFile child : dir.listFiles()) {
+                    JSObject entry = new JSObject();
+                    entry.put("name",        child.getName());
+                    entry.put("isDirectory", child.isDirectory());
+                    entries.put(entry);
+                }
+            }
+            JSObject ret = new JSObject();
+            ret.put("entries", entries);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("listFiles failed: " + e.getMessage(), e);
+        }
+    }
+
     @PluginMethod
     public void exists(PluginCall call) {
         String relPath = call.getString("path", "");

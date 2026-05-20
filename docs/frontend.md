@@ -261,6 +261,8 @@ Mobile behaviour is managed by the host via `drawerOpen` + `onCloseDrawer` props
 
 Single `api` object with typed methods for every endpoint. Returns parsed JSON data (unwraps `{ data: ... }` envelope). Throws on non-OK responses.
 
+In the Capacitor native shell the same `api` object is silently routed to an offline shim when `ConnectivityContext` reports the server unreachable (or the user toggled forced-offline). Methods listed in `OFFLINE_ROUTED_METHODS` resolve via `client/src/api/offlineApi.js` against an IndexedDB cache + filesystem fallback; methods outside the allowlist fall through to the raw network call and fail fast. The full architecture — folder picker, native plugins, IndexedDB schema, download queue, encryption, filesystem-as-source-of-truth scanner — lives in [offline.md](./offline.md).
+
 Every request includes:
 
 - `Content-Type: application/json`

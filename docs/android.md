@@ -3,8 +3,9 @@
 The Android app is a [Capacitor](https://capacitorjs.com/) wrapper around the
 same React/Vite build the PWA serves. Same code, same UI; the wrapper adds a
 native shell, a first-run pairing flow that reaches out to the server's
-public pairing API, and a self-hosted update mechanism that points back at
-the Momotaro instance itself.
+public pairing API, a self-hosted update mechanism that points back at
+the Momotaro instance itself, and a full offline subsystem covered
+separately in [offline.md](./offline.md).
 
 Build instructions live in [BUILD_ANDROID.md](../BUILD_ANDROID.md) — this
 doc covers the architecture, the non-obvious config decisions, and where to
@@ -26,8 +27,14 @@ client/
     ├── app/
     │   ├── build.gradle           # Signing config reads ../key.properties
     │   └── src/main/
-    │       ├── AndroidManifest.xml          # usesCleartextTraffic + NSC reference
-    │       └── res/xml/network_security_config.xml  # permits cleartext globally
+    │       ├── AndroidManifest.xml          # usesCleartextTraffic + NSC reference + offline-service entries
+    │       ├── res/xml/network_security_config.xml  # permits cleartext globally
+    │       └── java/dev/momotaro/app/        # in-tree Capacitor plugins
+    │           ├── MainActivity.java                 # registers all in-tree plugins before super.onCreate
+    │           ├── ImmersiveModePlugin.java          # status/nav-bar toggle for the Reader page
+    │           ├── DownloadKeepAlivePlugin.java +    # foreground-service notification keeping the queue alive
+    │           │   DownloadKeepAliveService.java     #   (see offline.md)
+    │           └── OfflineFolderPlugin.java          # SAF tree URI + DocumentFile-backed I/O
     ├── build.gradle               # AGP 9.2.1
     ├── gradle/wrapper/            # Gradle 9.4.1
     ├── key.properties             # gitignored — release signing credentials

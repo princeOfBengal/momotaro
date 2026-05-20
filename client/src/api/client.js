@@ -826,6 +826,13 @@ const OFFLINE_ROUTED_METHODS = new Set([
   'getReadingListManga',
   'getGenres',
   'getAllGallery',
+  // Per-manga metadata that MangaDetail + Reader fire on mount. Without
+  // these the parallel Promise.all in MangaDetail rejects on the first
+  // TypeError("Failed to fetch") and the whole page renders an error
+  // even though the offline manga data itself was reachable.
+  'getAnilistStatus',
+  'getMangaReadingLists',
+  'getGallery',
   'updateProgress',
   'markChapterRead',
 ]);

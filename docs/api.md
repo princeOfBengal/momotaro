@@ -71,6 +71,7 @@ Response shape:
 | GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
+| GET | `/api/manga/:id/offline-package` | Batched payload for the offline downloader — `{ manga, chapters, server_updated_at, fetched_at }`. Used by `queueSeries` (one round-trip per series instead of two) and `refreshOfflineSnapshot` (stale-copy detection). The chapter rows alias `file_mtime AS updated_at` because `chapters` has no literal `updated_at` column. See [offline.md § Server endpoint](./offline.md#server-endpoint). |
 | PATCH | `/api/manga/:id` | Update user-editable manga fields. Body accepts any subset of `{ track_volumes?, title?, author?, genres? }`. `track_volumes` is coerced to 0/1; an empty `title` returns 400; `author = ""` clears the field; `genres` must be an array of strings (non-strings/empties are dropped). The triggers on `manga` keep `manga_fts` and `manga_genres` in sync automatically when `title`/`author`/`genres` change. |
 | GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages (each annotated with its pre-generated cover when available) |
 | POST | `/api/manga/:id/set-thumbnail` | Set thumbnail from a page `{ page_id }` or saved file `{ saved_filename }` |

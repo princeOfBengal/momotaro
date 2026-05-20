@@ -98,6 +98,19 @@ export async function exists(path) {
   } catch { return false; }
 }
 
+// Enumerate the immediate children of a directory under the tree URI.
+// Returns `[{ name, isDirectory }, ...]`. Missing directory → `[]`
+// (callers treat absence and empty identically). Used by the filesystem-
+// scan path in offlineApi.js to rebuild chapter state from disk when IDB
+// is empty / stale.
+export async function listFiles(path) {
+  if (!isNativeShell()) return [];
+  try {
+    const r = await OfflineFolder.listFiles({ path });
+    return Array.isArray(r?.entries) ? r.entries : [];
+  } catch { return []; }
+}
+
 export async function removePath(path, { recursive = false } = {}) {
   if (!isNativeShell()) notNative();
   await OfflineFolder.deletePath({ path, recursive });

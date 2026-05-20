@@ -35,6 +35,7 @@ import {
   readBytes   as plugReadBytes,
   readText    as plugReadText,
   exists      as plugExists,
+  listFiles   as plugListFiles,
   removePath  as plugRemovePath,
   srcUrl      as plugSrcUrl,
   clearWebViewCache as plugClearWebViewCache,
@@ -147,6 +148,16 @@ export async function exists(path) {
   if (!isAvailable()) return false;
   if (!(await isConfigured())) return false;
   return plugExists(path);
+}
+
+// Enumerate the immediate children of a directory under the picked
+// tree. Returns `[]` when the directory doesn't exist or the folder
+// isn't configured. The filesystem-discovery path in offlineApi.js uses
+// this to walk the offline tree without depending on IDB state.
+export async function listFiles(path) {
+  if (!isAvailable()) return [];
+  if (!(await isConfigured())) return [];
+  return plugListFiles(path);
 }
 
 export async function removePath(path, opts = {}) {

@@ -63,16 +63,144 @@ import {
 // Path layout under the configured root:
 //   <mangaId>/manga.json
 //   <mangaId>/cover.<ext>
-//   <mangaId>/chapters/<chapterId>/meta.json
-//   <mangaId>/chapters/<chapterId>/<page_index>.<ext>
+//   <mangaId>/chapters/<friendly chapter dir>/meta.json
+//   <mangaId>/chapters/<friendly chapter dir>/<page_index>.<ext>
+//
+// `<friendly chapter dir>` is `Vol.X Ch.Y - Title [chapterId]` whenever
+// we have volume/number info; falls back to the server's folder_name or
+// a plain `[chapterId]` when those are missing. The trailing
+// `[chapterId]` is the unique key — every read/delete that needs to
+// resolve a chapter dir back to bytes on disk reads the stored
+// `chapter_dir_path` off the IDB row, so the friendly portion is
+// purely cosmetic. Older downloads keep their numeric dir names
+// because their IDB rows still point at the legacy path.
 function mangaDir(mangaId)               { return `${mangaId}`; }
-function chapterDir(mangaId, chapterId)  { return `${mangaId}/chapters/${chapterId}`; }
-function pagePath(mangaId, chapterId, idx, ext) {
-  return `${chapterDir(mangaId, chapterId)}/${String(idx).padStart(4, '0')}.${ext}`;
-}
 function coverPath(mangaId, ext)         { return `${mangaDir(mangaId)}/cover.${ext}`; }
 function mangaJsonPath(mangaId)          { return `${mangaDir(mangaId)}/manga.json`; }
-function chapterJsonPath(mangaId, cId)   { return `${chapterDir(mangaId, cId)}/meta.json`; }
+
+// Compute the chapter directory path at write time. Takes the chapter
+// object from the server's chapter list (`{ id, volume, number, title,
+// folder_name }`) so we don't have to keep a separate mapping.
+function chapterDirFor(mangaId, chapter) {
+  return `${mangaId}/chapters/${buildChapterDirName(chapter)}`;
+}
+function pagePathFor(mangaId, chapter, idx, ext) {
+  return `${chapterDirFor(mangaId, chapter)}/${String(idx).padStart(4, '0')}.${ext}`;
+}
+function chapterJsonPathFor(mangaId, chapter) {
+  return `${chapterDirFor(mangaId, chapter)}/meta.json`;
+}
+
+// Build the human-readable chapter directory name from whatever fields
+// the server populated. Path-unsafe characters are stripped so the same
+// name lands cleanly inside both Capacitor's app-private storage and a
+// SAF-selected user folder. The trailing `[id]` keeps each chapter
+// uniquely addressable even when two folders would otherwise collide
+// (e.g. two oneshots without volume/number that share a title).
+function buildChapterDirName(chapter) {
+  if (!chapter) return 'Chapter';
+  const id = chapter.id;
+  const parts = [];
+  if (chapter.volume != null) parts.push(`Vol.${formatChapterNum(chapter.volume)}`);
+  if (chapter.number != null) parts.push(`Ch.${formatChapterNum(chapter.number)}`);
+  let base;
+  if (parts.length > 0) {
+    base = parts.join(' ');
+    // Include the chapter title only when it's short enough not to
+    // explode the path length on long manga titles.
+    if (chapter.title && chapter.title.length <= 40) {
+      base += ` - ${chapter.title}`;
+    }
+  } else if (chapter.folder_name) {
+    base = chapter.folder_name;
+  } else {
+    base = 'Chapter';
+  }
+  return `${sanitizeFsName(base)} [${id}]`;
+}
+
+// Inverse of `buildChapterDirName`: recover whatever chapter info we
+// can from a folder name on disk. Used by the filesystem-as-source-of-
+// truth scanner (offlineApi.js) when IDB has no row for the chapter
+// but the bytes are still on disk.
+//
+// Recognized shapes:
+//   "Vol.2 Ch.5 - Title [9100]"  →  { id: 9100, volume: 2,  number: 5,    title: "Title" }
+//   "Vol.2 Ch.5 [9100]"          →  { id: 9100, volume: 2,  number: 5,    title: null }
+//   "Ch.5 [9100]"                →  { id: 9100, volume: null, number: 5,  title: null }
+//   "Vol.2 [9100]"               →  { id: 9100, volume: 2,  number: null, title: null }
+//   "<folder_name> [9100]"       →  { id: 9100, folder_name: "<folder_name>" }
+//   "9100"                       →  { id: 9100 }                   (pre-v1.6.2 layout)
+//   anything else                →  null  (caller skips this entry)
+//
+// The `[id]` trailing tag is the only required field — every chapter
+// the downloader has ever written carries it. Folders without an `[id]`
+// suffix and without a numeric-only name are skipped to avoid surfacing
+// e.g. system `.thumbs/` dirs or stray user-created subfolders.
+export function parseChapterDirName(name) {
+  if (!name) return null;
+
+  // Legacy numeric layout (pre-v1.6.2): the entire folder name is the id.
+  if (/^\d+$/.test(name)) {
+    return { id: Number(name), volume: null, number: null, title: null, folder_name: null };
+  }
+
+  // v1.6.2+ layout: "...stuff... [id]"
+  const m = name.match(/^(.*) \[(\d+)\]$/);
+  if (!m) return null;
+  const inner = m[1].trim();
+  const id    = Number(m[2]);
+
+  // Try to peel off Vol.X / Ch.Y prefixes. Both, either, or neither
+  // can be present; the remainder (after a " - " separator) is the
+  // chapter title.
+  let rest = inner;
+  let volume = null;
+  let number = null;
+
+  const volM = rest.match(/^Vol\.([0-9]+(?:\.[0-9]+)?)\s*/);
+  if (volM) {
+    volume = Number(volM[1]);
+    rest = rest.slice(volM[0].length);
+  }
+  const chM = rest.match(/^Ch\.([0-9]+(?:\.[0-9]+)?)\s*/);
+  if (chM) {
+    number = Number(chM[1]);
+    rest = rest.slice(chM[0].length);
+  }
+
+  let title = null;
+  let folder_name = null;
+  if (rest.startsWith('- ')) {
+    title = rest.slice(2).trim() || null;
+  } else if (volume == null && number == null && rest) {
+    // Folder name was used as the base (no Vol/Ch parsed) — preserve
+    // it so the chapter still has a label for display.
+    folder_name = rest;
+  }
+
+  return { id, volume, number, title, folder_name };
+}
+
+// Drops anything that's illegal inside a Windows / Android filesystem
+// path segment + collapses runs of whitespace + trims the result.
+// Preserves Unicode letters (CJK series titles travel through verbatim)
+// AND keeps spaces and hyphens — they're path-safe and are what makes
+// the resulting `Vol.2 Ch.5 - Title` actually readable.
+function sanitizeFsName(s) {
+  return String(s == null ? '' : s)
+    .replace(/[/\\:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// `5` → "5", `5.5` → "5.5", `5.0` → "5". Avoids JS's default
+// toString() that would render `5` as just `5` but `5.0` also as `5`.
+function formatChapterNum(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return String(n);
+  return Number.isInteger(num) ? String(num) : String(num);
+}
 
 const _listeners = new Set();
 const _inflight  = new Map(); // jobId → AbortController
@@ -365,10 +493,17 @@ export async function deleteSeries(mangaId) {
   notify();
 }
 
-// Remove a single chapter on disk + its IDB rows. Series stays downloaded.
+// Remove a single chapter on disk + its IDB rows. Series stays
+// downloaded. The on-disk path is the one the downloader recorded at
+// write time — newer chapters get the friendly `Vol.X Ch.Y [id]`
+// layout, older chapters (downloaded before v1.6.2) still carry the
+// legacy numeric `${mangaId}/chapters/${chapterId}` path. We read it
+// off the IDB row so both work without branching on age.
 export async function deleteChapter(mangaId, chapterId) {
   if (!offlineStorageAvailable()) return;
-  await removePath(chapterDir(mangaId, chapterId), { recursive: true });
+  const row = await getOfflineChapter(chapterId);
+  const dirPath = (row && row.chapter_dir_path) || `${mangaId}/chapters/${chapterId}`;
+  await removePath(dirPath, { recursive: true });
   await deleteOfflineChapter(chapterId);
   notify();
 }
@@ -492,13 +627,20 @@ async function downloadChapter(job, signal) {
   if (!chapter) throw new Error(`Chapter ${chapterId} not found on server`);
 
   // Per-page download. We record progress on the job after each page so the
-  // UI can render "12 / 47".
+  // UI can render "12 / 47". `chapterDirRel` is the chapter directory
+  // path under the offline root — computed once from the chapter's
+  // server metadata (volume/number/title) and reused for every page +
+  // the meta.json. Stored on the offline_chapters row at the end so
+  // delete / read operations can resolve back to the exact folder
+  // without having to recompute (and without depending on whether the
+  // server-side metadata changed after the download).
+  const chapterDirRel = chapterDirFor(mangaId, chapter);
   const pageRows = [];
   for (let i = 0; i < pages.length; i++) {
     if (signal.aborted) throw new Error('aborted');
     const p = pages[i];
     const ext = extractExt(p.filename) || guessExtFromMime(p) || 'jpg';
-    const relPath = pagePath(mangaId, chapterId, p.page_index ?? i, ext);
+    const relPath = pagePathFor(mangaId, chapter, p.page_index ?? i, ext);
 
     const url = buildPageImageUrl(p.id);
     const bytes = await fetchBinary(url, signal);
@@ -552,17 +694,28 @@ async function downloadChapter(job, signal) {
     server_updated_at:  chapter.updated_at ?? null,
     server_page_count:  pages.length,
     encrypted:          wasEncrypted,
+    // Persisted so `deleteChapter` can find the right folder on disk
+    // even after a future schema change to the dir-name builder.
+    // Legacy rows (pre-v1.6.2) won't have this field; the delete path
+    // falls back to the old numeric `${mangaId}/chapters/${chapterId}`
+    // layout for them.
+    chapter_dir_path:   chapterDirRel,
   });
-  await writeText(chapterJsonPath(mangaId, chapterId), JSON.stringify({
+  await writeText(chapterJsonPathFor(mangaId, chapter), JSON.stringify({
     id:                 chapterId,
     manga_id:           mangaId,
     number:             chapter.number ?? null,
     volume:             chapter.volume ?? null,
     title:              chapter.title ?? null,
+    folder_name:        chapter.folder_name ?? null,
     page_count:         pages.length,
     pages:              pageRows,
     downloaded_at:      Date.now(),
     server_updated_at:  chapter.updated_at ?? null,
+    // `encrypted` lets the filesystem scanner know whether to take the
+    // decrypt-to-blob path on read. IDB carries the same flag; the
+    // sidecar copy here is what survives an IDB wipe.
+    encrypted:          wasEncrypted,
   }, null, 2));
   notify();
 }

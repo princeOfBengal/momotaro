@@ -14,14 +14,26 @@ function isNativeShell() {
       && window.Capacitor.isNativePlatform();
 }
 
+// On the Electron desktop shell the in-tree plugin is exposed by the preload at
+// window.MomotaroElectron.ImmersiveMode (the Capacitor Electron platform
+// doesn't route bare registerPlugin() calls to in-tree plugins). On Android the
+// registerPlugin() proxy reaches the native plugin via the bridge directly.
+function electronBridge() {
+  return (typeof window !== 'undefined'
+      && window.MomotaroElectron
+      && window.MomotaroElectron.ImmersiveMode) || null;
+}
+
 /**
  * Hide both the status bar and the navigation bar. Swipe from the screen
  * edge transiently reveals them, then they auto-hide — the standard
- * "sticky immersive" UX.
+ * "sticky immersive" UX. On desktop this fullscreens the window + hides the
+ * menu bar.
  */
 export async function enableImmersive() {
   if (!isNativeShell()) return;
-  try { await ImmersiveMode.enable(); } catch { /* best-effort */ }
+  const eb = electronBridge();
+  try { await (eb ? eb.enable() : ImmersiveMode.enable()); } catch { /* best-effort */ }
 }
 
 /**
@@ -30,5 +42,6 @@ export async function enableImmersive() {
  */
 export async function disableImmersive() {
   if (!isNativeShell()) return;
-  try { await ImmersiveMode.disable(); } catch { /* best-effort */ }
+  const eb = electronBridge();
+  try { await (eb ? eb.disable() : ImmersiveMode.disable()); } catch { /* best-effort */ }
 }

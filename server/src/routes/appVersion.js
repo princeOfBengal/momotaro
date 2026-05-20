@@ -6,52 +6,68 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 
 const router = express.Router();
 
-const VERSION_FILENAME = 'version.json';
-const APK_FILENAME = 'momotaro.apk';
+// Per-platform self-hosted distribution. Each platform has a flat metadata file
+// and a binary in DATA/downloads. The release process drops the binary and
+// edits the JSON — no DB row, no migration (see BUILD_ANDROID.md /
+// BUILD_LINUX.md → Self-hosted distribution).
+const CHANNELS = {
+  android: { versionFile: 'version.json',       binary: 'momotaro.apk',      urlField: 'apk_url' },
+  linux:   { versionFile: 'version-linux.json', binary: 'momotaro.AppImage', urlField: 'appimage_url' },
+};
 
 /**
- * GET /api/app/version
+ * GET /api/app/version?platform=android|linux
  *
- * Public — used by the Android app's first-launch / on-resume update check.
- * Reads `data/downloads/version.json` and reports the latest available
- * release plus the URL the user's browser can hit to download the APK.
+ * Public — used by the native app's first-launch / on-resume update check
+ * (Android APK and Linux AppImage). `platform` defaults to `android` so
+ * existing Android clients that call `/api/app/version` with no query string
+ * keep working unchanged.
  *
- * Returns 404 when no APK has been published yet (file missing). The
- * client treats 404 as "no update available" and stays silent.
- *
- * The version.json file is human-edited as part of the release process
- * (see BUILD_ANDROID.md → Self-hosted distribution). Keeping it as a flat
- * file rather than a DB row means there's no migration step and the
- * release process is `cp` + edit a small JSON — easy to script later.
+ * Reads `data/downloads/<versionFile>` and reports the latest available release
+ * plus the URL the user can hit to download the build. Returns 404 when nothing
+ * is published for that platform; the client treats 404 as "no update" and
+ * stays silent. Both a generic `download_url` and the legacy per-platform field
+ * (`apk_url` / `appimage_url`) are returned.
  */
 router.get('/app/version', asyncWrapper(async (req, res) => {
-  const versionFile = path.join(config.DOWNLOADS_DIR, VERSION_FILENAME);
-  const apkFile     = path.join(config.DOWNLOADS_DIR, APK_FILENAME);
+  const platform = String(req.query.platform || 'android').toLowerCase();
+  const channel = CHANNELS[platform];
+  if (!channel) {
+    return res.status(400).json({
+      error: `Unknown platform '${platform}'. Expected one of: ${Object.keys(CHANNELS).join(', ')}.`,
+    });
+  }
 
-  if (!fs.existsSync(versionFile) || !fs.existsSync(apkFile)) {
-    return res.status(404).json({ error: 'No published APK on this server.' });
+  const versionFile = path.join(config.DOWNLOADS_DIR, channel.versionFile);
+  const binaryFile  = path.join(config.DOWNLOADS_DIR, channel.binary);
+
+  if (!fs.existsSync(versionFile) || !fs.existsSync(binaryFile)) {
+    return res.status(404).json({ error: `No published ${platform} build on this server.` });
   }
 
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(versionFile, 'utf8'));
   } catch (err) {
-    return res.status(500).json({ error: 'version.json is malformed: ' + err.message });
+    return res.status(500).json({ error: `${channel.versionFile} is malformed: ` + err.message });
   }
 
   if (!parsed.version) {
-    return res.status(500).json({ error: 'version.json is missing required `version` field.' });
+    return res.status(500).json({ error: `${channel.versionFile} is missing required \`version\` field.` });
   }
 
-  const stat = fs.statSync(apkFile);
+  const stat = fs.statSync(binaryFile);
+  const downloadUrl = `/downloads/${channel.binary}`;
 
   res.json({
     data: {
-      version:     String(parsed.version),
-      apk_url:     `/downloads/${APK_FILENAME}`,
-      released_at: parsed.released_at || null,
-      notes:       parsed.notes || null,
-      size_bytes:  stat.size,
+      version:            String(parsed.version),
+      platform,
+      download_url:        downloadUrl,
+      [channel.urlField]:  downloadUrl, // apk_url / appimage_url — back-compat
+      released_at:         parsed.released_at || null,
+      notes:               parsed.notes || null,
+      size_bytes:          stat.size,
     },
   });
 }));

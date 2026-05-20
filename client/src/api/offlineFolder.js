@@ -11,7 +11,18 @@
 
 import { registerPlugin, Capacitor } from '@capacitor/core';
 
-const OfflineFolder = registerPlugin('OfflineFolder');
+// On the Electron desktop shell the in-tree plugin is exposed by the preload at
+// window.MomotaroElectron.OfflineFolder (the Capacitor Electron platform
+// doesn't route bare registerPlugin() calls to in-tree plugins). On Android the
+// registerPlugin() proxy reaches the native plugin via the bridge directly. The
+// bridge object has the same method names, so every call site below is
+// unchanged. Evaluated once at module load — the preload runs before any
+// renderer script, so window.MomotaroElectron is already present on electron.
+const OfflineFolder =
+  (typeof window !== 'undefined'
+    && window.MomotaroElectron
+    && window.MomotaroElectron.OfflineFolder)
+  || registerPlugin('OfflineFolder');
 
 export class OfflineFolderUnavailableError extends Error {
   constructor(msg = 'Offline folder is only available in the Android app') {

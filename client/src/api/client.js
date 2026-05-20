@@ -704,11 +704,20 @@ const _rawApi = {
   // URL before asking the user for a device name.
   healthCheck: () => apiFetch('/api/health'),
 
-  // Public app-version metadata — used by the Android app's update check.
-  // Returns { version, apk_url, released_at, notes, size_bytes }, or 404
-  // if the server has no published APK. The caller swallows 404s
-  // silently (no update advertised, not an error).
-  getAppVersion: () => apiFetch('/api/app/version'),
+  // Public app-version metadata — used by the native apps' update check.
+  // Sends `platform` so the server picks the right channel: 'linux' for the
+  // Electron desktop app (AppImage), 'android' otherwise (APK; also the
+  // server's default for back-compat). Returns { version, download_url,
+  // apk_url|appimage_url, released_at, notes, size_bytes }, or 404 when the
+  // server has nothing published for that platform (swallowed silently).
+  getAppVersion: () => {
+    const isElectron = typeof window !== 'undefined'
+      && window.Capacitor
+      && typeof window.Capacitor.getPlatform === 'function'
+      && window.Capacitor.getPlatform() === 'electron';
+    const platform = isElectron ? 'linux' : 'android';
+    return apiFetch(`/api/app/version?platform=${platform}`);
+  },
 
   // Helpers
   // `<img src>` requests are initiated by the browser, not by our

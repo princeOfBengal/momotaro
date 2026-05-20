@@ -1,0 +1,11 @@
+{
+  "electron": "26.6.10",
+  "probe": {
+    "hasOpenExternal": true,
+    "platform": "electron",
+    "httpResult": "opened:https://my-momotaro.example/downloads/momotaro.AppImage"
+  },
+  "openedByMain": [
+    "https://my-momotaro.example/downloads/momotaro.AppImage"
+  ]
+}

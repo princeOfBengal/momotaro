@@ -12,7 +12,16 @@
 
 import { registerPlugin } from '@capacitor/core';
 
-const KeepAlive = registerPlugin('DownloadKeepAlive');
+// On the Electron desktop shell the in-tree plugin is exposed by the preload at
+// window.MomotaroElectron.DownloadKeepAlive (the Capacitor Electron platform
+// doesn't route bare registerPlugin() calls to in-tree plugins). On Android the
+// registerPlugin() proxy reaches the native plugin directly. Same method names,
+// so every call site below is unchanged.
+const KeepAlive =
+  (typeof window !== 'undefined'
+    && window.MomotaroElectron
+    && window.MomotaroElectron.DownloadKeepAlive)
+  || registerPlugin('DownloadKeepAlive');
 
 function isNativeShell() {
   return typeof window !== 'undefined'

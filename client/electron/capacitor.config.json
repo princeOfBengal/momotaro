@@ -1,0 +1,12 @@
+{
+  "appId": "dev.momotaro.app",
+  "appName": "Momotaro",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "hostname": "momotaro.app"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

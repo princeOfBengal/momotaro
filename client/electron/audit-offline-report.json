@@ -1,0 +1,56 @@
+{
+  "electron": "26.6.10",
+  "offlineApiChunk": "offlineApi-C0wK9XSe.js",
+  "test": {
+    "imported": true,
+    "manga": {
+      "id": 5,
+      "title": "Test Series",
+      "author": "A. Author",
+      "genres": [
+        "Action",
+        "Drama"
+      ],
+      "chapter_count": 1,
+      "chapters": [
+        9100
+      ],
+      "coverScheme": "momotaro-offline",
+      "is_offline": true
+    },
+    "getChapters": [
+      {
+        "id": 9100,
+        "number": 1,
+        "volume": 1,
+        "title": "Intro"
+      }
+    ],
+    "getChapter": {
+      "id": 9100,
+      "manga_id": 5
+    },
+    "pages": [
+      {
+        "id": 111,
+        "idx": 0,
+        "scheme": "momotaro-offline"
+      },
+      {
+        "id": 112,
+        "idx": 1,
+        "scheme": "momotaro-offline"
+      }
+    ],
+    "firstPageRender": "ok:1",
+    "pageImageUrlSync": "momotaro-offline",
+    "library": [
+      5
+    ],
+    "homeRecent": [
+      5
+    ],
+    "navigatorOnLine": true,
+    "platform": "electron"
+  }
+}

@@ -5,20 +5,29 @@ import { useAppUpdateCheck } from '../hooks/useAppUpdateCheck';
 // card affordance, just different content.
 import './InstallPrompt.css';
 
-// In-app update banner for the self-hosted APK.
+// In-app update banner for the self-hosted native builds (Android APK,
+// Linux AppImage).
 //
-// Renders only inside the Capacitor native shell (the hook gates that),
-// and only when the server's published APK version differs from the
-// bundled `APP_VERSION`. Tapping "Update" opens the APK URL in the
-// system browser via `target="_blank"` — Android then downloads it and
-// shows the install prompt. We deliberately don't try to handle the
-// install in-app (would require REQUEST_INSTALL_PACKAGES + a
-// FileProvider URI dance); the system handler is well-trodden.
+// Renders only inside the native shell (the hook gates that), and only when the
+// server's published version differs from the bundled `APP_VERSION`. Tapping
+// "Update" opens the download URL in the system browser, which then downloads
+// the APK / AppImage. On Android this is a plain `target="_blank"` anchor; on
+// the Electron desktop shell navigation is locked to the app's custom scheme,
+// so we route through window.MomotaroElectron.openExternal (shell.openExternal)
+// instead. We deliberately don't install in-app (Android would need
+// REQUEST_INSTALL_PACKAGES; the system handler is well-trodden).
 //
 // Hidden on the reader route so it never lands on top of page-turn taps.
 export default function UpdateBanner() {
   const location = useLocation();
   const { update, dismiss } = useAppUpdateCheck();
+
+  // On the desktop shell, open the download in the OS browser via the bridge.
+  const electronOpen = (typeof window !== 'undefined'
+      && window.MomotaroElectron
+      && typeof window.MomotaroElectron.openExternal === 'function')
+    ? window.MomotaroElectron.openExternal
+    : null;
 
   if (!update) return null;
   if (location.pathname.startsWith('/read/')) return null;
@@ -38,14 +47,24 @@ export default function UpdateBanner() {
             {update.notes || 'Tap Update to download the new APK.'}
           </p>
         </div>
-        <a
-          className="install-banner-cta"
-          href={update.apkUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Update
-        </a>
+        {electronOpen ? (
+          <button
+            className="install-banner-cta"
+            type="button"
+            onClick={() => electronOpen(update.downloadUrl)}
+          >
+            Update
+          </button>
+        ) : (
+          <a
+            className="install-banner-cta"
+            href={update.downloadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Update
+          </a>
+        )}
         <button
           className="install-banner-close"
           onClick={dismiss}

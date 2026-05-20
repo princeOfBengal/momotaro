@@ -1,0 +1,36 @@
+{
+  "electron": "26.6.10",
+  "bridge": {
+    "hasBridge": true,
+    "reqPerms": {
+      "notifications": "granted"
+    },
+    "isSupported": {
+      "supported": true,
+      "notificationsGranted": true
+    },
+    "consume": {
+      "reports": []
+    },
+    "setPlanOk": true
+  },
+  "beforeClose": {
+    "visible": true,
+    "destroyed": false
+  },
+  "afterCloseWhileActive": {
+    "destroyed": false,
+    "visible": false
+  },
+  "afterStopWhileVisible": {
+    "destroyed": false,
+    "visible": true,
+    "windows": 1
+  },
+  "appAliveAfterStopVisible": true,
+  "beforeFinalStop": {
+    "visible": false,
+    "destroyed": false
+  },
+  "stopQuitWhenHidden": true
+}

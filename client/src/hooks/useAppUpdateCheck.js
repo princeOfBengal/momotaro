@@ -46,14 +46,16 @@ export function useAppUpdateCheck() {
         if (cancelled || !data?.version) return;
         if (data.version === APP_VERSION) return;
         if (localStorage.getItem(DISMISSED_KEY) === data.version) return;
-        // Compose absolute APK URL using the same server-URL prepending
-        // logic we use for media: server's `apk_url` is relative.
-        const apkAbsolute = data.apk_url?.startsWith('/')
-          ? `${api.getServerUrl()}${data.apk_url}`
-          : data.apk_url;
+        // Compose the absolute download URL using the same server-URL
+        // prepending logic we use for media. `download_url` is the generic
+        // field (APK or AppImage); `apk_url` is the legacy Android field.
+        const downloadRel = data.download_url || data.apk_url;
+        const downloadAbsolute = downloadRel?.startsWith('/')
+          ? `${api.getServerUrl()}${downloadRel}`
+          : downloadRel;
         setUpdate({
           version:     data.version,
-          apkUrl:      apkAbsolute,
+          downloadUrl: downloadAbsolute,
           releasedAt:  data.released_at,
           notes:       data.notes,
           sizeBytes:   data.size_bytes,

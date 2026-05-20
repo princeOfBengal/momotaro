@@ -1,0 +1,33 @@
+{
+  "electron": "26.6.10",
+  "seededRoot": "C:\\Users\\arafa\\AppData\\Local\\Temp\\momotaro-offline-LIa4kQ",
+  "probe": {
+    "secureAtStart": true,
+    "subtleAtStart": "object",
+    "status": {
+      "configured": true,
+      "treeUri": "C:\\Users\\arafa\\AppData\\Local\\Temp\\momotaro-offline-LIa4kQ",
+      "displayName": "C:\\Users\\arafa\\AppData\\Local\\Temp\\momotaro-offline-LIa4kQ"
+    },
+    "existsPage": true,
+    "existsMissing": false,
+    "listFiles": [
+      "Vol.2 Ch.5 [9100]/"
+    ],
+    "mangaJsonRoundTrip": true,
+    "encRoundTrip": true,
+    "encEnvelopeBytes": 54,
+    "fileUrl": "momotaro-offline://file/5/chapters/Vol.2%20Ch.5%20%5B9100%5D/0001.jpg",
+    "imgRender": "ok:1"
+  },
+  "onDisk": {
+    "pageExists": true,
+    "coverExists": true,
+    "mangaJsonExists": true,
+    "pageBytes": 70
+  },
+  "afterDelete": {
+    "exists": false,
+    "onDiskGone": true
+  }
+}

@@ -55,6 +55,7 @@ function suggestedDeviceName(platform) {
     const phone = parts.find(p => /(SM-|Pixel|iPhone|iPad|OnePlus|Mi |Redmi)/i.test(p));
     if (phone) return phone;
   }
+  if (platform === 'electron')        return 'Linux PC';
   if (platform.startsWith('android')) return 'Android device';
   if (platform.startsWith('ios'))     return 'iOS device';
   if (platform.startsWith('windows')) return 'Windows PC';

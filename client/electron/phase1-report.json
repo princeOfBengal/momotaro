@@ -1,0 +1,30 @@
+{
+  "electron": "26.6.10",
+  "chrome": "116.0.5845.228",
+  "probe": {
+    "isNativePlatform": true,
+    "getPlatform": "electron",
+    "hasMomotaroBridge": true,
+    "bridgePlatform": "electron",
+    "hasImmersiveEnable": true,
+    "hasImmersiveDisable": true,
+    "locationPathname": "/pairing",
+    "rootChildCount": 2,
+    "bodyTextSnippet": "You are offline — server unreachable. Downloaded content is still available. Try again WELCOME Pair this device Connect this device to your ",
+    "httpFetch": "ok:200"
+  },
+  "immersive": {
+    "before": {
+      "menuBarVisible": true,
+      "fullScreen": false
+    },
+    "afterEnable": {
+      "menuBarVisible": false,
+      "fullScreen": true
+    },
+    "afterDisable": {
+      "menuBarVisible": true,
+      "fullScreen": false
+    }
+  }
+}

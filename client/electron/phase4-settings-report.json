@@ -1,0 +1,13 @@
+{
+  "electron": "26.6.10",
+  "settings": {
+    "path": "/settings",
+    "platform": "electron",
+    "hasLinuxNav": true,
+    "hasAndroidNav": true,
+    "foundLinuxButton": true,
+    "hasDownloadAppImage": true,
+    "hasUpdateCheck": true,
+    "mentionsAppImagePath": true
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "appId": "dev.momotaro.app",
+  "productName": "Momotaro",
+  "directories": {
+    "buildResources": "resources",
+    "output": "dist-electron"
+  },
+  "files": [
+    "assets/**/*",
+    "build/**/*",
+    "capacitor.config.*",
+    "app/**/*"
+  ],
+  "linux": {
+    "target": ["AppImage"],
+    "category": "Graphics",
+    "icon": "assets/appIcon.png",
+    "executableName": "momotaro",
+    "artifactName": "Momotaro-${version}.${ext}",
+    "synopsis": "Self-hosted manga reader — desktop client",
+    "description": "Momotaro desktop client: browse, read, and download your self-hosted manga library offline."
+  },
+  "win": {
+    "target": "nsis",
+    "icon": "assets/appIcon.ico"
+  },
+  "mac": {
+    "category": "public.app-category.entertainment",
+    "target": "dmg"
+  },
+  "nsis": {
+    "allowElevation": true,
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

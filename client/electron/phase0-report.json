@@ -1,0 +1,26 @@
+{
+  "electron": "26.6.10",
+  "chrome": "116.0.5845.228",
+  "node": "18.16.1",
+  "configs": [
+    {
+      "config": "secure+webSecurity:true+allowInsecure",
+      "hasCapacitor": true,
+      "customPlatformName": "electron",
+      "getPlatform": "electron",
+      "isNativePlatform": true,
+      "convertFileSrc": "/5/chapters/Vol.2 Ch.5 [9100]/0001.jpg",
+      "isSecureContext": true,
+      "hasSubtleCrypto": true,
+      "aesGcmRoundTrip": true,
+      "offlineProtocolImg": "ok:1",
+      "httpImg": "ok:1",
+      "httpFetch": "ok:200"
+    },
+    {
+      "config": "webSecurity:false",
+      "harnessError": "ERR_FAILED (-2) loading 'capacitor-electron://-/'"
+    }
+  ],
+  "httpServerPort": 2857
+}

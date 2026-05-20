@@ -16,6 +16,7 @@
     "react-router-dom": "^6.23.1"
   },
   "devDependencies": {
+    "@capacitor-community/electron": "^5.0.1",
     "@capacitor/android": "^8.3.4",
     "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^8.3.4",

@@ -4,15 +4,59 @@ All routes are prefixed `/api`. Server runs on port 3000 in development.
 
 The client API layer lives in [client/src/api/client.js](../client/src/api/client.js).
 
-## Device Identity Header
+## Auth Headers
 
-Every request from the client includes:
+The client attaches up to four identity headers depending on what it has
+configured. Each represents a different access layer:
 
-```
-X-Device-ID: <uuid>
-```
+| Header | Layer | Set by |
+|---|---|---|
+| `X-Device-ID: <uuid>` | Device UUID (legacy / telemetry) | Generated on first load, persisted in `localStorage` as `momotaro_device_id`. No longer used for AniList scoping (that's now per-user). |
+| `Authorization: Bearer <token>` / `X-Client-Token` | **Device trust** — paired client | `POST /api/pairing/submit-pin`. Required when `auth_enabled = 1`. |
+| `X-Admin-Token` | **Admin capability** | `POST /api/admin/login`. Gates Client Management, Port Forwarding, DB ops, user management. |
+| `X-User-Token` | **User identity** — who is reading | `POST /api/users/login` or `/register`. Required when `multi_user_enabled = 1` (the default since the user-accounts release). |
 
-The UUID is generated on first load and persisted in `localStorage` as `momotaro_device_id`. Endpoints that read or write AniList session state use this header to scope data to the requesting device.
+Returned errors:
+- Missing/invalid device token (when `auth_enabled = 1`, off-LAN, no admin) → `401 "Authentication required"`.
+- Missing/invalid user token (when `multi_user_enabled = 1`, no admin bridge) on a per-user route → `401 "User authentication required"`.
+
+## User Accounts
+
+Multi-user accounts (see [user-accounts.md](./user-accounts.md)). Reachable
+once the request has passed the network gate so an unpaired external visitor
+can't register (requirement #6).
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/users/register` | Body: `{ username, password, display_name? }`. The first account adopts the default user (id=1), inheriting all pre-accounts reading data. Returns `{ user_token, user }`. Gated by `allow_registration` (default on). |
+| `POST` | `/api/users/login` | Body: `{ username, password }`. Generic 401 (no enumeration). Returns `{ attempts_remaining }` on failure and `seconds_remaining` when the 5-strikes-→-24h device lockout fires (429). |
+| `POST` | `/api/users/logout` | Revokes the bearer session. |
+| `GET`  | `/api/users/me` | The active account profile. |
+| `GET`  | `/api/users/exists?username=` | Boolean availability check for the register form (rate-limited). |
+| `GET`  | `/api/history?limit=N` | The caller's own reading-history timeline (newest first). |
+| `DELETE` | `/api/history` | Clear the caller's own reading history. |
+
+### Admin user management (admin-only)
+
+All gated by `X-Admin-Token`. Requirement #10: the operator has total power
+over every account.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`    | `/api/admin/users` | Roster with per-user counts (sessions, progress, lists, history, AniList linked). |
+| `POST`   | `/api/admin/users` | Admin-create. First admin-created account adopts the default user. |
+| `PATCH`  | `/api/admin/users/:id` | Body keys: `display_name`, `is_admin`, `disabled`, `new_password`. Password reset / disable also revoke that user's sessions. |
+| `DELETE` | `/api/admin/users/:id` | Cascades progress, lists, history, sessions, AniList linkage via FK. **Cannot delete the primary account (id=1).** |
+| `POST`   | `/api/admin/users/:id/revoke-sessions` | Force-logout on every device. |
+| `GET`    | `/api/admin/users/:id/history` | One user's reading history. |
+| `GET`    | `/api/admin/users/:id/export` | Full per-user JSON bundle (account + sessions/devices + progress by path + lists + history). **Never includes password hash or AniList token.** |
+| `GET`    | `/api/admin/reading-history` | All-users timeline joined to username; `?format=csv` reuses the connection-log CSV helpers. |
+| `GET`    | `/api/admin/login-lockouts` | Active login lockouts + the configured cap. |
+| `DELETE` | `/api/admin/login-lockouts/:key` | Clear one device's login lockout (admin escape hatch). |
+
+The `multi_user_enabled` and `allow_registration` flags are part of
+`GET/PUT /api/admin/security-settings` alongside `auth_enabled` and
+`lan_bypass_enabled`.
 
 ---
 

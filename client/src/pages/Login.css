@@ -1,0 +1,34 @@
+/* Login / create-account screen. Layout primitives (pw-*) are shared with the
+   pairing wizard (Pairing.css); only the tab strip is login-specific. */
+
+.lg-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.lg-tab {
+  flex: 1;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.lg-tab.active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.lg-optional {
+  color: var(--text-muted);
+  font-weight: 400;
+}

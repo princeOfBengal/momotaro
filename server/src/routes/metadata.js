@@ -14,7 +14,8 @@ const {
   MU_REQUEST_INTERVAL_MS,
 } = require('../metadata/mangaupdates');
 const { getCached: getCachedMetadata } = require('../metadata/cache');
-const { getSetting, getDeviceSession } = require('./settings');
+const { getSetting, getUserAniList } = require('./settings');
+const { requireAdmin } = require('../middleware/auth');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { reinforceActiveCover } = require('../scanner/coverResolver');
 const cbzCache = require('../scanner/cbzCache');
@@ -35,17 +36,17 @@ function getMalClientId(db) {
 }
 
 // AniList user-list cache. Hit on every manga-detail page open via
-// GET /manga/:id/anilist-status, so we cache the result per (device, media)
+// GET /manga/:id/anilist-status, so we cache the result per (user, media)
 // for a short window to keep page browsing from triggering an AniList ping
 // each time. Mutations (PATCH .../anilist-progress) refresh the entry and
 // invalidate is implicit because we overwrite with the post-mutation value.
 const ANILIST_LIST_CACHE_TTL_SECONDS = 5 * 60;
 
-function getCachedListEntry(db, deviceId, mediaId) {
-  if (!deviceId || !mediaId) return null;
+function getCachedListEntry(db, userId, mediaId) {
+  if (!userId || !mediaId) return null;
   const row = db.prepare(
-    'SELECT entry_json, fetched_at FROM anilist_media_list_cache WHERE device_id = ? AND media_id = ?'
-  ).get(deviceId, mediaId);
+    'SELECT entry_json, fetched_at FROM anilist_media_list_cache WHERE user_id = ? AND media_id = ?'
+  ).get(userId, mediaId);
   if (!row) return null;
   const ageSeconds = Math.floor(Date.now() / 1000) - row.fetched_at;
   if (ageSeconds > ANILIST_LIST_CACHE_TTL_SECONDS) return null;
@@ -58,15 +59,15 @@ function getCachedListEntry(db, deviceId, mediaId) {
   }
 }
 
-function setCachedListEntry(db, deviceId, mediaId, entry) {
-  if (!deviceId || !mediaId) return;
+function setCachedListEntry(db, userId, mediaId, entry) {
+  if (!userId || !mediaId) return;
   db.prepare(`
-    INSERT INTO anilist_media_list_cache (device_id, media_id, entry_json, fetched_at)
+    INSERT INTO anilist_media_list_cache (user_id, media_id, entry_json, fetched_at)
     VALUES (?, ?, ?, unixepoch())
-    ON CONFLICT(device_id, media_id) DO UPDATE SET
+    ON CONFLICT(user_id, media_id) DO UPDATE SET
       entry_json = excluded.entry_json,
       fetched_at = excluded.fetched_at
-  `).run(deviceId, mediaId, entry === null ? null : JSON.stringify(entry));
+  `).run(userId, mediaId, entry === null ? null : JSON.stringify(entry));
 }
 
 // Display priority for the metadata fields shown in the UI.
@@ -484,11 +485,11 @@ router.post('/manga/:id/apply-metadata', asyncWrapper(async (req, res) => {
 router.patch('/manga/:id/anilist-progress', asyncWrapper(async (req, res) => {
   const db = getDb();
 
-  const deviceId = req.headers['x-device-id'] || null;
-  const session  = getDeviceSession(db, deviceId);
-  const token    = session?.anilist_token   || null;
-  const userId   = session?.anilist_user_id || null;
-  if (!token || !userId) return res.status(401).json({ error: 'Not logged in to AniList' });
+  const userId        = req.user?.id || null;
+  const session       = getUserAniList(db, userId);
+  const token         = session?.anilist_token   || null;
+  const anilistUserId = session?.anilist_user_id || null;
+  if (!token || !anilistUserId) return res.status(401).json({ error: 'Not logged in to AniList' });
 
   const manga = db.prepare('SELECT anilist_id FROM manga WHERE id = ?').get(req.params.id);
   if (!manga)            return res.status(404).json({ error: 'Manga not found' });
@@ -505,20 +506,20 @@ router.patch('/manga/:id/anilist-progress', asyncWrapper(async (req, res) => {
   // Fetch current entry to preserve existing status when only progress changes.
   // The user-list cache is fine to consult here — if it's fresh, we trust it.
   let existing;
-  const cached = getCachedListEntry(db, deviceId, manga.anilist_id);
+  const cached = getCachedListEntry(db, userId, manga.anilist_id);
   if (cached) {
     existing = cached.entry;
   } else {
-    existing = await getMediaListEntry(token, userId, manga.anilist_id).catch(() => null);
-    setCachedListEntry(db, deviceId, manga.anilist_id, existing);
+    existing = await getMediaListEntry(token, anilistUserId, manga.anilist_id).catch(() => null);
+    setCachedListEntry(db, userId, manga.anilist_id, existing);
   }
   const resolvedStatus = status || existing?.status || 'CURRENT';
 
   await saveMediaListEntry(token, manga.anilist_id, resolvedStatus, progressArg);
 
   // Re-fetch fresh entry to return to client; refresh the cache with the new value.
-  const updated = await getMediaListEntry(token, userId, manga.anilist_id).catch(() => null);
-  setCachedListEntry(db, deviceId, manga.anilist_id, updated);
+  const updated = await getMediaListEntry(token, anilistUserId, manga.anilist_id).catch(() => null);
+  setCachedListEntry(db, userId, manga.anilist_id, updated);
   res.json({ data: { entry: updated } });
 }));
 
@@ -748,7 +749,7 @@ function markAttempted(db, mangaIds, nowSeconds) {
 // `last_metadata_fetch_attempt_at` is still stamped so the *automatic*
 // post-scan metadata fetch can honour a cooldown. The bulk endpoint itself
 // no longer respects the cooldown — the user explicitly asked for a refresh.
-router.post('/libraries/:id/bulk-metadata', asyncWrapper(async (req, res) => {
+router.post('/libraries/:id/bulk-metadata', requireAdmin, asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
@@ -1133,7 +1134,7 @@ function loadCachedRemoteForExport(manga) {
 //     no cache), skip — there's nothing third-party to export.
 //
 // The DB row itself is never touched; only the on-disk sidecar is written.
-router.post('/libraries/:id/export-metadata', asyncWrapper(async (req, res) => {
+router.post('/libraries/:id/export-metadata', requireAdmin, asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
@@ -1430,7 +1431,7 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
 //
 // Files on disk other than the JSON sidecars are not touched. Cover-image
 // files for other sources stay on disk (orphaned but harmless).
-router.post('/libraries/:id/reset-metadata', asyncWrapper(async (req, res) => {
+router.post('/libraries/:id/reset-metadata', requireAdmin, asyncWrapper(async (req, res) => {
   const { cleanTitle } = require('../scanner/libraryScanner');
   const { generateThumbnail } = require('../scanner/thumbnailGenerator');
   const { thumbnailPath: thumbPathFor, ensureShardDir: ensureThumbShard } = require('../scanner/thumbnailPaths');
@@ -1870,12 +1871,12 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
 router.get('/manga/:id/anilist-status', asyncWrapper(async (req, res) => {
   const db = getDb();
 
-  const deviceId = req.headers['x-device-id'] || null;
-  const session  = getDeviceSession(db, deviceId);
-  const token    = session?.anilist_token   || null;
-  const userId   = session?.anilist_user_id || null;
+  const userId        = req.user?.id || null;
+  const session       = getUserAniList(db, userId);
+  const token         = session?.anilist_token   || null;
+  const anilistUserId = session?.anilist_user_id || null;
 
-  if (!token || !userId) {
+  if (!token || !anilistUserId) {
     return res.json({ data: { logged_in: false } });
   }
 
@@ -1886,15 +1887,15 @@ router.get('/manga/:id/anilist-status', asyncWrapper(async (req, res) => {
     return res.json({ data: { logged_in: true, linked: false } });
   }
 
-  // Per-device cache keeps repeated page opens from each triggering an
+  // Per-user cache keeps repeated page opens from each triggering an
   // AniList ping. Cache miss / stale -> one fetch, then we populate.
   let entry;
-  const cached = getCachedListEntry(db, deviceId, manga.anilist_id);
+  const cached = getCachedListEntry(db, userId, manga.anilist_id);
   if (cached) {
     entry = cached.entry;
   } else {
-    entry = await getMediaListEntry(token, userId, manga.anilist_id).catch(() => null);
-    setCachedListEntry(db, deviceId, manga.anilist_id, entry);
+    entry = await getMediaListEntry(token, anilistUserId, manga.anilist_id).catch(() => null);
+    setCachedListEntry(db, userId, manga.anilist_id, entry);
   }
 
   res.json({

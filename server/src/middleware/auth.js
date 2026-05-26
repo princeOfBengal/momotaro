@@ -109,6 +109,7 @@ function isLanBypassEnabled(db) {
  */
 function requireClientOrAdmin(req, res, next) {
   const db = getDb();
+  const callerIsLan = isLanIp(req.ip);
 
   const adminToken = extractAdminToken(req);
   if (adminToken && adminSession.validateSession(adminToken)) {
@@ -116,12 +117,19 @@ function requireClientOrAdmin(req, res, next) {
     return next();
   }
 
-  if (!isAuthEnabled(db)) {
+  // The no-auth shortcuts ("open mode" and "LAN bypass") apply **only on the
+  // LAN**. Traffic arriving via port forwarding from the public internet must
+  // always present a paired-client token, regardless of `auth_enabled` or
+  // `lan_bypass_enabled` — this is the security boundary that backs
+  // requirement #6 in the user-accounts design: a new device reaching the
+  // server over its public IP must complete pairing (admin-approved PIN)
+  // before any account-creation prompt is even reachable.
+  if (callerIsLan && !isAuthEnabled(db)) {
     req.auth = { kind: 'open' };
     return next();
   }
 
-  if (isLanBypassEnabled(db) && isLanIp(req.ip)) {
+  if (callerIsLan && isLanBypassEnabled(db)) {
     req.auth = { kind: 'lan' };
     return next();
   }

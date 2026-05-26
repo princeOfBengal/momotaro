@@ -8,6 +8,7 @@ import UpdateBanner from './components/UpdateBanner';
 import AdminTaskBanner from './components/AdminTaskBanner';
 import { api, setConnectivityProbe } from './api/client';
 import { ConnectivityProvider, ConnectivityBanner, useConnectivity } from './context/ConnectivityContext';
+import { UserProvider } from './context/UserContext';
 import { initDownloader, reconcileNativeProgress } from './api/downloader';
 import { flushOutbox } from './api/outboxSync';
 import { migrateLegacyRoot } from './api/offlineStorage';
@@ -42,6 +43,7 @@ const ArtGallery      = lazy(() => import('./pages/ArtGallery'));
 const ThirdPartySourcing = lazy(() => import('./pages/ThirdPartySourcing'));
 const AnilistCallback = lazy(() => import('./pages/AnilistCallback'));
 const Pairing         = lazy(() => import('./pages/Pairing'));
+const Login           = lazy(() => import('./pages/Login'));
 const Downloads       = lazy(() => import('./pages/Downloads'));
 
 /**
@@ -60,8 +62,13 @@ const Downloads       = lazy(() => import('./pages/Downloads'));
  * The SPA can't determine "am I on the LAN?" client-side — it has to ask
  * the server. Hence the async check on mount.
  *
+ * The same gate also handles the second layer — user login. When the server
+ * reports `user_required` (multi-user enabled, a real account exists, and this
+ * caller has no valid session) it routes to `/login`. Pairing is checked first,
+ * so an external device pairs *then* logs in.
+ *
  * Skipped:
- *   - The `/pairing` route itself (would infinite-loop)
+ *   - The `/pairing` and `/login` routes themselves (would infinite-loop)
  *   - The AniList OAuth callback (third-party redirect, doesn't carry tokens)
  *
  * Failure mode: if `/api/admin/auth-status` is unreachable (network
@@ -69,7 +76,7 @@ const Downloads       = lazy(() => import('./pages/Downloads'));
  * calls will surface the real error; we don't want a blank page just
  * because the status endpoint blipped.
  */
-const PAIRING_EXEMPT_PATHS = new Set(['/pairing', '/auth/anilist/callback']);
+const GATE_EXEMPT_PATHS = new Set(['/pairing', '/login', '/auth/anilist/callback']);
 
 function isNativeShell() {
   return typeof window !== 'undefined'
@@ -82,11 +89,12 @@ function FirstLaunchGate({ children }) {
   const location = useLocation();
   const { online } = useConnectivity();
   const [decision, setDecision] = useState('loading'); // 'loading' | 'allow' | 'redirect'
+  const [target, setTarget] = useState('/pairing');    // where to send on 'redirect'
 
   useEffect(() => {
     let cancelled = false;
 
-    if (PAIRING_EXEMPT_PATHS.has(location.pathname)) {
+    if (GATE_EXEMPT_PATHS.has(location.pathname)) {
       setDecision('allow');
       return;
     }
@@ -97,22 +105,42 @@ function FirstLaunchGate({ children }) {
     // neither a saved server URL nor a client token — otherwise the probe
     // hits localhost, fails, and we'd send the user to a broken Home page.
     if (isNativeShell() && !api.getServerUrl() && !api.getClientToken()) {
+      setTarget('/pairing');
       setDecision('redirect');
       return;
     }
 
-    // Offline: skip the auth-status probe entirely. The user has already
-    // paired (we have a client token), and the server is unreachable, so
-    // there's no point asking the server whether pairing is needed.
+    // Offline: skip the auth-status probe entirely — we already have a client
+    // token and the server isn't reachable. If this is a multi-user install
+    // (cached from the last successful auth-status), also require a stored
+    // user token; accounts can't be created offline, only used. Falls back
+    // to "allow" when we have no cached flag yet (first ever launch).
     if (!online) {
-      setDecision('allow');
+      const cachedMU = localStorage.getItem('momotaro_multi_user_cached') === '1';
+      if (cachedMU && !api.getUserToken()) {
+        setTarget('/login');
+        setDecision('redirect');
+      } else {
+        setDecision('allow');
+      }
       return;
     }
 
     api.getAuthStatus()
       .then(status => {
         if (cancelled) return;
-        setDecision(status?.pairing_required ? 'redirect' : 'allow');
+        // Cache the multi-user flag so the offline branch above can tell
+        // whether identity is required when we can't reach the server.
+        try {
+          localStorage.setItem(
+            'momotaro_multi_user_cached',
+            status?.multi_user_enabled ? '1' : '0',
+          );
+        } catch (_) { /* localStorage disabled — non-fatal */ }
+        // Pairing (device trust) is checked first, then login (identity).
+        if (status?.pairing_required)   { setTarget('/pairing'); setDecision('redirect'); }
+        else if (status?.user_required) { setTarget('/login');   setDecision('redirect'); }
+        else setDecision('allow');
       })
       .catch(() => {
         // Server unreachable / not running — don't block the UI. The user
@@ -130,7 +158,7 @@ function FirstLaunchGate({ children }) {
       </div>
     );
   }
-  if (decision === 'redirect') return <Navigate to="/pairing" replace />;
+  if (decision === 'redirect') return <Navigate to={target} replace />;
   return children;
 }
 
@@ -201,9 +229,11 @@ export default function App() {
             fallback. */}
         <AdminTaskBanner />
         <Suspense fallback={<RouteFallback />}>
+          <UserProvider>
           <FirstLaunchGate>
             <Routes>
               <Route path="/pairing" element={<Pairing />} />
+              <Route path="/login" element={<Login />} />
               <Route path="/" element={<Home />} />
               <Route path="/genres" element={<Genres />} />
               <Route path="/art-gallery" element={<ArtGallery />} />
@@ -219,6 +249,7 @@ export default function App() {
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </FirstLaunchGate>
+          </UserProvider>
         </Suspense>
         {/* Mounted outside <Routes> so it persists across navigation. The
             component self-gates: only renders on mobile viewports, hides

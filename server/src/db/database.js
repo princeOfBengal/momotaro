@@ -1,7 +1,14 @@
 const Database = require('better-sqlite3');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { hashPassword } = require('../auth/crypto');
+
+// Owner of all reading data on a single-user / pre-accounts install. The
+// user-accounts migration attributes every legacy progress row, reading list,
+// and AniList session to this id; the first real account adopts this row.
+const DEFAULT_USER_ID = 1;
 
 let db;
 
@@ -99,14 +106,9 @@ function migrate(db) {
       value TEXT NOT NULL DEFAULT ''
     );
 
-    CREATE TABLE IF NOT EXISTS device_anilist_sessions (
-      device_id        TEXT PRIMARY KEY,
-      anilist_token    TEXT NOT NULL DEFAULT '',
-      anilist_user_id  TEXT NOT NULL DEFAULT '',
-      anilist_username TEXT NOT NULL DEFAULT '',
-      anilist_avatar   TEXT NOT NULL DEFAULT '',
-      updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
-    );
+    -- device_anilist_sessions (pre-accounts per-device AniList store) is no
+    -- longer created here; it was replaced by user_anilist_sessions in Phase 3.
+    -- See backfillUserAniListSession + dropLegacyDeviceAniListTable below.
 
     CREATE TABLE IF NOT EXISTS reading_lists (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,10 +167,9 @@ function migrate(db) {
     );
   `);
 
-  // Seed the two built-in reading lists
-  for (const name of ['Favorites', 'Want to Read']) {
-    db.prepare("INSERT OR IGNORE INTO reading_lists (name, is_default) VALUES (?, 1)").run(name);
-  }
+  // Built-in reading lists are now seeded per-user (see seedDefaultLists),
+  // called from the user-accounts migration block below for the default user
+  // and at account creation for every new user.
 
   upgradeToMultiLibrary(db);
 
@@ -214,6 +215,283 @@ function migrate(db) {
   createMangaSchedulesTable(db);
   createAuthTables(db);
   createAdminTasksTable(db);
+
+  // ── User accounts (Phase 1): schema + default-user attribution ──────────────
+  // Order matters: the user tables and the default user must exist before the
+  // per-user table rebuilds can FK-reference them. Each step is guarded and
+  // idempotent, so re-running on an already-migrated DB is a no-op.
+  createUserTables(db);
+  ensureDefaultUser(db);
+  migrateProgressToPerUser(db);
+  migrateReadingListsToPerUser(db);
+  seedDefaultLists(db, DEFAULT_USER_ID);
+  rekeyAniListMediaCache(db);
+  backfillUserAniListSession(db);
+  dropLegacyDeviceAniListTable(db);
+  addColumnIfMissing(db, 'connection_attempts', 'username', 'TEXT');
+}
+
+/**
+ * Drop the pre-accounts `device_anilist_sessions` table now that
+ * `backfillUserAniListSession` has carried its most-recent row onto the
+ * default user. Idempotent (no-op on fresh installs / second boots).
+ */
+function dropLegacyDeviceAniListTable(db) {
+  const exists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_anilist_sessions'"
+  ).get();
+  if (!exists) return;
+  db.exec('DROP TABLE device_anilist_sessions');
+  console.log('[DB] Dropped legacy device_anilist_sessions table (replaced by user_anilist_sessions in Phase 3).');
+}
+
+/**
+ * User-account tables. `users` is the identity; `user_sessions` are persistent
+ * bearer sessions (SHA-256 token hashes, like paired_clients); `login_lockouts`
+ * mirrors pin_lockouts but keyed per device; `reading_history` is the append-only
+ * per-user timeline; `user_anilist_sessions` re-homes AniList logins from device
+ * to Momotaro user (one row per linked user → many AniList accounts coexist).
+ */
+function createUserTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      username       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+      display_name   TEXT    NOT NULL DEFAULT '',
+      password_hash  TEXT    NOT NULL,
+      is_admin       INTEGER NOT NULL DEFAULT 0,
+      disabled       INTEGER NOT NULL DEFAULT 0,
+      created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_login_at  INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash        TEXT    NOT NULL UNIQUE,
+      paired_client_id  INTEGER REFERENCES paired_clients(id) ON DELETE SET NULL,
+      created_at        INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_seen_at      INTEGER,
+      last_seen_ip      TEXT,
+      revoked           INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_token_hash ON user_sessions(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id    ON user_sessions(user_id);
+
+    CREATE TABLE IF NOT EXISTS login_lockouts (
+      lockout_key      TEXT    PRIMARY KEY,
+      failed_attempts  INTEGER NOT NULL DEFAULT 0,
+      locked_until     INTEGER NOT NULL DEFAULT 0,
+      updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS reading_history (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     INTEGER NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+      manga_id    INTEGER NOT NULL REFERENCES manga(id)    ON DELETE CASCADE,
+      chapter_id  INTEGER          REFERENCES chapters(id) ON DELETE SET NULL,
+      event       TEXT    NOT NULL DEFAULT 'read',
+      read_at     INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_reading_history_user_time ON reading_history(user_id, read_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reading_history_manga     ON reading_history(manga_id);
+
+    CREATE TABLE IF NOT EXISTS user_anilist_sessions (
+      user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      anilist_token    TEXT    NOT NULL DEFAULT '',
+      anilist_user_id  TEXT    NOT NULL DEFAULT '',
+      anilist_username TEXT    NOT NULL DEFAULT '',
+      anilist_avatar   TEXT    NOT NULL DEFAULT '',
+      token_expires_at INTEGER,
+      updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+}
+
+/**
+ * Create the default data-owner user (id=1) if absent. Its password is random
+ * and unusable — it is a placeholder that owns all pre-accounts reading data
+ * until the first real account adopts it (Phase 2). is_admin=1 so the
+ * single-user default install retains full capability.
+ */
+function ensureDefaultUser(db) {
+  const exists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(DEFAULT_USER_ID);
+  if (exists) return;
+  const unusable = hashPassword(crypto.randomBytes(32).toString('hex'));
+  db.prepare(`
+    INSERT INTO users (id, username, display_name, password_hash, is_admin)
+    VALUES (?, 'default', 'Default', ?, 1)
+  `).run(DEFAULT_USER_ID, unusable);
+  console.log('[DB] Created default user (id=1) to own pre-accounts reading data.');
+}
+
+/**
+ * Seed the two built-in reading lists for a user. Idempotent via the
+ * (user_id, name) unique constraint. Used by the migration for the default
+ * user and (Phase 2) at account creation for every new user.
+ */
+function seedDefaultLists(db, userId) {
+  const ins = db.prepare(
+    'INSERT OR IGNORE INTO reading_lists (user_id, name, is_default) VALUES (?, ?, 1)'
+  );
+  for (const name of ['Favorites', 'Want to Read']) ins.run(userId, name);
+}
+
+/**
+ * Rebuild `progress` with a `user_id` column and `UNIQUE(user_id, manga_id)`,
+ * attributing every existing row to the default user. SQLite can't ALTER a
+ * UNIQUE constraint, so this uses the table-rebuild pattern. Foreign keys are
+ * disabled around the rebuild per the SQLite-recommended procedure; `progress`
+ * is not referenced by any other table, so the DROP cascades nothing. Guarded
+ * on the presence of the `user_id` column, so it runs exactly once.
+ */
+function migrateProgressToPerUser(db) {
+  const hasUserId = db.prepare(
+    "SELECT 1 FROM pragma_table_info('progress') WHERE name = 'user_id'"
+  ).get();
+  if (hasUserId) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE progress_new (
+          id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id            INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+          manga_id           INTEGER NOT NULL REFERENCES manga(id)  ON DELETE CASCADE,
+          current_chapter_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+          current_page       INTEGER NOT NULL DEFAULT 0,
+          completed_chapters TEXT    NOT NULL DEFAULT '[]',
+          last_read_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+          UNIQUE(user_id, manga_id)
+        );
+        INSERT INTO progress_new
+          (id, user_id, manga_id, current_chapter_id, current_page,
+           completed_chapters, last_read_at, updated_at)
+          SELECT id, ${DEFAULT_USER_ID}, manga_id, current_chapter_id, current_page,
+                 completed_chapters, last_read_at, updated_at
+          FROM progress;
+        DROP TABLE progress;
+        ALTER TABLE progress_new RENAME TO progress;
+        CREATE INDEX IF NOT EXISTS idx_progress_manga_id   ON progress(manga_id);
+        CREATE INDEX IF NOT EXISTS idx_progress_user_manga ON progress(user_id, manga_id);
+      `);
+    })();
+    const violations = db.pragma('foreign_key_check');
+    if (violations.length) console.warn('[DB] progress migration FK violations:', violations);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+  console.log('[DB] Migrated progress to per-user (UNIQUE(user_id, manga_id)).');
+}
+
+/**
+ * Rebuild `reading_lists` with a `user_id` column and `UNIQUE(user_id, name)`,
+ * attributing existing lists to the default user. Row `id`s are preserved so
+ * `reading_list_manga.list_id` references stay valid. Foreign keys MUST be off
+ * during the rebuild: `reading_list_manga` references `reading_lists` with
+ * ON DELETE CASCADE, so a DROP with FKs enabled would wipe every membership.
+ */
+function migrateReadingListsToPerUser(db) {
+  const hasUserId = db.prepare(
+    "SELECT 1 FROM pragma_table_info('reading_lists') WHERE name = 'user_id'"
+  ).get();
+  if (hasUserId) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE reading_lists_new (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name       TEXT    NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          UNIQUE(user_id, name)
+        );
+        INSERT INTO reading_lists_new (id, user_id, name, is_default, created_at)
+          SELECT id, ${DEFAULT_USER_ID}, name, is_default, created_at FROM reading_lists;
+        DROP TABLE reading_lists;
+        ALTER TABLE reading_lists_new RENAME TO reading_lists;
+      `);
+    })();
+    const violations = db.pragma('foreign_key_check');
+    if (violations.length) console.warn('[DB] reading_lists migration FK violations:', violations);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+  console.log('[DB] Migrated reading_lists to per-user (UNIQUE(user_id, name)).');
+}
+
+/**
+ * Re-key `anilist_media_list_cache` from (device_id, media_id) to
+ * (user_id, media_id). This is a cache, so legacy rows are folded onto the
+ * default user (INSERT OR IGNORE dedupes when several devices cached the same
+ * media). Guarded on the presence of the old `device_id` column.
+ */
+function rekeyAniListMediaCache(db) {
+  const hasDeviceId = db.prepare(
+    "SELECT 1 FROM pragma_table_info('anilist_media_list_cache') WHERE name = 'device_id'"
+  ).get();
+  if (!hasDeviceId) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE anilist_media_list_cache_new (
+          user_id    INTEGER NOT NULL,
+          media_id   INTEGER NOT NULL,
+          entry_json TEXT,
+          fetched_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (user_id, media_id)
+        );
+        INSERT OR IGNORE INTO anilist_media_list_cache_new (user_id, media_id, entry_json, fetched_at)
+          SELECT ${DEFAULT_USER_ID}, media_id, entry_json, fetched_at FROM anilist_media_list_cache;
+        DROP TABLE anilist_media_list_cache;
+        ALTER TABLE anilist_media_list_cache_new RENAME TO anilist_media_list_cache;
+      `);
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+  console.log('[DB] Re-keyed anilist_media_list_cache to (user_id, media_id).');
+}
+
+/**
+ * Carry the existing AniList login forward: copy the most-recently-updated
+ * `device_anilist_sessions` row (if any) onto the default user, so a
+ * single-user install keeps its AniList sync after the upgrade. No-op if the
+ * default user already has a session or no device session has a token.
+ */
+function backfillUserAniListSession(db) {
+  const already = db.prepare('SELECT 1 FROM user_anilist_sessions WHERE user_id = ?').get(DEFAULT_USER_ID);
+  if (already) return;
+  // Fresh installs never had `device_anilist_sessions`; legacy installs have
+  // it until `dropLegacyDeviceAniListTable` runs. Tolerate either.
+  const legacyExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_anilist_sessions'"
+  ).get();
+  if (!legacyExists) return;
+  const row = db.prepare(`
+    SELECT anilist_token, anilist_user_id, anilist_username, anilist_avatar
+    FROM device_anilist_sessions
+    WHERE anilist_token != ''
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get();
+  if (!row) return;
+  db.prepare(`
+    INSERT INTO user_anilist_sessions
+      (user_id, anilist_token, anilist_user_id, anilist_username, anilist_avatar, updated_at)
+    VALUES (?, ?, ?, ?, ?, unixepoch())
+  `).run(
+    DEFAULT_USER_ID,
+    row.anilist_token, row.anilist_user_id || '', row.anilist_username || '', row.anilist_avatar || '',
+  );
+  console.log('[DB] Backfilled default user AniList session from legacy device session.');
 }
 
 /**
@@ -699,4 +977,4 @@ function upgradeToMultiLibrary(db) {
   console.log('[DB] Migrated to multi-library schema.');
 }
 
-module.exports = { getDb };
+module.exports = { getDb, seedDefaultLists, DEFAULT_USER_ID };

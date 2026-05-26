@@ -112,17 +112,23 @@ One row per image page.
 **Unique constraint:** `(chapter_id, page_index)`
 
 ### `progress`
-One row per manga (UNIQUE on `manga_id`).
+One row per (user, manga). Per-user since the multi-user accounts feature
+(Phase 1); pre-feature DBs are migrated and every legacy row is attributed
+to the default user (id=1).
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |
-| `manga_id` | INTEGER FK UNIQUE | References `manga(id)`, CASCADE delete |
+| `user_id` | INTEGER FK | References `users(id)`, CASCADE delete |
+| `manga_id` | INTEGER FK | References `manga(id)`, CASCADE delete |
 | `current_chapter_id` | INTEGER FK | Last-read chapter |
 | `current_page` | INTEGER | 0-based page index within current chapter |
 | `completed_chapters` | TEXT | JSON array of chapter IDs, e.g. `[3,4,7]` |
 | `last_read_at` | INTEGER | Unix timestamp |
 | `updated_at` | INTEGER | Unix timestamp |
+
+**Unique constraint:** `(user_id, manga_id)` — one progress row per user per
+manga. **Indexes:** `idx_progress_manga_id` and `idx_progress_user_manga`.
 
 ### `settings`
 Key-value store for server-wide configuration (not per-device state). Every row is included in `GET /api/admin/export-config` and restored on import.
@@ -141,30 +147,32 @@ Key-value store for server-wide configuration (not per-device state). Every row 
 | `tps_max_concurrent_chapters` | Third Party Sourcing downloader — max chapters fetched in parallel. Bounded `[1, 8]`; default 1. |
 | `tps_page_delay_ms` | Third Party Sourcing downloader — per-page delay in ms. Bounded `[0, 60000]`; default 500. |
 
-### `device_anilist_sessions`
-Per-device AniList login state. Keyed by a UUID generated in the browser (`localStorage` key `momotaro_device_id`) and sent as the `X-Device-ID` request header.
+### `device_anilist_sessions` *(removed in Phase 3 — replaced by `user_anilist_sessions`)*
 
-| Column | Type | Notes |
-|---|---|---|
-| `device_id` | TEXT PK | UUID from browser localStorage |
-| `anilist_token` | TEXT | OAuth access token for this device |
-| `anilist_user_id` | TEXT | AniList user ID |
-| `anilist_username` | TEXT | Display name |
-| `anilist_avatar` | TEXT | Avatar URL |
-| `updated_at` | INTEGER | Unix timestamp |
+The pre-accounts per-device AniList store. On upgrade, the migration
+(`backfillUserAniListSession`) copies its most-recently-updated row onto the
+default user's `user_anilist_sessions` row, then `dropLegacyDeviceAniListTable`
+drops the table. See `user_anilist_sessions` below for the current schema.
 
 ### `anilist_media_list_cache`
 
-Per-device cache of the user's AniList list entry for a given media ID. `GET /api/manga/:id/anilist-status` reads from here on every manga-detail page open and only falls through to a live `MediaList` GraphQL query when the cached row is missing or older than 5 minutes (`ANILIST_LIST_CACHE_TTL_SECONDS`). The mutating `PATCH /api/manga/:id/anilist-progress` writes the post-mutation entry back into the cache, so the next page open is served from cache without re-pinging AniList.
+Per-**user** cache of the user's AniList list entry for a given media ID.
+Re-keyed from `(device_id, media_id)` to `(user_id, media_id)` in Phase 1.
+`GET /api/manga/:id/anilist-status` reads from here on every manga-detail page
+open and only falls through to a live `MediaList` GraphQL query when the
+cached row is missing or older than 5 minutes (`ANILIST_LIST_CACHE_TTL_SECONDS`).
+The mutating `PATCH /api/manga/:id/anilist-progress` writes the post-mutation
+entry back into the cache, so the next page open is served from cache without
+re-pinging AniList.
 
 | Column | Type | Notes |
 |---|---|---|
-| `device_id` | TEXT | UUID from browser localStorage (`X-Device-ID` header) |
+| `user_id` | INTEGER | Owning Momotaro user (`req.user.id`) |
 | `media_id` | INTEGER | AniList media id (`manga.anilist_id`) |
 | `entry_json` | TEXT | Serialised MediaList payload — **`NULL` is a real, cacheable answer** meaning "the user does not have this manga on their list yet" |
 | `fetched_at` | INTEGER | Unix timestamp; rows older than 5 minutes are treated as misses |
 
-**Primary key:** `(device_id, media_id)` — `INSERT … ON CONFLICT DO UPDATE` is used everywhere that writes to it, so the row is upserted with a fresh `fetched_at` on every refresh.
+**Primary key:** `(user_id, media_id)` — `INSERT … ON CONFLICT DO UPDATE` is used everywhere that writes to it, so the row is upserted with a fresh `fetched_at` on every refresh.
 
 ### `thumbnail_history`
 
@@ -204,14 +212,20 @@ User-bookmarked pages shown in the *Art Gallery* section at the bottom of MangaD
 ---
 
 ### `reading_lists`
-User-created (and two built-in) reading lists.
+User-created (and two built-in: "Favorites", "Want to Read") reading lists,
+per-Momotaro-user (Phase 1). The two defaults are seeded for every account at
+creation time; the migration assigned any pre-feature global lists to the
+default user (id=1).
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |
-| `name` | TEXT UNIQUE | |
+| `user_id` | INTEGER FK | References `users(id)`, CASCADE delete |
+| `name` | TEXT | |
 | `is_default` | INTEGER | 1 for "Favorites" and "Want to Read" |
 | `created_at` | INTEGER | |
+
+**Unique constraint:** `(user_id, name)` — two users may both have a list named "Horror".
 
 ### `manga_source_urls`
 
@@ -295,6 +309,97 @@ Junction table linking manga to lists.
 | `added_at` | INTEGER | Unix timestamp |
 
 **Primary key:** `(list_id, manga_id)`
+
+## User Accounts (Phase 1 — multi-user)
+
+These tables back the user-accounts feature. With `multi_user_enabled = 1`
+(the default since Phase 5), each device must log in and the per-user reading
+state above (`progress`, `reading_lists`, the AniList tables, `reading_history`)
+is partitioned by `user_id`. With the flag off, the implicit default user
+(id=1) owns everything, preserving the pre-accounts single-user behaviour.
+
+### `users`
+
+One row per account. The first registered account adopts the migration's
+default-user row (id=1), inheriting all pre-accounts reading data.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | id=1 is the default-user anchor (created by migration; protected against delete) |
+| `username` | TEXT UNIQUE COLLATE NOCASE | 3–32 chars: letters, digits, `.`, `_`, `-` |
+| `display_name` | TEXT | UI label; defaults to username on register |
+| `password_hash` | TEXT | scrypt, stored as `"salt_hex:hash_hex"` (see [auth/crypto.js](../server/src/auth/crypto.js)) |
+| `is_admin` | INTEGER | 1 = admin (set on the first account / via admin user-management) |
+| `disabled` | INTEGER | 1 = account suspended; sessions revoked on disable |
+| `created_at` | INTEGER | |
+| `last_login_at` | INTEGER | Touched on each `POST /api/users/login` |
+
+### `user_sessions`
+
+Persistent bearer sessions. Stores only the SHA-256 hash of the token (the
+plaintext is returned once on register/login and sent on every request via
+`X-User-Token`). Sliding 30-day TTL refreshed by `userSession.validate` (with a
+60s write-throttle).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `user_id` | INTEGER FK | CASCADE delete from `users` |
+| `token_hash` | TEXT UNIQUE | `SHA-256(token)` |
+| `paired_client_id` | INTEGER FK | `paired_clients(id)`, `ON DELETE SET NULL` |
+| `created_at` | INTEGER | |
+| `last_seen_at` | INTEGER | |
+| `last_seen_ip` | TEXT | |
+| `revoked` | INTEGER | 1 = explicit logout / admin force-logout / password reset |
+
+**Indexes:** `idx_user_sessions_token_hash`, `idx_user_sessions_user_id`.
+
+### `login_lockouts`
+
+Per-device login lockout (the 5-strikes → 24 h cap, requirement #7). Mirrors
+`pin_lockouts` but keyed `client:<paired_client_id>` (or `ip:<addr>` for
+LAN/admin/open) so a brute-forcer can't dodge the cap by cycling usernames.
+
+| Column | Type | Notes |
+|---|---|---|
+| `lockout_key` | TEXT PK | `client:<id>` or `ip:<addr>` (see `loginLockout.keyFor`) |
+| `failed_attempts` | INTEGER | |
+| `locked_until` | INTEGER | Unix-epoch; `0` when not locked |
+| `updated_at` | INTEGER | |
+
+### `reading_history`
+
+True append-only timeline (distinct from `progress`, which is the *current*
+position). Powers the per-user history view in Settings → Account and the
+admin's all-users audit (`GET /api/admin/reading-history`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `user_id` | INTEGER FK | CASCADE delete from `users` |
+| `manga_id` | INTEGER FK | CASCADE delete from `manga` |
+| `chapter_id` | INTEGER FK | `chapters(id)`, `ON DELETE SET NULL` |
+| `event` | TEXT | `'read'` (a chapter became the reading position) or `'completed'` |
+| `read_at` | INTEGER | |
+
+**Indexes:** `idx_reading_history_user_time(user_id, read_at DESC)`, `idx_reading_history_manga(manga_id)`.
+
+### `user_anilist_sessions`
+
+Per-Momotaro-user AniList link (Phase 3 — replaces the device-keyed
+`device_anilist_sessions` of the pre-feature schema). Each row holds the
+JWT access token and the AniList user profile for one Momotaro user; many
+AniList accounts coexist on one server, one per linked Momotaro user.
+
+| Column | Type | Notes |
+|---|---|---|
+| `user_id` | INTEGER PK | CASCADE delete from `users` |
+| `anilist_token` | TEXT | OAuth access token (JWT, ~1-year validity) |
+| `anilist_user_id` | TEXT | AniList user id |
+| `anilist_username` | TEXT | Display name |
+| `anilist_avatar` | TEXT | Avatar URL |
+| `token_expires_at` | INTEGER | Decoded from the JWT `exp` so the UI can prompt re-login |
+| `updated_at` | INTEGER | |
 
 ## Search Index (`manga_fts` + `manga_genres`)
 

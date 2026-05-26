@@ -2,14 +2,16 @@ const express = require('express');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { saveMediaListEntry } = require('../metadata/anilist');
-const { getDeviceSession } = require('./settings');
+const { getUserAniList } = require('./settings');
 
 const router = express.Router();
 
 // GET /api/progress/:mangaId
 router.get('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const progress = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(req.params.mangaId);
+  const userId = req.user.id;
+  const progress = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?')
+    .get(userId, req.params.mangaId);
   if (!progress) return res.json({ data: null });
 
   res.json({
@@ -23,10 +25,11 @@ router.get('/progress/:mangaId', asyncWrapper(async (req, res) => {
 // PUT /api/progress/:mangaId
 router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const db = getDb();
+  const userId = req.user.id;
   const mangaId = parseInt(req.params.mangaId, 10);
   const { chapterId, page = 0, markChapterComplete = false } = req.body;
 
-  const existing = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  const existing = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   let completedChapters = safeJsonParse(existing?.completed_chapters, []);
 
   const newlyCompleted =
@@ -35,11 +38,16 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
     completedChapters.push(chapterId);
   }
 
+  // A new chapter became the reading position — log it as a "read" event for
+  // the per-user history timeline. Page-by-page saves within the same chapter
+  // don't change current_chapter_id, so they don't flood the log.
+  const chapterOpened = chapterId && existing?.current_chapter_id !== chapterId;
+
   if (!existing) {
     db.prepare(`
-      INSERT INTO progress (manga_id, current_chapter_id, current_page, completed_chapters, last_read_at, updated_at)
-      VALUES (?, ?, ?, ?, unixepoch(), unixepoch())
-    `).run(mangaId, chapterId || null, page, JSON.stringify(completedChapters));
+      INSERT INTO progress (user_id, manga_id, current_chapter_id, current_page, completed_chapters, last_read_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, unixepoch(), unixepoch())
+    `).run(userId, mangaId, chapterId || null, page, JSON.stringify(completedChapters));
   } else {
     db.prepare(`
       UPDATE progress SET
@@ -48,11 +56,14 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
         completed_chapters = ?,
         last_read_at = unixepoch(),
         updated_at = unixepoch()
-      WHERE manga_id = ?
-    `).run(chapterId || null, page, JSON.stringify(completedChapters), mangaId);
+      WHERE user_id = ? AND manga_id = ?
+    `).run(chapterId || null, page, JSON.stringify(completedChapters), userId, mangaId);
   }
 
-  const updated = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  if (chapterOpened)  recordHistory(db, userId, mangaId, chapterId, 'read');
+  if (newlyCompleted) recordHistory(db, userId, mangaId, chapterId, 'completed');
+
+  const updated = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   res.json({
     data: {
       ...updated,
@@ -62,10 +73,10 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
 
   // Fire-and-forget AniList sync (don't block the response).
   // Only sync when a chapter was just newly completed — page-by-page progress
-  // updates within an unfinished chapter must not ping AniList.
+  // updates within an unfinished chapter must not ping AniList. Synced to the
+  // AniList account linked by *this* user.
   if (newlyCompleted) {
-    const deviceId = req.headers['x-device-id'] || null;
-    syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
+    syncToAniList(db, mangaId, completedChapters, userId).catch(err =>
       console.warn('[AniList Sync] Failed:', err.message)
     );
   }
@@ -77,11 +88,12 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
 // chapter is at or ahead of the current position. Never moves current backwards.
 router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, res) => {
   const db        = getDb();
+  const userId    = req.user.id;
   const mangaId   = parseInt(req.params.mangaId,   10);
   const chapterId = parseInt(req.params.chapterId,  10);
   const { completed } = req.body;
 
-  const existing         = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  const existing         = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   let completedChapters  = safeJsonParse(existing?.completed_chapters, []);
   let currentChapterId   = existing?.current_chapter_id ?? null;
   let currentPage        = existing?.current_page       ?? 0;
@@ -116,9 +128,9 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
 
   if (!existing) {
     db.prepare(`
-      INSERT INTO progress (manga_id, current_chapter_id, current_page, completed_chapters, last_read_at, updated_at)
-      VALUES (?, ?, ?, ?, unixepoch(), unixepoch())
-    `).run(mangaId, currentChapterId, currentPage, JSON.stringify(completedChapters));
+      INSERT INTO progress (user_id, manga_id, current_chapter_id, current_page, completed_chapters, last_read_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, unixepoch(), unixepoch())
+    `).run(userId, mangaId, currentChapterId, currentPage, JSON.stringify(completedChapters));
   } else {
     db.prepare(`
       UPDATE progress SET
@@ -127,11 +139,14 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
         completed_chapters = ?,
         last_read_at       = unixepoch(),
         updated_at         = unixepoch()
-      WHERE manga_id = ?
-    `).run(currentChapterId, currentPage, JSON.stringify(completedChapters), mangaId);
+      WHERE user_id = ? AND manga_id = ?
+    `).run(currentChapterId, currentPage, JSON.stringify(completedChapters), userId, mangaId);
   }
 
-  const updated = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(mangaId);
+  // Log a completion to the per-user history when the chapter flips to read.
+  if (completionChanged && completed) recordHistory(db, userId, mangaId, chapterId, 'completed');
+
+  const updated = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   res.json({
     data: {
       ...updated,
@@ -143,29 +158,72 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
   // actually flipped, so a no-op toggle (e.g. marking an already-complete
   // chapter as complete) does not ping AniList.
   if (completionChanged) {
-    const deviceId = req.headers['x-device-id'] || null;
-    syncToAniList(db, mangaId, completedChapters, deviceId).catch(err =>
+    syncToAniList(db, mangaId, completedChapters, userId).catch(err =>
       console.warn('[AniList Sync] Failed:', err.message)
     );
   }
 }));
 
+// GET /api/history — the caller's own reading-history timeline (newest first).
+router.get('/history', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const userId = req.user.id;
+  let limit = parseInt(req.query?.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+  if (limit > 1000) limit = 1000;
+  const rows = db.prepare(`
+    SELECT h.id, h.manga_id, m.title AS manga_title, m.cover_image,
+           h.chapter_id, c.folder_name AS chapter_folder, c.number AS chapter_number,
+           h.event, h.read_at
+    FROM reading_history h
+    LEFT JOIN manga m    ON m.id = h.manga_id
+    LEFT JOIN chapters c ON c.id = h.chapter_id
+    WHERE h.user_id = ?
+    ORDER BY h.read_at DESC, h.id DESC
+    LIMIT ?
+  `).all(userId, limit);
+  res.json({ data: rows });
+}));
+
+// DELETE /api/history — clear the caller's own reading history.
+router.delete('/history', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const { changes } = db.prepare('DELETE FROM reading_history WHERE user_id = ?').run(req.user.id);
+  res.json({ data: { deleted: changes } });
+}));
+
 // DELETE /api/progress/:mangaId
 router.delete('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const db = getDb();
-  db.prepare('DELETE FROM progress WHERE manga_id = ?').run(req.params.mangaId);
+  const userId = req.user.id;
+  db.prepare('DELETE FROM progress WHERE user_id = ? AND manga_id = ?').run(userId, req.params.mangaId);
   res.json({ message: 'Progress reset' });
 }));
 
 /**
- * Sync local reading progress to the user's AniList list.
- * Runs after the HTTP response has been sent.
+ * Append a row to the per-user reading-history timeline. Best-effort — a
+ * telemetry write must never fail the progress update that triggered it.
+ * `event` is 'read' (a chapter became the reading position) or 'completed'.
  */
-async function syncToAniList(db, mangaId, completedChapters, deviceId) {
-  const session = getDeviceSession(db, deviceId);
+function recordHistory(db, userId, mangaId, chapterId, event) {
+  try {
+    db.prepare(
+      'INSERT INTO reading_history (user_id, manga_id, chapter_id, event) VALUES (?, ?, ?, ?)'
+    ).run(userId, mangaId, chapterId || null, event);
+  } catch (err) {
+    console.warn('[ReadingHistory] insert failed:', err.message);
+  }
+}
+
+/**
+ * Sync local reading progress to the AniList list of the Momotaro user who
+ * owns this progress (`momotaroUserId`). Runs after the HTTP response is sent.
+ * No-op when that user hasn't linked an AniList account.
+ */
+async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
+  const session = getUserAniList(db, momotaroUserId);
   const token = session?.anilist_token;
-  const userId = session?.anilist_user_id;
-  if (!token || !userId) return; // Not logged in on this device — skip
+  if (!token || !session?.anilist_user_id) return; // user hasn't linked AniList — skip
 
   const manga = db.prepare('SELECT anilist_id, track_volumes FROM manga WHERE id = ?').get(mangaId);
   if (!manga?.anilist_id) return; // No AniList match for this manga — skip

@@ -171,14 +171,16 @@ function recordEvent(eventType, fields = {}) {
         occurred_at, detail,
         accept_language, referer, origin, forwarded_for, real_ip,
         client_hints, method, path, status_code, protocol, host,
-        reverse_dns, country, region, city, timezone, dnt, auth_kind
+        reverse_dns, country, region, city, timezone, dnt, auth_kind,
+        username
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?,
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?,
+        ?
       )
     `).run(
       eventType,
@@ -211,6 +213,7 @@ function recordEvent(eventType, fields = {}) {
       fields.timezone        || null,
       fields.dnt == null ? null : (fields.dnt ? 1 : 0),
       fields.auth_kind       || null,
+      fields.username        || null,
     );
   } catch (err) {
     // Never fail a request because of telemetry.

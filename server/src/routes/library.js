@@ -7,6 +7,7 @@ const { runFullScan, scanLibrary, getScanStatus } = require('../scanner/libraryS
 const { thumbnailPath, thumbnailUrl } = require('../scanner/thumbnailPaths');
 const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
+const { requireAdmin } = require('../middleware/auth');
 const genresCache = require('../genresCache');
 
 const router = express.Router();
@@ -94,7 +95,7 @@ router.get('/libraries', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/libraries — create a new library
-router.post('/libraries', asyncWrapper(async (req, res) => {
+router.post('/libraries', requireAdmin, asyncWrapper(async (req, res) => {
   const { name, path: libPath } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
   if (!libPath || !libPath.trim()) return res.status(400).json({ error: 'path is required' });
@@ -118,7 +119,7 @@ router.post('/libraries', asyncWrapper(async (req, res) => {
 }));
 
 // PATCH /api/libraries/:id — update name and/or path, or toggle show_in_all
-router.patch('/libraries/:id', asyncWrapper(async (req, res) => {
+router.patch('/libraries/:id', requireAdmin, asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
@@ -171,7 +172,7 @@ router.patch('/libraries/:id', asyncWrapper(async (req, res) => {
 }));
 
 // DELETE /api/libraries/:id — remove library and all its manga
-router.delete('/libraries/:id', asyncWrapper(async (req, res) => {
+router.delete('/libraries/:id', requireAdmin, asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
@@ -188,7 +189,7 @@ router.delete('/libraries/:id', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/libraries/:id/scan — scan a specific library
-router.post('/libraries/:id/scan', asyncWrapper(async (req, res) => {
+router.post('/libraries/:id/scan', requireAdmin, asyncWrapper(async (req, res) => {
   const db = getDb();
   const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(req.params.id);
   if (!library) return res.status(404).json({ error: 'Library not found' });
@@ -207,13 +208,15 @@ router.post('/libraries/:id/scan', asyncWrapper(async (req, res) => {
 // GET /api/reading-lists — all lists with manga counts
 router.get('/reading-lists', asyncWrapper(async (req, res) => {
   const db = getDb();
+  const userId = req.user.id;
   const lists = db.prepare(`
     SELECT rl.*, COUNT(rlm.manga_id) as manga_count
     FROM reading_lists rl
     LEFT JOIN reading_list_manga rlm ON rlm.list_id = rl.id
+    WHERE rl.user_id = ?
     GROUP BY rl.id
     ORDER BY rl.is_default DESC, rl.name ASC
-  `).all();
+  `).all(userId);
   res.json({ data: lists });
 }));
 
@@ -222,8 +225,9 @@ router.post('/reading-lists', asyncWrapper(async (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
   const db = getDb();
+  const userId = req.user.id;
   try {
-    const result = db.prepare('INSERT INTO reading_lists (name, is_default) VALUES (?, 0)').run(name.trim());
+    const result = db.prepare('INSERT INTO reading_lists (user_id, name, is_default) VALUES (?, ?, 0)').run(userId, name.trim());
     const list = db.prepare('SELECT * FROM reading_lists WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({ data: { ...list, manga_count: 0 } });
   } catch (err) {
@@ -235,7 +239,8 @@ router.post('/reading-lists', asyncWrapper(async (req, res) => {
 // DELETE /api/reading-lists/:id — delete custom list (not default)
 router.delete('/reading-lists/:id', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const list = db.prepare('SELECT * FROM reading_lists WHERE id = ?').get(req.params.id);
+  const userId = req.user.id;
+  const list = db.prepare('SELECT * FROM reading_lists WHERE id = ? AND user_id = ?').get(req.params.id, userId);
   if (!list) return res.status(404).json({ error: 'Reading list not found' });
   if (list.is_default) return res.status(400).json({ error: 'Cannot delete a built-in reading list' });
   db.prepare('DELETE FROM reading_lists WHERE id = ?').run(list.id);
@@ -245,7 +250,8 @@ router.delete('/reading-lists/:id', asyncWrapper(async (req, res) => {
 // GET /api/reading-lists/:id/manga — manga in a list (supports search & sort)
 router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const list = db.prepare('SELECT id FROM reading_lists WHERE id = ?').get(req.params.id);
+  const userId = req.user.id;
+  const list = db.prepare('SELECT id FROM reading_lists WHERE id = ? AND user_id = ?').get(req.params.id, userId);
   if (!list) return res.status(404).json({ error: 'Reading list not found' });
 
   const { search, sort = 'title' } = req.query;
@@ -301,7 +307,8 @@ router.get('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
 // POST /api/reading-lists/:id/manga — add manga to list
 router.post('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const list = db.prepare('SELECT id FROM reading_lists WHERE id = ?').get(req.params.id);
+  const userId = req.user.id;
+  const list = db.prepare('SELECT id FROM reading_lists WHERE id = ? AND user_id = ?').get(req.params.id, userId);
   if (!list) return res.status(404).json({ error: 'Reading list not found' });
 
   const { manga_id } = req.body;
@@ -317,15 +324,27 @@ router.post('/reading-lists/:id/manga', asyncWrapper(async (req, res) => {
 // DELETE /api/reading-lists/:id/manga/:mangaId — remove manga from list
 router.delete('/reading-lists/:id/manga/:mangaId', asyncWrapper(async (req, res) => {
   const db = getDb();
-  db.prepare('DELETE FROM reading_list_manga WHERE list_id = ? AND manga_id = ?')
-    .run(req.params.id, req.params.mangaId);
+  const userId = req.user.id;
+  // The list_id IN (…) sub-select scopes the delete to the caller's own lists,
+  // so a user can't remove entries from another account's list.
+  db.prepare(`
+    DELETE FROM reading_list_manga
+    WHERE list_id = ? AND manga_id = ?
+      AND list_id IN (SELECT id FROM reading_lists WHERE user_id = ?)
+  `).run(req.params.id, req.params.mangaId, userId);
   res.json({ message: 'Removed' });
 }));
 
 // GET /api/manga/:id/reading-lists — which list IDs contain this manga
 router.get('/manga/:id/reading-lists', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const rows = db.prepare('SELECT list_id FROM reading_list_manga WHERE manga_id = ?').all(req.params.id);
+  const userId = req.user.id;
+  const rows = db.prepare(`
+    SELECT rlm.list_id
+    FROM reading_list_manga rlm
+    JOIN reading_lists rl ON rl.id = rlm.list_id
+    WHERE rlm.manga_id = ? AND rl.user_id = ?
+  `).all(req.params.id, userId);
   res.json({ data: rows.map(r => r.list_id) });
 }));
 
@@ -492,7 +511,10 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
     'SELECT * FROM chapters WHERE manga_id = ? ORDER BY number ASC NULLS LAST, folder_name ASC'
   ).all(manga.id);
 
-  const progress = db.prepare('SELECT * FROM progress WHERE manga_id = ?').get(manga.id);
+  // Scope progress to the requesting user — otherwise multi-user installs
+  // would leak whichever account happened to be matched first.
+  const progress = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?')
+    .get(req.user.id, manga.id);
 
   res.json({
     data: {
@@ -637,7 +659,7 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
 }));
 
 // POST /api/scan — scan all libraries
-router.post('/scan', asyncWrapper(async (req, res) => {
+router.post('/scan', requireAdmin, asyncWrapper(async (req, res) => {
   const status = getScanStatus();
   if (status.running) {
     return res.status(409).json({ error: 'Scan already in progress', status });
@@ -665,6 +687,9 @@ router.get('/scan/status', asyncWrapper(async (req, res) => {
 // MangaDetail page can re-fetch and immediately display the new chapters.
 // `scanMangaDirectory` is fast for a single folder (a handful of MB of disk
 // I/O at most) so blocking the request here is fine.
+// Single-manga rescan is left ungated: it's a MangaDetail user action (refresh
+// after dropping new chapters into a folder), not Library Management. The
+// admin-only paths are the per-library and full-server scans above.
 router.post('/manga/:id/scan', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare(
@@ -747,14 +772,16 @@ router.get('/genres', asyncWrapper(async (req, res) => {
 const _statsCache = new Map(); // key -> { payload, ts }
 const STATS_TTL_MS = 5 * 60 * 1000;
 
-function cacheKey(libraryId) {
-  return libraryId == null ? '__all__' : `lib:${libraryId}`;
+function cacheKey(userId, libraryId) {
+  const lib = libraryId == null ? '__all__' : `lib:${libraryId}`;
+  return `u:${userId}|${lib}`;
 }
 
 // GET /api/stats  —  optional ?library_id=N scopes every aggregate to one
 // library; omit for All Libraries.
 router.get('/stats', asyncWrapper(async (req, res) => {
   const db = getDb();
+  const userId = req.user.id;
 
   let libraryId = null;
   if (req.query.library_id !== undefined && req.query.library_id !== '') {
@@ -767,7 +794,7 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     libraryId = parsed;
   }
 
-  const key = cacheKey(libraryId);
+  const key = cacheKey(userId, libraryId);
   const cached = _statsCache.get(key);
   const now = Date.now();
   if (cached && (now - cached.ts) < STATS_TTL_MS) {
@@ -830,12 +857,13 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     FROM progress p
     JOIN manga m        ON m.id = p.manga_id
     JOIN manga_genres g ON g.manga_id = p.manga_id
-    WHERE json_array_length(p.completed_chapters) > 0
+    WHERE p.user_id = ?
+      AND json_array_length(p.completed_chapters) > 0
     ${libClause}
     GROUP BY g.genre COLLATE NOCASE
     ORDER BY chapters_read DESC, g.genre ASC
     LIMIT 10
-  `).all(...libParams).map(r => ({
+  `).all(userId, ...libParams).map(r => ({
     genre: r.genre,
     chapters_read: r.chapters_read,
   }));
@@ -849,8 +877,9 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     FROM progress p, json_each(p.completed_chapters) je
     JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
     JOIN manga m    ON m.id = p.manga_id
-    ${libClause.replace(/^ AND/, ' WHERE')}
-  `).get(...libParams);
+    WHERE p.user_id = ?
+    ${libClause}
+  `).get(userId, ...libParams);
 
   // Popular manga — sorted by completed chapter count in SQL
   const top_manga = db.prepare(`
@@ -858,10 +887,11 @@ router.get('/stats', asyncWrapper(async (req, res) => {
            json_array_length(p.completed_chapters) as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
-    ${libJoinClause}
+    WHERE p.user_id = ?
+    ${libClause}
     ORDER BY chapters_read DESC
     LIMIT 10
-  `).all(...libParams).map(r => ({
+  `).all(userId, ...libParams).map(r => ({
     id: r.id,
     title: r.title,
     cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
@@ -947,8 +977,11 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // Helps non-PWA tabs and incognito windows where the SW isn't active.
   res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=300');
 
+  const userId = req.user.id;
   const minScore = clampMinScore(req.query.min_score);
-  const cacheKey = String(minScore);
+  // Cache key includes user_id: continue_reading / favorite genres / discover
+  // are all per-user, so one user's Home must never be served to another.
+  const cacheKey = `u:${userId}|s:${minScore}`;
   const now = Date.now();
   const cached = _homeCache.get(cacheKey);
   if (cached && (now - cached.ts) < HOME_TTL_MS) {
@@ -977,10 +1010,11 @@ router.get('/home', asyncWrapper(async (req, res) => {
     JOIN manga m ON m.id = p.manga_id
     LEFT JOIN libraries l ON l.id = m.library_id
     LEFT JOIN chapters c  ON c.id = p.current_chapter_id
-    WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+    WHERE p.user_id = ?
+      AND (m.library_id IS NULL OR l.show_in_all = 1)
     ORDER BY p.last_read_at DESC
     LIMIT ?
-  `).all(limContinue);
+  `).all(userId, limContinue);
 
   const continue_reading = continueReadingRows.map(r => ({
     id:                r.id,
@@ -1009,12 +1043,13 @@ router.get('/home', asyncWrapper(async (req, res) => {
     JOIN manga m        ON m.id = p.manga_id
     JOIN manga_genres g ON g.manga_id = p.manga_id
     LEFT JOIN libraries l ON l.id = m.library_id
-    WHERE json_array_length(p.completed_chapters) > 0
+    WHERE p.user_id = ?
+      AND json_array_length(p.completed_chapters) > 0
       AND (m.library_id IS NULL OR l.show_in_all = 1)
     GROUP BY g.genre COLLATE NOCASE
     ORDER BY chapters_read DESC, g.genre ASC
     LIMIT 4
-  `).all();
+  `).all(userId);
   const favoriteGenres = favoriteGenreRows.map(r => r.genre);
 
   // ── Discover New Series ──────────────────────────────────────────────────
@@ -1032,7 +1067,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       FROM manga m
       JOIN manga_genres g ON g.manga_id = m.id
       LEFT JOIN libraries l ON l.id = m.library_id
-      LEFT JOIN progress p  ON p.manga_id = m.id
+      LEFT JOIN progress p  ON p.manga_id = m.id AND p.user_id = ?
       WHERE (m.library_id IS NULL OR l.show_in_all = 1)
         AND (p.manga_id IS NULL
              OR p.completed_chapters IS NULL
@@ -1041,7 +1076,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       GROUP BY m.id
       ORDER BY match_count DESC, m.score DESC NULLS LAST, m.id ASC
       LIMIT ?
-    `).all(...favoriteGenres, limDiscover).map(r => ({
+    `).all(userId, ...favoriteGenres, limDiscover).map(r => ({
       id:          r.id,
       title:       r.title,
       cover_url:   r.cover_image ? thumbnailUrl(r.cover_image) : null,

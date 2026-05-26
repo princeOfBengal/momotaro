@@ -7,13 +7,33 @@
 // missing, so wiping IndexedDB only loses progress-outbox entries; downloaded
 // content survives.
 //
-// Schema is version 1. Bump DB_VERSION and add the new store inside
-// `upgrade()` for future migrations.
+// Schema is at version 2. The v1 → v2 bump re-keys the progress outbox from
+// `chapter_id` to the composite `[user_id, chapter_id]` so two accounts on the
+// same device can each have pending writes for the same chapter without
+// clobbering each other. See `upgrade()` for the migration.
 
 import { openDB } from 'idb';
 
 export const DB_NAME = 'momotaro-offline';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
+// Mirrors server-side DEFAULT_USER_ID; used as the stamp for legacy outbox
+// rows when no one is logged in (and for the read-back when offlineApi is
+// invoked without an active session — e.g. flag-off single-user mode).
+const DEFAULT_USER_ID = 1;
+
+/**
+ * Read the logged-in user's id from localStorage without an async round-trip.
+ * Falls back to the default user (id 1) when no one is logged in — that's the
+ * pre-accounts / single-user identity the server also resolves to.
+ */
+export function getActiveUserIdSync() {
+  try {
+    const raw = localStorage.getItem('momotaro_active_user_id');
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  } catch { /* localStorage disabled / SSR */ }
+  return DEFAULT_USER_ID;
+}
 
 export const STORES = {
   MANGA:    'offline_manga',
@@ -29,7 +49,7 @@ let _dbPromise = null;
 export function getOfflineDb() {
   if (_dbPromise) return _dbPromise;
   _dbPromise = openDB(DB_NAME, DB_VERSION, {
-    upgrade(db) {
+    async upgrade(db, oldVersion, _newVersion, tx) {
       // ── offline_manga ───────────────────────────────────────────────────
       // One row per downloaded series. `search_text` is a lowercased
       // concatenation of every searchable string (title + alt_titles +
@@ -84,10 +104,29 @@ export function getOfflineDb() {
       }
 
       // ── progress_outbox ────────────────────────────────────────────────
-      // Pending PUT /api/progress/* writes. Keyed by chapter_id so repeated
-      // offline page-turns on the same chapter collapse to one outbox row.
-      if (!db.objectStoreNames.contains(STORES.OUTBOX)) {
-        const s = db.createObjectStore(STORES.OUTBOX, { keyPath: 'chapter_id' });
+      // Pending PUT /api/progress/* writes. Keyed by [user_id, chapter_id]
+      // (v2) so two accounts on the same device don't clobber each other's
+      // pending writes for the same chapter; rows for one chapter still
+      // collapse for one user.
+      if (oldVersion < 2 && db.objectStoreNames.contains(STORES.OUTBOX)) {
+        // Migrate v1 (keyPath: chapter_id) → v2 (composite). Snapshot the old
+        // rows via the version-change transaction, drop the store, recreate
+        // with the new keyPath, and re-put each row stamped with the active
+        // user id so they flush to the right account on next reconnect.
+        const oldStore = tx.objectStore(STORES.OUTBOX);
+        const oldRows  = await oldStore.getAll();
+        db.deleteObjectStore(STORES.OUTBOX);
+        const s = db.createObjectStore(STORES.OUTBOX, { keyPath: ['user_id', 'chapter_id'] });
+        s.createIndex('by_user',  'user_id');
+        s.createIndex('by_manga', 'manga_id');
+        const stamp = getActiveUserIdSync();
+        for (const row of oldRows) {
+          s.put({ ...row, user_id: Number(row.user_id) || stamp, chapter_id: Number(row.chapter_id) });
+        }
+      } else if (!db.objectStoreNames.contains(STORES.OUTBOX)) {
+        // Fresh install — create v2 schema directly.
+        const s = db.createObjectStore(STORES.OUTBOX, { keyPath: ['user_id', 'chapter_id'] });
+        s.createIndex('by_user',  'user_id');
         s.createIndex('by_manga', 'manga_id');
       }
 
@@ -321,22 +360,35 @@ export async function clearFinishedJobs() {
 
 export async function enqueueProgressWrite(entry) {
   const db = await getOfflineDb();
+  // Stamp the active user id so the row replays against the correct account
+  // when connectivity returns (and so two users on the same device don't
+  // collapse onto each other's pending write for the same chapter).
+  const userId = entry.user_id != null ? Number(entry.user_id) : getActiveUserIdSync();
   await db.put(STORES.OUTBOX, {
     ...entry,
+    user_id:    userId,
     chapter_id: Number(entry.chapter_id),
     manga_id:   Number(entry.manga_id),
     updated_at: Date.now(),
   });
 }
 
+/** Every outbox row, across all users on this device. */
 export async function listOutbox() {
   const db = await getOfflineDb();
   return db.getAll(STORES.OUTBOX);
 }
 
-export async function clearOutboxEntry(chapterId) {
+/** Outbox rows belonging to one user (what the flusher replays). */
+export async function listOutboxForUser(userId) {
   const db = await getOfflineDb();
-  await db.delete(STORES.OUTBOX, Number(chapterId));
+  return db.getAllFromIndex(STORES.OUTBOX, 'by_user', Number(userId));
+}
+
+/** Remove one outbox row by its composite key. `row` must carry user_id + chapter_id. */
+export async function clearOutboxEntry(row) {
+  const db = await getOfflineDb();
+  await db.delete(STORES.OUTBOX, [Number(row.user_id), Number(row.chapter_id)]);
 }
 
 // ── Meta key/value ───────────────────────────────────────────────────────────

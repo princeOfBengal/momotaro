@@ -2,6 +2,19 @@
 
 Momotaro is a self-hosted manga reader server. You drop manga folders (or CBZ files) into a library directory, and it serves a web UI to browse, read, and track progress — with optional AniList sync.
 
+**Multi-user accounts** are on by default since the user-accounts release: each
+device logs in (or creates the owner account), and reading progress, lists,
+history, favourite stats, and AniList linkage are private to each account and
+sync across that account's devices. An admin (the existing Client Management
+operator) has total control over every account — view, export, delete,
+force-logout — and can audit all-users reading history. A single-user install
+keeps working unchanged: the operator can turn the flag off
+(`multi_user_enabled = 0`) for a zero-friction one-library-many-devices setup,
+or just create one account and let everyone share it. Design docs:
+[user-accounts.md](./user-accounts.md),
+[user-accounts-compat.md](./user-accounts-compat.md),
+[user-accounts-implementation.md](./user-accounts-implementation.md).
+
 ## Tech Stack
 
 | Layer | Technology |

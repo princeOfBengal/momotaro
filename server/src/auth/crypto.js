@@ -42,6 +42,11 @@ function verifyPassword(password, stored) {
   try {
     const salt = Buffer.from(saltHex, 'hex');
     const expected = Buffer.from(hashHex, 'hex');
+    // Guard against a malformed hash whose hex decodes to zero bytes: scrypt
+    // with keylen 0 yields an empty buffer, and timingSafeEqual(empty, empty)
+    // is true — i.e. *any* password would verify. A real hash is 64 bytes, so
+    // a zero-length (or empty-salt) stored value is never legitimate.
+    if (expected.length === 0 || salt.length === 0) return false;
     const actual = crypto.scryptSync(password, salt, expected.length);
     return crypto.timingSafeEqual(actual, expected);
   } catch {

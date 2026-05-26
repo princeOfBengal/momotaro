@@ -1,12 +1,19 @@
 const express = require('express');
-const { getDb } = require('../db/database');
+const { getDb, DEFAULT_USER_ID, seedDefaultLists } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { hashPassword, verifyPassword, hashToken } = require('../auth/crypto');
 const adminSession = require('../auth/adminSession');
+const userSession = require('../auth/userSession');
+const loginLockout = require('../auth/loginLockout');
 const rateLimit = require('../auth/rateLimit');
 const pinLockout = require('../auth/pinLockout');
 const connectionLog = require('../auth/connectionLog');
 const { requireAdmin, isLanIp, isLanBypassEnabled, isAuthEnabled, extractClientToken, extractAdminToken } = require('../middleware/auth');
+const { extractUserToken, isMultiUserEnabled, allowRegistration } = require('../middleware/userAuth');
+
+// Mirrors the server-side username rule used by routes/users.js.
+const USERNAME_RE  = /^[a-z0-9_.-]{3,32}$/i;
+const MIN_PASSWORD = 8;
 
 const router = express.Router();
 
@@ -50,12 +57,14 @@ router.get('/admin/auth-status', asyncWrapper(async (req, res) => {
   const lanBypassEnabled  = isLanBypassEnabled(db);
   const callerIsLan       = isLanIp(req.ip);
 
-  // pairing_required mirrors the gate logic in requireClientOrAdmin, but as
-  // a hint instead of a hard 401. Returns true only when the caller would
-  // be turned away by the real gate AND has no obvious way back in.
+  // pairing_required mirrors the gate logic in requireClientOrAdmin exactly,
+  // so the SPA never routes to /login when the server would 401 the caller.
+  // External (non-LAN) traffic always needs pairing — the no-auth and
+  // LAN-bypass shortcuts only apply on the LAN.
   let pairingRequired = false;
-  if (authEnabled && !loggedIn) {
-    if (!(lanBypassEnabled && callerIsLan)) {
+  if (!loggedIn) {
+    const lanShortCircuit = callerIsLan && (!authEnabled || lanBypassEnabled);
+    if (!lanShortCircuit) {
       const clientToken = extractClientToken(req);
       let clientTokenValid = false;
       if (clientToken) {
@@ -68,6 +77,18 @@ router.get('/admin/auth-status', asyncWrapper(async (req, res) => {
     }
   }
 
+  // User-account layer. `user_required` is the signal the SPA's FirstLaunchGate
+  // keys off (like pairing_required) to route to /login. It is only true once
+  // multi-user is on AND a real account exists AND this caller has no valid
+  // session — a fresh/upgraded install with no accounts is not "user required".
+  const multiUser = isMultiUserEnabled(db);
+  const userToken = extractUserToken(req);
+  const userSes   = userToken ? userSession.validate(userToken, req) : null;
+  // With multi-user on, every caller needs a session — including the very first
+  // visitor, who is routed to /login to create the owner account (which adopts
+  // the default user's migrated data).
+  const userRequired = multiUser && !userSes;
+
   res.json({
     data: {
       configured:         !!getSetting(db, 'admin_password_hash'),
@@ -76,6 +97,10 @@ router.get('/admin/auth-status', asyncWrapper(async (req, res) => {
       lan_bypass_enabled: lanBypassEnabled,
       caller_is_lan:      callerIsLan,
       pairing_required:   pairingRequired,
+      multi_user_enabled: multiUser,
+      user_required:      userRequired,
+      allow_registration: allowRegistration(db),
+      logged_in_user:     userSes ? { id: userSes.user.id, username: userSes.user.username } : null,
     },
   });
 }));
@@ -179,6 +204,8 @@ router.get('/admin/security-settings', requireAdmin, asyncWrapper(async (req, re
     data: {
       auth_enabled:        isAuthEnabled(db),
       lan_bypass_enabled:  isLanBypassEnabled(db),
+      multi_user_enabled:  isMultiUserEnabled(db),
+      allow_registration:  allowRegistration(db),
     },
   });
 }));
@@ -192,10 +219,18 @@ router.put('/admin/security-settings', requireAdmin, asyncWrapper(async (req, re
   if ('lan_bypass_enabled' in body) {
     setSetting(db, 'lan_bypass_enabled', body.lan_bypass_enabled ? '1' : '0');
   }
+  if ('multi_user_enabled' in body) {
+    setSetting(db, 'multi_user_enabled', body.multi_user_enabled ? '1' : '0');
+  }
+  if ('allow_registration' in body) {
+    setSetting(db, 'allow_registration', body.allow_registration ? '1' : '0');
+  }
   res.json({
     data: {
       auth_enabled:        isAuthEnabled(db),
       lan_bypass_enabled:  isLanBypassEnabled(db),
+      multi_user_enabled:  isMultiUserEnabled(db),
+      allow_registration:  allowRegistration(db),
     },
   });
 }));
@@ -354,10 +389,12 @@ const FAILURE_EVENTS = [
   'pin_wrong', 'lockout', 'lockout_blocked', 'pair_rate_limited',
   'request_rate_limited', 'admin_login_fail', 'admin_login_rate_limited',
   'request_denied', 'request_error',
+  'user_login_fail', 'user_login_locked',
 ];
 const SUCCESS_EVENTS = [
   'pairing_request', 'pin_correct', 'admin_login_ok', 'client_request',
   'admin_action', 'connection_log_exported',
+  'user_register', 'user_login_ok', 'user_logout',
 ];
 
 function buildFilters(query) {
@@ -470,7 +507,8 @@ router.get('/admin/connection-log', requireAdmin, asyncWrapper(async (req, res) 
            occurred_at, detail,
            accept_language, referer, origin, forwarded_for,
            client_hints, method, path, status_code, protocol, host,
-           reverse_dns, country, region, city, timezone, dnt, auth_kind
+           reverse_dns, country, region, city, timezone, dnt, auth_kind,
+           username
       FROM connection_attempts
       ${filters.clause}${keyset}
      ORDER BY occurred_at DESC, id DESC
@@ -644,7 +682,8 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
            occurred_at, detail,
            accept_language, referer, origin, forwarded_for,
            client_hints, method, path, status_code, protocol, host,
-           reverse_dns, country, region, city, timezone, dnt, auth_kind
+           reverse_dns, country, region, city, timezone, dnt, auth_kind,
+           username
       FROM connection_attempts
      ORDER BY occurred_at DESC, id DESC
   `).all();
@@ -700,7 +739,7 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
     'Device type', 'OS', 'Browser', 'Platform', 'Device name',
     'Accept-Language', 'User agent', 'Client hints (JSON)',
     'Method', 'Path', 'Status', 'Protocol', 'Host', 'Origin', 'Referer',
-    'DNT', 'Auth kind',
+    'DNT', 'Auth kind', 'Username',
     'Pairing ID', 'Paired client ID', 'Detail',
   ];
   lines.push(eventHeader.map(csvEscape).join(','));
@@ -734,6 +773,7 @@ router.get('/admin/connection-log.csv', asyncWrapper(async (req, res) => {
       e.referer || '',
       e.dnt == null ? '' : (e.dnt ? '1' : '0'),
       e.auth_kind || '',
+      e.username || '',
       e.pairing_id || '',
       e.paired_client_id == null ? '' : e.paired_client_id,
       e.detail || '',
@@ -775,6 +815,294 @@ router.delete('/admin/clients/:id', requireAdmin, asyncWrapper(async (req, res) 
   if (changes === 0) return res.status(404).json({ error: 'Client not found' });
   console.log(`[Admin] Revoked paired client id=${id}`);
   res.json({ data: { revoked: id } });
+}));
+
+// ── User accounts (admin management) ────────────────────────────────────────
+// All gated by requireAdmin. The operator has total power over every account
+// (requirement #10): list, create, rename / enable-disable / reset-password,
+// delete (cascades all reading data), force-logout, view + export a user's
+// data, and audit all-users reading history.
+
+function safeJsonParse(s, fallback) { try { return JSON.parse(s); } catch { return fallback; } }
+
+function publicUserRow(u) {
+  return {
+    id: u.id, username: u.username, display_name: u.display_name,
+    is_admin: u.is_admin, disabled: u.disabled,
+    created_at: u.created_at, last_login_at: u.last_login_at,
+  };
+}
+
+// GET /api/admin/users — roster with per-user counts.
+router.get('/admin/users', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT u.id, u.username, u.display_name, u.is_admin, u.disabled, u.created_at, u.last_login_at,
+           (SELECT COUNT(*) FROM user_sessions s    WHERE s.user_id  = u.id AND s.revoked = 0) AS active_sessions,
+           (SELECT COUNT(*) FROM progress p         WHERE p.user_id  = u.id) AS progress_count,
+           (SELECT COUNT(*) FROM reading_lists rl   WHERE rl.user_id = u.id) AS list_count,
+           (SELECT COUNT(*) FROM reading_history h  WHERE h.user_id  = u.id) AS history_count,
+           (SELECT 1 FROM user_anilist_sessions a   WHERE a.user_id  = u.id AND a.anilist_token != '') AS anilist_linked
+    FROM users u
+    ORDER BY u.id ASC
+  `).all().map(r => ({
+    ...publicUserRow(r),
+    active_sessions: r.active_sessions,
+    progress_count:  r.progress_count,
+    list_count:      r.list_count,
+    history_count:   r.history_count,
+    anilist_linked:  !!r.anilist_linked,
+  }));
+  res.json({ data: rows });
+}));
+
+// POST /api/admin/users — create an account (used when open registration is off).
+// The first account created adopts the default user, like self-registration.
+router.post('/admin/users', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const username    = String(req.body?.username || '').trim();
+  const password    = typeof req.body?.password === 'string' ? req.body.password : '';
+  const displayName = (String(req.body?.display_name || '').trim() || username).slice(0, 64);
+  const isAdmin     = req.body?.is_admin ? 1 : 0;
+  if (!USERNAME_RE.test(username))      return res.status(400).json({ error: 'Username must be 3–32 characters: letters, numbers, and . _ -' });
+  if (password.length < MIN_PASSWORD)   return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters.` });
+
+  const realAccounts = db.prepare(
+    "SELECT COUNT(*) AS n FROM users WHERE NOT (id = ? AND username = 'default')"
+  ).get(DEFAULT_USER_ID).n;
+  const passwordHash = hashPassword(password);
+  let userId;
+  try {
+    if (realAccounts === 0) {
+      db.prepare('UPDATE users SET username = ?, display_name = ?, password_hash = ?, is_admin = ?, disabled = 0 WHERE id = ?')
+        .run(username, displayName, passwordHash, isAdmin || 1, DEFAULT_USER_ID);
+      userId = DEFAULT_USER_ID;
+    } else {
+      userId = db.prepare('INSERT INTO users (username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?)')
+        .run(username, displayName, passwordHash, isAdmin).lastInsertRowid;
+    }
+  } catch (err) {
+    if (/UNIQUE/i.test(err.message)) return res.status(409).json({ error: 'That username is already taken.' });
+    throw err;
+  }
+  seedDefaultLists(db, userId);
+  connectionLog.recordEvent('admin_action', { ...connectionLog.fingerprint(req), username, detail: 'created user' });
+  res.status(201).json({ data: publicUserRow(db.prepare('SELECT * FROM users WHERE id = ?').get(userId)) });
+}));
+
+// PATCH /api/admin/users/:id — rename / enable-disable / reset password / set admin.
+router.patch('/admin/users/:id', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const body = req.body || {};
+
+  if (typeof body.display_name === 'string') {
+    db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(body.display_name.trim().slice(0, 64), id);
+  }
+  if ('is_admin' in body) {
+    db.prepare('UPDATE users SET is_admin = ? WHERE id = ?').run(body.is_admin ? 1 : 0, id);
+  }
+  if ('disabled' in body) {
+    if (id === DEFAULT_USER_ID && body.disabled) {
+      return res.status(400).json({ error: 'Cannot disable the primary account.' });
+    }
+    db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(body.disabled ? 1 : 0, id);
+    if (body.disabled) userSession.revokeAllForUser(id); // kick active sessions
+  }
+  if (typeof body.new_password === 'string') {
+    if (body.new_password.length < MIN_PASSWORD) {
+      return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters.` });
+    }
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(body.new_password), id);
+    userSession.revokeAllForUser(id); // force re-login after a reset
+  }
+  connectionLog.recordEvent('admin_action', { ...connectionLog.fingerprint(req), username: user.username, detail: 'modified user' });
+  res.json({ data: publicUserRow(db.prepare('SELECT * FROM users WHERE id = ?').get(id)) });
+}));
+
+// DELETE /api/admin/users/:id — delete account; reading data cascades via FK.
+router.delete('/admin/users/:id', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+  if (id === DEFAULT_USER_ID) return res.status(400).json({ error: 'Cannot delete the primary account.' });
+  const user = db.prepare('SELECT username FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  // progress / reading_lists / reading_list_manga / reading_history /
+  // user_sessions / user_anilist_sessions all FK users(id) ON DELETE CASCADE.
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  connectionLog.recordEvent('admin_action', { ...connectionLog.fingerprint(req), username: user.username, detail: 'deleted user' });
+  res.json({ data: { deleted: id } });
+}));
+
+// POST /api/admin/users/:id/revoke-sessions — force-logout on every device.
+router.post('/admin/users/:id/revoke-sessions', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+  if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) return res.status(404).json({ error: 'User not found' });
+  userSession.revokeAllForUser(id);
+  res.json({ data: { revoked_user: id } });
+}));
+
+// GET /api/admin/users/:id/history — one user's reading history (newest first).
+router.get('/admin/users/:id/history', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  let limit = parseInt(req.query?.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 200;
+  if (limit > 5000) limit = 5000;
+  const rows = db.prepare(`
+    SELECT h.id, h.manga_id, m.title AS manga_title, h.chapter_id, c.folder_name AS chapter_folder,
+           c.number AS chapter_number, h.event, h.read_at
+    FROM reading_history h
+    LEFT JOIN manga m    ON m.id = h.manga_id
+    LEFT JOIN chapters c ON c.id = h.chapter_id
+    WHERE h.user_id = ?
+    ORDER BY h.read_at DESC, h.id DESC
+    LIMIT ?
+  `).all(id, limit);
+  res.json({ data: rows });
+}));
+
+// GET /api/admin/users/:id/export — full per-user bundle (account + devices +
+// reading data). AniList token and password hash are never included.
+router.get('/admin/users/:id/export', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  const user = db.prepare(
+    'SELECT id, username, display_name, is_admin, disabled, created_at, last_login_at FROM users WHERE id = ?'
+  ).get(id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const mangaIdToPath  = new Map(db.prepare('SELECT id, path FROM manga').all().map(m => [m.id, m.path]));
+  const mangaIdToTitle = new Map(db.prepare('SELECT id, title FROM manga').all().map(m => [m.id, m.title]));
+  const folderById     = new Map(db.prepare('SELECT id, folder_name FROM chapters').all().map(c => [c.id, c.folder_name]));
+
+  const devices = db.prepare(`
+    SELECT s.id, s.paired_client_id, s.created_at, s.last_seen_at, s.last_seen_ip, s.revoked,
+           pc.device_name, pc.platform, pc.os, pc.browser, pc.device_type
+    FROM user_sessions s
+    LEFT JOIN paired_clients pc ON pc.id = s.paired_client_id
+    WHERE s.user_id = ?
+    ORDER BY s.created_at DESC
+  `).all(id).map(s => ({ ...s, revoked: !!s.revoked }));
+
+  const anilist = db.prepare(
+    'SELECT anilist_user_id, anilist_username, token_expires_at, updated_at FROM user_anilist_sessions WHERE user_id = ?'
+  ).get(id) || null;
+
+  const progress = db.prepare('SELECT * FROM progress WHERE user_id = ?').all(id).map(p => ({
+    manga_path:  mangaIdToPath.get(p.manga_id) || null,
+    manga_title: mangaIdToTitle.get(p.manga_id) || null,
+    current_chapter_folder: p.current_chapter_id ? (folderById.get(p.current_chapter_id) || null) : null,
+    current_page: p.current_page,
+    completed_chapter_folders: safeJsonParse(p.completed_chapters, []).map(cid => folderById.get(cid)).filter(Boolean),
+    last_read_at: p.last_read_at, updated_at: p.updated_at,
+  })).filter(p => p.manga_path);
+
+  const reading_lists = db.prepare('SELECT id, name, is_default, created_at FROM reading_lists WHERE user_id = ?').all(id).map(l => ({
+    name: l.name, is_default: l.is_default, created_at: l.created_at,
+    manga: db.prepare('SELECT manga_id, added_at FROM reading_list_manga WHERE list_id = ?').all(l.id)
+      .map(m => ({ manga_path: mangaIdToPath.get(m.manga_id), added_at: m.added_at })).filter(m => m.manga_path),
+  }));
+
+  const reading_history = db.prepare('SELECT manga_id, chapter_id, event, read_at FROM reading_history WHERE user_id = ? ORDER BY read_at DESC').all(id).map(h => ({
+    manga_path:  mangaIdToPath.get(h.manga_id) || null,
+    manga_title: mangaIdToTitle.get(h.manga_id) || null,
+    chapter_folder: h.chapter_id ? (folderById.get(h.chapter_id) || null) : null,
+    event: h.event, read_at: h.read_at,
+  })).filter(h => h.manga_path);
+
+  const payload = {
+    app: 'momotaro', kind: 'user-export', exported_at: new Date().toISOString(),
+    account: user, anilist, devices, progress, reading_lists, reading_history,
+  };
+  connectionLog.recordEvent('admin_action', { ...connectionLog.fingerprint(req), username: user.username, detail: 'exported user data' });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="momotaro-user-${user.username}-${stamp}.json"`);
+  res.send(JSON.stringify(payload, null, 2));
+}));
+
+// GET /api/admin/reading-history — every user's history, joined to username.
+// Filters: user_id, since, until, limit. `?format=csv` streams a CSV bundle.
+router.get('/admin/reading-history', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const where = [];
+  const params = [];
+  const uid = parseInt(req.query?.user_id, 10);
+  if (Number.isFinite(uid)) { where.push('h.user_id = ?'); params.push(uid); }
+  const since = parseInt(req.query?.since, 10);
+  if (Number.isFinite(since)) { where.push('h.read_at >= ?'); params.push(since); }
+  const until = parseInt(req.query?.until, 10);
+  if (Number.isFinite(until)) { where.push('h.read_at <= ?'); params.push(until); }
+  const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  let limit = parseInt(req.query?.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 500;
+  if (limit > 20000) limit = 20000;
+
+  const rows = db.prepare(`
+    SELECT h.id, h.user_id, u.username, h.manga_id, m.title AS manga_title,
+           c.folder_name AS chapter_folder, c.number AS chapter_number, h.event, h.read_at
+    FROM reading_history h
+    JOIN users u         ON u.id = h.user_id
+    LEFT JOIN manga m    ON m.id = h.manga_id
+    LEFT JOIN chapters c ON c.id = h.chapter_id
+    ${clause}
+    ORDER BY h.read_at DESC, h.id DESC
+    LIMIT ?
+  `).all(...params, limit);
+
+  if (req.query?.format === 'csv') {
+    const lines = [];
+    lines.push(['User ID', 'Username', 'Manga', 'Chapter', 'Event', 'Read at (UTC)'].map(csvEscape).join(','));
+    for (const r of rows) {
+      lines.push([
+        r.user_id, r.username || '',
+        r.manga_title || `#${r.manga_id}`,
+        r.chapter_number ?? r.chapter_folder ?? '',
+        r.event, formatUnix(r.read_at),
+      ].map(csvEscape).join(','));
+    }
+    const body = '﻿' + lines.join('\r\n') + '\r\n';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="momotaro-reading-history-${stamp}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(body);
+  }
+  res.json({ data: rows });
+}));
+
+// GET /api/admin/login-lockouts — active login lockouts + the cap.
+router.get('/admin/login-lockouts', requireAdmin, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare('DELETE FROM login_lockouts WHERE locked_until > 0 AND locked_until <= ?').run(now);
+  const active_lockouts = db.prepare(
+    'SELECT lockout_key, failed_attempts, locked_until, updated_at FROM login_lockouts WHERE locked_until > ? ORDER BY locked_until DESC'
+  ).all(now);
+  res.json({
+    data: {
+      max_attempts:         loginLockout.getMaxAttempts(db),
+      default_max_attempts: loginLockout.DEFAULT_MAX_ATTEMPTS,
+      lockout_duration_sec: loginLockout.LOCKOUT_DURATION_SEC,
+      active_lockouts,
+    },
+  });
+}));
+
+// DELETE /api/admin/login-lockouts/:key — clear one device's login lockout.
+router.delete('/admin/login-lockouts/:key', requireAdmin, asyncWrapper(async (req, res) => {
+  const key = String(req.params.key || '').trim();
+  if (!key) return res.status(400).json({ error: 'key is required' });
+  loginLockout.clearKey(key);
+  console.log(`[Admin] Cleared login lockout for ${key}`);
+  res.json({ data: { cleared: key } });
 }));
 
 module.exports = router;

@@ -1,5 +1,14 @@
 # AniList Integration
 
+> **Shipped (Phase 3):** AniList is per **Momotaro user**, not per device. Each
+> account links its own AniList; multiple AniList accounts coexist on one
+> server. Login state is stored in `user_anilist_sessions` (PK `user_id`), and
+> the per-user list-entry cache is keyed `(user_id, media_id)`. The legacy
+> `device_anilist_sessions` table is migrated to the default user on first
+> boot and then dropped (Phase 7). Design refs:
+> [user-accounts.md §7.7](./user-accounts.md) ·
+> [user-accounts-compat.md § AniList](./user-accounts-compat.md#anilist).
+
 Momotaro integrates with AniList for:
 
 1. **Metadata enrichment** — fetch titles, descriptions, genres, cover art
@@ -36,13 +45,32 @@ Every AniList HTTP request is logged through a single `[AniList]` line in
 the system log so the operator can audit exactly when and why each ping
 happened.
 
-## Per-Device Login
+## Per-User Login
 
-AniList login is **per device** (per browser). Each browser generates a UUID on first load, stores it in `localStorage` as `momotaro_device_id`, and sends it as the `X-Device-ID` header on every API request.
+AniList login is **per Momotaro user**. Each account links its own AniList,
+many AniList accounts coexist on one server, and the link follows the account
+across devices instead of being pinned to whichever browser logged in.
 
-The server stores login state in the `device_anilist_sessions` table keyed by `device_id`. Logging in on one device does not affect any other device's session. Logging out only clears the session for the requesting device.
+The server stores login state in `user_anilist_sessions` keyed by `user_id`
+(see [server/src/db/database.js](../server/src/db/database.js)). The OAuth
+exchange resolves `req.user.id` (the logged-in Momotaro user, via the
+`X-User-Token` header) and writes the JWT + decoded `exp` to that user's row.
+Logging out (`DELETE /api/auth/anilist`) only clears the requesting user's
+link.
 
-The OAuth client credentials (`anilist_client_id`, `anilist_client_secret`) are still global — stored in the `settings` table — since they belong to the server's registered AniList application, not to individual users.
+In single-user / pre-accounts mode the implicit default user (id=1) owns the
+link, so a household with one Momotaro user has exactly one AniList session
+— the same single-user behavior as before.
+
+The OAuth client credentials (`anilist_client_id`, `anilist_client_secret`)
+remain global in the `settings` table — they belong to the server's
+registered AniList application, not to any individual user.
+
+**Rate-limit invariant:** AniList's 90 req/min limit is per-IP and every
+account's calls leave the server's one IP, so the adaptive limiter in
+`anilistRequest()` is a **single process-wide instance shared by all users**.
+Sharding it per user would let N accounts each assume a full budget and
+collectively trip 429s — do not do that.
 
 ## OAuth Setup
 
@@ -55,7 +83,7 @@ AniList uses OAuth 2.0. The user must create an AniList API application and supp
 3. AniList redirects back to `<origin>/anilist/callback` with `?code=...`
 4. `AnilistCallback.jsx` POSTs the code to `POST /api/auth/anilist/exchange`
 5. Server exchanges code for access token via AniList token endpoint
-6. Token stored in `device_anilist_sessions` for the requesting device's `X-Device-ID`
+6. Token stored in `user_anilist_sessions` for the requesting Momotaro user (`req.user.id`, resolved from the `X-User-Token`); the JWT's `exp` is decoded into `token_expires_at` so the UI can prompt re-login on expiry.
 
 Relevant files:
 
@@ -104,14 +132,15 @@ The two routes that can trigger a sync are:
   when the chapter's completion state actually flips (unread → completed or
   completed → unread). A no-op toggle does not ping AniList.
 
-Both handlers extract `X-Device-ID` from the request header and pass it to
-`syncToAniList()`. That function looks up the token from
-`device_anilist_sessions` for that device. If the device has no AniList session,
-sync is skipped silently.
+Both handlers pass the owning `req.user.id` (the Momotaro user whose progress
+changed) into `syncToAniList()`. That function looks up the token from
+`user_anilist_sessions` for that user. If the user has no AniList session,
+sync is skipped silently. So User A's reads sync to A's AniList, User B's to
+B's; a device shared between two accounts no longer cross-attributes.
 
 Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `syncToAniList()`:
 
-1. Look up `anilist_token` and `anilist_user_id` from `device_anilist_sessions` for the request's `device_id` — skip if not logged in
+1. Look up `anilist_token` and `anilist_user_id` from `user_anilist_sessions` for the owning `user_id` — skip if that user hasn't linked AniList
 2. Check `manga.anilist_id` — skip if no AniList match
 3. Skip if `completedChapters` is empty
 4. Determine tracking mode from `manga.track_volumes`:

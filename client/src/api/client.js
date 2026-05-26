@@ -85,6 +85,38 @@ function clearClientToken() {
   localStorage.removeItem(CLIENT_TOKEN_KEY);
 }
 
+// ── User session token ───────────────────────────────────────────────────────
+// Issued by POST /api/users/login | /register. Identifies *who* is reading
+// (distinct from the paired-client token, which identifies the device). Sent on
+// every request via `X-User-Token`. `momotaro_active_user_id` mirrors the
+// logged-in user's id so non-React utilities (readingProgress) can namespace
+// per-user localStorage without a round-trip.
+const USER_TOKEN_KEY = 'momotaro_user_token';
+const ACTIVE_USER_KEY = 'momotaro_active_user_id';
+
+function getUserToken() {
+  return localStorage.getItem(USER_TOKEN_KEY) || null;
+}
+
+function setUserToken(token) {
+  if (token) localStorage.setItem(USER_TOKEN_KEY, token);
+  else       localStorage.removeItem(USER_TOKEN_KEY);
+}
+
+function clearUserToken() {
+  localStorage.removeItem(USER_TOKEN_KEY);
+  localStorage.removeItem(ACTIVE_USER_KEY);
+}
+
+function getActiveUserId() {
+  return localStorage.getItem(ACTIVE_USER_KEY) || null;
+}
+
+function setActiveUserId(id) {
+  if (id === null || id === undefined) localStorage.removeItem(ACTIVE_USER_KEY);
+  else localStorage.setItem(ACTIVE_USER_KEY, String(id));
+}
+
 /**
  * Walk a parsed JSON response and rewrite any string that points at a gated
  * media endpoint the SPA will load via a native browser element (`<img src>`
@@ -165,6 +197,7 @@ async function apiFetch(path, options = {}) {
 
   const adminToken  = getAdminToken();
   const clientToken = getClientToken();
+  const userToken   = getUserToken();
   try {
     const resp = await fetch(`${getServerUrl()}${path}`, {
       ...fetchOptions,
@@ -174,11 +207,20 @@ async function apiFetch(path, options = {}) {
         'X-Device-ID': getDeviceId(),
         ...(adminToken  ? { 'X-Admin-Token': adminToken } : {}),
         ...(clientToken ? { 'Authorization': `Bearer ${clientToken}` } : {}),
+        ...(userToken   ? { 'X-User-Token': userToken } : {}),
         ...fetchOptions.headers,
       },
     });
     const json = await resp.json();
-    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      // Attach the parsed body + status so callers that need structured fields
+      // (e.g. login's attempts_remaining / seconds_remaining) can read them.
+      // Existing callers keep working — they only read `err.message`.
+      const err = new Error(json.error || `HTTP ${resp.status}`);
+      err.status = resp.status;
+      err.body = json;
+      throw err;
+    }
     // Rewrite any `/thumbnails/*` and `/api/pages/N/image` URLs the server
     // baked into the response so `<img src>` requests (a) hit the real
     // server instead of the Capacitor asset shell, and (b) carry the
@@ -201,6 +243,33 @@ async function apiFetch(path, options = {}) {
     clearTimeout(timeout);
     if (userSignal && onUserAbort) userSignal.removeEventListener('abort', onUserAbort);
   }
+}
+
+// Authenticated file download for admin endpoints. Uses fetch + blob + a
+// synthetic `<a download>` so the X-Admin-Token header rides along — native
+// browser navigation can't attach custom headers. Shared by the per-user
+// export and the all-users reading-history CSV.
+async function _adminDownload(path, fallbackName) {
+  const adminToken = getAdminToken();
+  if (!adminToken) throw new Error('Admin session required');
+  const resp = await fetch(`${getServerUrl()}${path}`, { headers: { 'X-Admin-Token': adminToken } });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const j = await resp.json(); if (j?.error) msg = j.error; } catch (_) { /* not JSON */ }
+    throw new Error(msg);
+  }
+  const blob = await resp.blob();
+  const cd = resp.headers.get('Content-Disposition') || '';
+  const m = /filename="([^"]+)"/.exec(cd);
+  const filename = m ? m[1] : fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 const _rawApi = {
@@ -561,6 +630,43 @@ const _rawApi = {
   // `setAdminToken` so subsequent requests in the same browser session pick
   // it up via the `X-Admin-Token` header.
   getAuthStatus: () => apiFetch('/api/admin/auth-status'),
+
+  // ── User accounts (login / register / logout / me) ─────────────────────
+  // login & register persist the returned session token (and the active user
+  // id, for per-user localStorage namespacing) so every subsequent request
+  // carries `X-User-Token`. logout revokes server-side then clears locally.
+  register: async (username, password, displayName) => {
+    const data = await apiFetch('/api/users/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, display_name: displayName }),
+    });
+    if (data?.user_token) setUserToken(data.user_token);
+    if (data?.user?.id != null) setActiveUserId(data.user.id);
+    return data;
+  },
+  login: async (username, password) => {
+    const data = await apiFetch('/api/users/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    if (data?.user_token) setUserToken(data.user_token);
+    if (data?.user?.id != null) setActiveUserId(data.user.id);
+    return data;
+  },
+  logout: async () => {
+    try {
+      await apiFetch('/api/users/logout', { method: 'POST' });
+    } finally {
+      clearUserToken();
+    }
+  },
+  getMe: () => apiFetch('/api/users/me'),
+  userExists: (username) =>
+    apiFetch(`/api/users/exists?${new URLSearchParams({ username })}`),
+  // The caller's own reading-history timeline.
+  getHistory: (limit = 100) => apiFetch(`/api/history?limit=${limit}`),
+  clearHistory: () => apiFetch('/api/history', { method: 'DELETE' }),
+
   adminSetup: async (password) => {
     const data = await apiFetch('/api/admin/setup', {
       method: 'POST',
@@ -608,6 +714,41 @@ const _rawApi = {
     apiFetch('/api/admin/pairing-pin-settings', { method: 'PUT', body: JSON.stringify(body) }),
   clearPairingPinLockout: (ip) =>
     apiFetch(`/api/admin/pairing-pin-lockouts/${encodeURIComponent(ip)}`, { method: 'DELETE' }),
+
+  // ── User management (admin) ────────────────────────────────────────────
+  // The operator's total control over accounts (requirement #10). All gated
+  // server-side by requireAdmin (the X-Admin-Token rides along automatically).
+  adminListUsers: () => apiFetch('/api/admin/users'),
+  adminCreateUser: (body) =>
+    apiFetch('/api/admin/users', { method: 'POST', body: JSON.stringify(body) }),
+  adminUpdateUser: (id, body) =>
+    apiFetch(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  adminDeleteUser: (id) =>
+    apiFetch(`/api/admin/users/${id}`, { method: 'DELETE' }),
+  adminRevokeUserSessions: (id) =>
+    apiFetch(`/api/admin/users/${id}/revoke-sessions`, { method: 'POST' }),
+  adminGetUserHistory: (id, limit = 200) =>
+    apiFetch(`/api/admin/users/${id}/history?limit=${limit}`),
+  adminGetReadingHistory: (filters = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return apiFetch(`/api/admin/reading-history${suffix}`);
+  },
+  adminGetLoginLockouts: () => apiFetch('/api/admin/login-lockouts'),
+  adminClearLoginLockout: (key) =>
+    apiFetch(`/api/admin/login-lockouts/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  // Blob downloads (carry X-Admin-Token via fetch, like the connection-log CSV).
+  adminExportUser: (id) => _adminDownload(`/api/admin/users/${id}/export`, 'momotaro-user.json'),
+  adminDownloadReadingHistoryCsv: (filters = {}) => {
+    const qs = new URLSearchParams({ format: 'csv' });
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+    }
+    return _adminDownload(`/api/admin/reading-history?${qs}`, 'momotaro-reading-history.csv');
+  },
 
   // Forensic connection log — every pairing attempt, wrong-PIN guess,
   // lockout, denied request, and admin write is logged with the
@@ -738,6 +879,11 @@ const _rawApi = {
   getClientToken,
   setClientToken,
   clearClientToken,
+  getUserToken,
+  setUserToken,
+  clearUserToken,
+  getActiveUserId,
+  setActiveUserId,
   getServerUrl,
   setServerUrl,
   clearServerUrl,

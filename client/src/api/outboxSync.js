@@ -19,7 +19,7 @@
 // just an in-process for-loop. Each row is independent so a single
 // chapter failing doesn't block the rest.
 
-import { listOutbox, clearOutboxEntry } from './offlineDb.js';
+import { listOutboxForUser, clearOutboxEntry, getActiveUserIdSync } from './offlineDb.js';
 import { rawApi } from './client.js';
 
 let _flushPromise = null;
@@ -27,10 +27,11 @@ let _lastFlushAt  = 0;
 
 export async function flushOutbox({ minIntervalMs = 5_000 } = {}) {
   // Coalesce: if a flush is in-flight, return it. If one finished very
-  // recently and no new writes have shown up, skip.
+  // recently and the *current* user has nothing pending, skip.
   if (_flushPromise) return _flushPromise;
   if (Date.now() - _lastFlushAt < minIntervalMs) {
-    const rows = await listOutbox();
+    const userId = getActiveUserIdSync();
+    const rows = await listOutboxForUser(userId);
     if (rows.length === 0) return { drained: 0, failed: 0 };
   }
 
@@ -42,8 +43,12 @@ export async function flushOutbox({ minIntervalMs = 5_000 } = {}) {
 }
 
 async function doFlush() {
+  // Only replay rows belonging to the currently logged-in user, since the
+  // X-User-Token attached by `rawApi.*` is theirs. Other users' rows stay in
+  // the outbox until that user signs in and triggers a flush.
+  const userId = getActiveUserIdSync();
   let rows;
-  try { rows = await listOutbox(); }
+  try { rows = await listOutboxForUser(userId); }
   catch { return { drained: 0, failed: 0 }; }
 
   let drained = 0;
@@ -57,7 +62,7 @@ async function doFlush() {
       } else {
         await rawApi.updateProgress(row.manga_id, payload);
       }
-      await clearOutboxEntry(row.chapter_id);
+      await clearOutboxEntry(row);
       drained++;
     } catch {
       failed++;

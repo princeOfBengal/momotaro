@@ -25,28 +25,52 @@ function setSetting(db, key, value) {
   ).run(key, value || '');
 }
 
-function getDeviceSession(db, deviceId) {
-  if (!deviceId) return null;
-  return db.prepare('SELECT * FROM device_anilist_sessions WHERE device_id = ?').get(deviceId) || null;
+// AniList login is per Momotaro **user** (not per device): each account links
+// its own AniList, and many AniList accounts coexist on one server. Stored in
+// `user_anilist_sessions` keyed by user_id.
+function getUserAniList(db, userId) {
+  if (!userId) return null;
+  return db.prepare('SELECT * FROM user_anilist_sessions WHERE user_id = ?').get(userId) || null;
 }
 
-function setDeviceSession(db, deviceId, fields) {
-  const { anilist_token, anilist_user_id, anilist_username, anilist_avatar } = fields;
+function setUserAniList(db, userId, fields) {
+  const { anilist_token, anilist_user_id, anilist_username, anilist_avatar, token_expires_at } = fields;
   db.prepare(`
-    INSERT INTO device_anilist_sessions (device_id, anilist_token, anilist_user_id, anilist_username, anilist_avatar, updated_at)
-    VALUES (?, ?, ?, ?, ?, unixepoch())
-    ON CONFLICT(device_id) DO UPDATE SET
+    INSERT INTO user_anilist_sessions
+      (user_id, anilist_token, anilist_user_id, anilist_username, anilist_avatar, token_expires_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, unixepoch())
+    ON CONFLICT(user_id) DO UPDATE SET
       anilist_token    = excluded.anilist_token,
       anilist_user_id  = excluded.anilist_user_id,
       anilist_username = excluded.anilist_username,
       anilist_avatar   = excluded.anilist_avatar,
+      token_expires_at = excluded.token_expires_at,
       updated_at       = unixepoch()
-  `).run(deviceId, anilist_token || '', anilist_user_id || '', anilist_username || '', anilist_avatar || '');
+  `).run(
+    userId,
+    anilist_token || '', anilist_user_id || '', anilist_username || '', anilist_avatar || '',
+    token_expires_at ?? null,
+  );
 }
 
-function deleteDeviceSession(db, deviceId) {
-  if (!deviceId) return;
-  db.prepare('DELETE FROM device_anilist_sessions WHERE device_id = ?').run(deviceId);
+function deleteUserAniList(db, userId) {
+  if (!userId) return;
+  db.prepare('DELETE FROM user_anilist_sessions WHERE user_id = ?').run(userId);
+}
+
+// AniList access tokens are JWTs valid ~1 year with no usable refresh. Decode
+// (without verifying — the token came straight from AniList's token endpoint)
+// to surface the `exp` so the UI can prompt re-login instead of silently
+// failing once it lapses.
+function decodeJwtExp(token) {
+  try {
+    const payloadB64 = String(token).split('.')[1];
+    if (!payloadB64) return null;
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    return Number.isFinite(payload.exp) ? payload.exp : null;
+  } catch {
+    return null;
+  }
 }
 
 // GET /api/settings
@@ -55,18 +79,18 @@ router.get('/settings', asyncWrapper(async (req, res) => {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const raw = Object.fromEntries(rows.map(r => [r.key, r.value]));
 
-  const deviceId = req.headers['x-device-id'] || null;
-  const session = getDeviceSession(db, deviceId);
+  const session = getUserAniList(db, req.user?.id);
 
   res.json({
     data: {
-      anilist_client_id:         raw['anilist_client_id'] || '',
-      anilist_client_secret_set: !!(raw['anilist_client_secret']),
-      anilist_token_set:         !!(session?.anilist_token),
-      anilist_logged_in:         !!(session?.anilist_token && session?.anilist_user_id),
-      anilist_user_id:           session?.anilist_user_id  || null,
-      anilist_username:          session?.anilist_username || null,
-      anilist_avatar:            session?.anilist_avatar   || null,
+      anilist_client_id:           raw['anilist_client_id'] || '',
+      anilist_client_secret_set:   !!(raw['anilist_client_secret']),
+      anilist_token_set:           !!(session?.anilist_token),
+      anilist_logged_in:           !!(session?.anilist_token && session?.anilist_user_id),
+      anilist_user_id:             session?.anilist_user_id  || null,
+      anilist_username:            session?.anilist_username || null,
+      anilist_avatar:              session?.anilist_avatar   || null,
+      anilist_token_expires_at:    session?.token_expires_at || null,
       doujinshi_logged_in:       !!(raw['doujinshi_token']),
       mal_client_id_set:         !!(raw['mal_client_id']),
       tps_max_concurrent_chapters: downloader.getSettings().max_concurrent,
@@ -113,8 +137,11 @@ router.post('/auth/anilist/exchange', asyncWrapper(async (req, res) => {
   if (!code)         return res.status(400).json({ error: 'code is required' });
   if (!redirect_uri) return res.status(400).json({ error: 'redirect_uri is required' });
 
-  const deviceId = req.headers['x-device-id'] || null;
-  if (!deviceId) return res.status(400).json({ error: 'X-Device-ID header is required' });
+  // AniList is linked to the logged-in Momotaro user. In single-user /
+  // pre-accounts mode resolveUser yields the default user, so this keeps
+  // working without a login.
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ error: 'User authentication required' });
 
   const db = getDb();
   const clientId     = getSetting(db, 'anilist_client_id');
@@ -156,11 +183,12 @@ router.post('/auth/anilist/exchange', asyncWrapper(async (req, res) => {
     return res.status(401).json({ error: 'Could not fetch user profile: ' + err.message });
   }
 
-  setDeviceSession(db, deviceId, {
+  setUserAniList(db, userId, {
     anilist_token:    accessToken,
     anilist_user_id:  String(viewer.id),
     anilist_username: viewer.name,
     anilist_avatar:   viewer.avatar?.large || viewer.avatar?.medium || '',
+    token_expires_at: decodeJwtExp(accessToken),
   });
 
   res.json({
@@ -171,11 +199,10 @@ router.post('/auth/anilist/exchange', asyncWrapper(async (req, res) => {
   });
 }));
 
-// DELETE /api/auth/anilist — logout (device-scoped)
+// DELETE /api/auth/anilist — unlink AniList for the logged-in user
 router.delete('/auth/anilist', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const deviceId = req.headers['x-device-id'] || null;
-  deleteDeviceSession(db, deviceId);
+  deleteUserAniList(db, req.user?.id);
   res.json({ message: 'Logged out' });
 }));
 
@@ -208,4 +235,4 @@ router.delete('/auth/doujinshi', asyncWrapper(async (req, res) => {
   res.json({ message: 'Logged out of Doujinshi.info' });
 }));
 
-module.exports = { router, getSetting, getDeviceSession };
+module.exports = { router, getSetting, getUserAniList };

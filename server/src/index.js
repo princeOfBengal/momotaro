@@ -31,9 +31,11 @@ const configRoutes = require('./routes/config');
 const sourcesRoutes = require('./routes/sources');
 const pairingRoutes = require('./routes/pairing');
 const adminAuthRoutes = require('./routes/adminAuth');
+const userRoutes = require('./routes/users');
 const networkRoutes = require('./routes/network');
 const appVersionRoutes = require('./routes/appVersion');
-const { requireClientOrAdmin, enforceLanOnlyMode } = require('./middleware/auth');
+const { requireClientOrAdmin, requireAdmin, enforceLanOnlyMode } = require('./middleware/auth');
+const { resolveUser, requireUser } = require('./middleware/userAuth');
 const { requestLogger } = require('./middleware/requestLogger');
 const upnp = require('./network/upnp');
 
@@ -132,17 +134,61 @@ app.use('/api', networkRoutes);
 // behaviour. Flipping the toggle through the admin UI starts enforcing
 // client tokens / admin session / LAN bypass per the policy in
 // [middleware/auth.js].
-app.use('/api', requireClientOrAdmin, libraryRoutes);
+//
+// `resolveUser` runs after the network gate on every gated route, setting
+// `req.user`. It's independent of how the gate was satisfied, so per-user
+// scoping applies even to LAN-bypass requests. When multi-user is off (or no
+// real account exists yet) it resolves to the default user, preserving today's
+// single-user behaviour.
+app.use('/api', resolveUser);
+
+// ── Mount ordering matters here. ───────────────────────────────────────────
+// Express runs the mount-line middleware (`requireUser` / `requireAdmin`) for
+// EVERY request whose URL prefix matches '/api', *before* the inner router
+// does its own route matching. That means a stray `requireUser` on a mount
+// will 401 unrelated requests that just happen to fall through to that line
+// before reaching the router they actually belong to.
+//
+// In particular, `<img src="/api/pages/123/image">` requests carry no
+// `X-User-Token` (native `<img>` can't send custom headers), so they'd be
+// 401'd by any `requireUser`-gated mount that sits between them and the
+// `pageRoutes` mount they target. The fix is to mount the routers that need
+// no per-user gate FIRST (chapter, page, gallery, settings, metadata), so
+// the image / chapter-pages-list / cover routes match and serve before any
+// `requireUser` mount is consulted.
+//
+// User auth (register / login / logout / me / exists): network-gated so an
+// unpaired external visitor can't create an account, but NOT behind
+// `requireUser` — login and register are how you *become* a user. logout / me
+// apply `requireUser` per-route inside the router.
+app.use('/api', requireClientOrAdmin, userRoutes);
+
+// No per-user gate. These serve catalogue and image bytes (the latter via
+// native `<img>` tags with no custom headers) and use `req.user` only where
+// they need it, with optional chaining. Placed before the `requireUser`
+// mounts so the gate never short-circuits an image request.
 app.use('/api', requireClientOrAdmin, chapterRoutes);
 app.use('/api', requireClientOrAdmin, pageRoutes);
-app.use('/api', requireClientOrAdmin, progressRoutes);
+app.use('/api', requireClientOrAdmin, galleryRoutes);
 app.use('/api', requireClientOrAdmin, settingsRoutes);
 app.use('/api', requireClientOrAdmin, metadataRoutes);
-app.use('/api', requireClientOrAdmin, optimizeRoutes);
-app.use('/api', requireClientOrAdmin, adminRoutes);
-app.use('/api', requireClientOrAdmin, galleryRoutes);
-app.use('/api', requireClientOrAdmin, configRoutes);
-app.use('/api', requireClientOrAdmin, sourcesRoutes);
+
+// `requireUser` guards the routes that read per-user state. It's a no-op while
+// multi-user is off (req.user is always the default user); once enforced it
+// turns a missing/invalid session into a 401 instead of letting a handler
+// dereference a null user.
+app.use('/api', requireClientOrAdmin, requireUser, libraryRoutes);
+app.use('/api', requireClientOrAdmin, requireUser, progressRoutes);
+
+// Admin-only operator surfaces: database management, system logs, optimize
+// bulk ops, third-party sourcing, and the config export/import bundle.
+// requireAdmin returns 409 when no admin password is configured (the UI's
+// AdminGuard surfaces a setup form), or 401 when there's no valid admin
+// session token (the UI surfaces the login form).
+app.use('/api', requireClientOrAdmin, requireAdmin, optimizeRoutes);
+app.use('/api', requireClientOrAdmin, requireAdmin, adminRoutes);
+app.use('/api', requireClientOrAdmin, requireAdmin, configRoutes);
+app.use('/api', requireClientOrAdmin, requireAdmin, sourcesRoutes);
 
 // Serve built React client (production)
 const clientDist = path.join(__dirname, '../../client/dist');

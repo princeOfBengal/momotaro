@@ -27,6 +27,8 @@ import {
   lock                as offlineLock,
 } from '../api/offlineCrypto';
 import { APP_VERSION } from '../version';
+import AccountSection from '../components/AccountSection';
+import UserManagementBlock from '../components/UserManagementBlock';
 import './Settings.css';
 import './Libraries.css';
 import '../components/ReaderControls.css';
@@ -3202,6 +3204,13 @@ function ClientManagementAuthed({ authStatus, onAuthChange, setStatusMsg }) {
 
   return (
     <>
+      {/* ── User accounts (admin) ───────────────────────────────────── */}
+      <UserManagementBlock
+        authStatus={authStatus}
+        setStatusMsg={setStatusMsg}
+        onAuthChange={onAuthChange}
+      />
+
       {/* ── Security toggles ────────────────────────────────────────── */}
       <div className="cm-block">
         <p className="cm-block-title">Security</p>
@@ -5514,6 +5523,16 @@ function OfflineDownloadsSection() {
 
 const SECTIONS = [
   {
+    id: 'account',
+    label: 'Account',
+    icon: (
+      <svg className="sp-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+        <circle cx="12" cy="7" r="4" />
+      </svg>
+    ),
+  },
+  {
     id: 'statistics',
     label: 'Statistics',
     icon: (
@@ -5726,6 +5745,77 @@ function OfflineLockedPanel({ label }) {
   );
 }
 
+/**
+ * Wraps an admin-only Settings section. Fetches the auth-status on mount; if
+ * the admin password isn't configured yet, shows the AdminSetupForm; if it
+ * is but the operator isn't signed in, shows the AdminLoginForm. Once the
+ * caller is a logged-in admin, renders the section content unchanged.
+ *
+ * Used for the five operator-surface sections (Library Management, Third
+ * Party Sourcing, Scheduling, Database Management, System Logs) so they're
+ * locked behind the same admin password that already gates Client Management
+ * and Port Forwarding. The server enforces the same boundary independently
+ * via `requireAdmin` on every endpoint these sections drive.
+ */
+function AdminGuard({ children }) {
+  const [authStatus, setAuthStatus] = useState(null);
+  const [statusMsg, setStatusMsg] = useState(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getAuthStatus();
+      setAuthStatus(s);
+    } catch (_) {
+      setAuthStatus({ configured: false, logged_in: false });
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  if (!authStatus) {
+    return <div className="loading-center"><div className="spinner" /></div>;
+  }
+
+  if (!authStatus.configured) {
+    return (
+      <div>
+        <div className="sp-section-head">
+          <div>
+            <h2 className="sp-section-title">Admin password required</h2>
+            <p className="sp-section-desc">
+              This section is operator-only. Set an admin password to enable it —
+              the same password unlocks Library Management, Third Party Sourcing,
+              Scheduling, Database Management, System Logs, Client Management,
+              and Port Forwarding.
+            </p>
+          </div>
+        </div>
+        {statusMsg && <div className={`sp-status sp-status-${statusMsg.type}`}>{statusMsg.text}</div>}
+        <AdminSetupForm onDone={(msg) => { setStatusMsg(msg); refresh(); }} />
+      </div>
+    );
+  }
+
+  if (!authStatus.logged_in) {
+    return (
+      <div>
+        <div className="sp-section-head">
+          <div>
+            <h2 className="sp-section-title">Admin sign-in required</h2>
+            <p className="sp-section-desc">
+              This section is operator-only. Sign in with the admin password to continue.
+            </p>
+          </div>
+        </div>
+        {statusMsg && <div className={`sp-status sp-status-${statusMsg.type}`}>{statusMsg.text}</div>}
+        <AdminLoginForm onDone={(msg) => { setStatusMsg(msg); refresh(); }} />
+      </div>
+    );
+  }
+
+  return children;
+}
+
 export default function Settings() {
   const location = useLocation();
   const { online } = useConnectivity();
@@ -5791,19 +5881,20 @@ export default function Settings() {
             />
           ) : (
             <>
+              {section === 'account'     && <AccountSection />}
               {section === 'statistics'  && <StatisticsSection />}
               {section === 'anilist'     && <AnilistSection />}
               {section === 'myanimelist' && <MyAnimeListSection />}
               {section === 'doujinshi'   && <DoujinshiSection />}
               {section === 'homepage'    && <HomepageSection />}
               {section === 'reading'     && <ReadingSection />}
-              {section === 'libraries'   && <LibrariesSection />}
+              {section === 'libraries'   && <AdminGuard><LibrariesSection /></AdminGuard>}
               {section === 'clients'     && <ClientManagementSection />}
               {section === 'portforwarding' && <PortForwardingSection />}
-              {section === 'sourcing'    && <ThirdPartySourcingSection />}
-              {section === 'scheduling'  && <SchedulingSection />}
-              {section === 'database'    && <DatabaseSection />}
-              {section === 'logs'        && <SystemLogsSection />}
+              {section === 'sourcing'    && <AdminGuard><ThirdPartySourcingSection /></AdminGuard>}
+              {section === 'scheduling'  && <AdminGuard><SchedulingSection /></AdminGuard>}
+              {section === 'database'    && <AdminGuard><DatabaseSection /></AdminGuard>}
+              {section === 'logs'        && <AdminGuard><SystemLogsSection /></AdminGuard>}
               {section === 'android'     && <AndroidSection />}
               {section === 'linux'       && <LinuxSection />}
               {section === 'offline'     && <OfflineDownloadsSection />}

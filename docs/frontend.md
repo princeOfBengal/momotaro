@@ -194,11 +194,52 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 
 Landing page for the AniList OAuth redirect. Extracts `?code=` from the URL, POSTs to `POST /api/auth/anilist/exchange`, then redirects to `/settings` on success.
 
-## AniList — Per-Device Login
+## User Accounts & Login
 
-Each browser generates a UUID via `crypto.randomUUID()` on first load and stores it in `localStorage` as `momotaro_device_id`. Every API request includes this as the `X-Device-ID` header. The server scopes all AniList session reads and writes to that device ID, so logging in on one device has no effect on any other device.
+Multi-user accounts ship in the user-accounts release (see
+[user-accounts.md](./user-accounts.md)). The server flag `multi_user_enabled`
+defaults to **on**; with it on, each device must log in or create the owner
+account before reaching the library.
 
-To reset a device's AniList session manually (e.g. for testing):
+- **[client/src/pages/Login.jsx](../client/src/pages/Login.jsx)** — two-tab
+  Log in / Create account screen, with live `attempts_remaining` and a 24 h
+  lockout countdown driven by structured error bodies from
+  [api/client.js](../client/src/api/client.js). Styled with the pairing-wizard
+  primitives (`pw-*`) plus tabs in `Login.css`.
+- **[client/src/context/UserContext.jsx](../client/src/context/UserContext.jsx)**
+  (`UserProvider`, `useUser()`) — holds the logged-in user, hydrates from
+  `GET /api/users/me` on mount, exposes `login` / `register` / `logout`.
+  Identity only; independent of connectivity and pairing.
+- **FirstLaunchGate** ([App.jsx](../client/src/App.jsx)) — after the existing
+  `pairing_required` check, redirects to `/login` when the server reports
+  `user_required`. Caches `multi_user_enabled` in `localStorage` so the
+  offline branch can require a stored user token on multi-user installs.
+- **API client** ([client.js](../client/src/api/client.js)) attaches
+  `X-User-Token` on every request alongside the device + admin tokens, and
+  exposes `register` / `login` / `logout` / `getMe` (login/register persist
+  the session token + `momotaro_active_user_id`).
+- **Settings → Account** ([components/AccountSection.jsx](../client/src/components/AccountSection.jsx))
+  — the current user, Log out, own reading-history timeline, clear history.
+- **Settings → Client Management** (admin) renders
+  [components/UserManagementBlock.jsx](../client/src/components/UserManagementBlock.jsx):
+  multi-user / allow-registration toggles, create-account form, roster with
+  per-user actions (Export / Reset PW / Force sign-out / Disable / Delete),
+  all-users reading-history CSV download, login-lockouts list + clear.
+
+**Per-user resume keys.** `localStorage` keys produced by
+[utils/readingProgress.js](../client/src/utils/readingProgress.js) are
+namespaced `momotaro_resume_<userId>_<mangaId>` so two users on one device
+don't clobber each other's intra-chapter resume page; pre-upgrade un-namespaced
+keys are migrated lazily on first read.
+
+**AniList is per-user.** Each Momotaro account links its own AniList; the
+client-side AniList flow ([AnilistCallback.jsx](../client/src/pages/AnilistCallback.jsx))
+needs no code change — `X-User-Token` is auto-attached. See
+[anilist.md](./anilist.md).
+
+The legacy `momotaro_device_id` is still set (used as forensic telemetry by
+the connection log) but no longer scopes AniList; the device UUID can be
+cleared safely without affecting login state:
 
 ```js
 localStorage.removeItem('momotaro_device_id')

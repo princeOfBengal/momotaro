@@ -2,6 +2,7 @@ const { getDb } = require('../db/database');
 const { hashToken } = require('../auth/crypto');
 const adminSession = require('../auth/adminSession');
 const connectionLog = require('../auth/connectionLog');
+const { getSetting } = require('../utils');
 
 /**
  * Authentication middleware for Phase 1 remote-access support.
@@ -33,10 +34,6 @@ const connectionLog = require('../auth/connectionLog');
  * sees the proxy's IP and LAN bypass will trigger for every request. Set
  * `trust proxy` in `index.js` when fronting with a known proxy.
  */
-
-function getSetting(db, key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
-}
 
 function isLanIp(ip) {
   if (!ip) return false;

@@ -3,6 +3,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { saveMediaListEntry } = require('../metadata/anilist');
 const { getUserAniList } = require('./settings');
+const { safeJsonParse, csvEscape, formatUnix } = require('../utils');
 
 const router = express.Router();
 
@@ -283,20 +284,6 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
 
   await saveMediaListEntry(token, manga.anilist_id, status, progressArg);
   console.log(`[AniList Sync] ${manga.anilist_id} → ${status}, ${trackVolumes ? 'volumeProgress' : 'chapterProgress'}=${highestNumber}`);
-}
-
-function safeJsonParse(str, fallback) {
-  try { return JSON.parse(str); } catch { return fallback; }
-}
-
-function csvEscape(v) {
-  if (v === null || v === undefined) return '';
-  return '"' + String(v).replace(/"/g, '""') + '"';
-}
-
-function formatUnix(ts) {
-  if (!ts) return '';
-  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
 }
 
 module.exports = router;

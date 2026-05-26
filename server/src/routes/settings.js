@@ -5,6 +5,7 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { getViewer } = require('../metadata/anilist');
 const { loginDoujinshi } = require('../metadata/doujinshi');
 const downloader = require('../downloader/queue');
+const { getSetting, setSetting } = require('../utils');
 
 const router = express.Router();
 
@@ -14,16 +15,6 @@ const SECRET_KEYS = [
   'mal_client_id',
 ];
 const USER_KEYS = ['anilist_user_id', 'anilist_username', 'anilist_avatar'];
-
-function getSetting(db, key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
-}
-
-function setSetting(db, key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, value || '');
-}
 
 // AniList login is per Momotaro **user** (not per device): each account links
 // its own AniList, and many AniList accounts coexist on one server. Stored in

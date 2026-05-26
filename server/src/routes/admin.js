@@ -10,6 +10,7 @@ const { reinforceAllCovers } = require('../scanner/coverResolver');
 const cbzCache = require('../scanner/cbzCache');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 const taskRegistry = require('../admin/taskRegistry');
+const { csvEscape } = require('../utils');
 
 const router = express.Router();
 
@@ -380,14 +381,6 @@ router.get('/admin/vacuum-db/status', asyncWrapper(async (req, res) => {
 // pointing at the wrong series).
 
 const { getCached: getCachedMetadata } = require('../metadata/cache');
-
-function csvEscape(v) {
-  if (v === null || v === undefined) return '';
-  const s = String(v);
-  // Always quote so embedded commas/newlines/quotes stay correct under
-  // RFC 4180. Quote-doubling per the spec.
-  return '"' + s.replace(/"/g, '""') + '"';
-}
 
 router.get('/admin/export-series-list', asyncWrapper(async (req, res) => {
   const db = getDb();

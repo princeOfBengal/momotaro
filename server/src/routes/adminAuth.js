@@ -10,6 +10,7 @@ const pinLockout = require('../auth/pinLockout');
 const connectionLog = require('../auth/connectionLog');
 const { requireAdmin, isLanIp, isLanBypassEnabled, isAuthEnabled, extractClientToken, extractAdminToken } = require('../middleware/auth');
 const { extractUserToken, isMultiUserEnabled, allowRegistration } = require('../middleware/userAuth');
+const { safeJsonParse, csvEscape, formatUnix, getSetting, setSetting } = require('../utils');
 
 // Mirrors the server-side username rule used by routes/users.js.
 const USERNAME_RE  = /^[a-z0-9_.-]{3,32}$/i;
@@ -19,15 +20,6 @@ const router = express.Router();
 
 const LOGIN_LIMIT_PER_MIN = 10;
 
-function getSetting(db, key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
-}
-
-function setSetting(db, key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, value || '');
-}
 
 /**
  * GET /api/admin/auth-status
@@ -610,17 +602,6 @@ router.get('/admin/connection-log/sources', requireAdmin, asyncWrapper(async (re
   res.json({ data: { sources: rows, since } });
 }));
 
-function csvEscape(v) {
-  if (v === null || v === undefined) return '';
-  const s = String(v);
-  return '"' + s.replace(/"/g, '""') + '"';
-}
-
-function formatUnix(ts) {
-  if (!ts) return '';
-  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
-}
-
 /**
  * GET /api/admin/connection-log.csv
  *
@@ -822,8 +803,6 @@ router.delete('/admin/clients/:id', requireAdmin, asyncWrapper(async (req, res) 
 // (requirement #10): list, create, rename / enable-disable / reset-password,
 // delete (cascades all reading data), force-logout, view + export a user's
 // data, and audit all-users reading history.
-
-function safeJsonParse(s, fallback) { try { return JSON.parse(s); } catch { return fallback; } }
 
 function publicUserRow(u) {
   return {

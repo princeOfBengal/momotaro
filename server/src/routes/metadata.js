@@ -18,6 +18,7 @@ const { getSetting, getUserAniList } = require('./settings');
 const { requireAdmin } = require('../middleware/auth');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { reinforceActiveCover } = require('../scanner/coverResolver');
+const { safeJsonParse } = require('../utils');
 const cbzCache = require('../scanner/cbzCache');
 const config = require('../config');
 
@@ -226,10 +227,6 @@ async function fetchAndStoreCover(db, mangaId, coverUrl, source) {
   } catch (err) {
     console.warn(`[Metadata] Could not fetch cover for manga ${mangaId}: ${err.message}`);
   }
-}
-
-function safeJsonParse(str, fallback) {
-  try { return JSON.parse(str); } catch { return fallback; }
 }
 
 // Apply metadata and cover for a single manga. Three concerns, kept

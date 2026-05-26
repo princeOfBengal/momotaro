@@ -9,6 +9,7 @@ const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { requireAdmin } = require('../middleware/auth');
 const genresCache = require('../genresCache');
+const { safeJsonParse, csvEscape, formatUnix } = require('../utils');
 
 const router = express.Router();
 
@@ -1225,10 +1226,6 @@ router.get('/home', asyncWrapper(async (req, res) => {
 }));
 
 
-function safeJsonParse(str, fallback) {
-  try { return JSON.parse(str); } catch { return fallback; }
-}
-
 /**
  * Translate a user-entered search string into a `{ clause, params }` pair that
  * slots into the WHERE of a library listing query.
@@ -1275,16 +1272,6 @@ function buildSearchClause(search) {
     ` AND m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)`
   ).join('');
   return { clause, params: terms };
-}
-
-function csvEscape(v) {
-  if (v === null || v === undefined) return '';
-  return '"' + String(v).replace(/"/g, '""') + '"';
-}
-
-function formatUnix(ts) {
-  if (!ts) return '';
-  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
 }
 
 function toFtsMatchQuery(text) {

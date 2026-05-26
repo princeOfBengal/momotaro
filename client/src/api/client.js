@@ -23,11 +23,6 @@ function clearServerUrl() {
   localStorage.removeItem(SERVER_URL_KEY);
 }
 
-// `BASE` is kept as an alias for backwards compatibility — anything outside
-// `apiFetch` (URL builders for image src attributes, etc.) reads it directly.
-// Using a getter would be cleaner but breaks the existing `const`-destructuring
-// callers; the explicit helper functions cover the same ground.
-
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = Math.random() * 16 | 0;
@@ -812,33 +807,8 @@ const _rawApi = {
   },
   clearConnectionLog: () =>
     apiFetch('/api/admin/connection-log', { method: 'DELETE' }),
-  downloadConnectionLogCsv: async () => {
-    // Use fetch + blob so the X-Admin-Token header rides along. The server
-    // also accepts the token via `?t=` for when the user pastes the URL
-    // into a browser directly, but the SPA-driven flow goes through here.
-    const adminToken = getAdminToken();
-    if (!adminToken) throw new Error('Admin session required');
-    const resp = await fetch(`${getServerUrl()}/api/admin/connection-log.csv`, {
-      headers: { 'X-Admin-Token': adminToken },
-    });
-    if (!resp.ok) {
-      let msg = `HTTP ${resp.status}`;
-      try { const j = await resp.json(); if (j?.error) msg = j.error; } catch (_) { /* not JSON */ }
-      throw new Error(msg);
-    }
-    const blob = await resp.blob();
-    const cd   = resp.headers.get('Content-Disposition') || '';
-    const m    = /filename="([^"]+)"/.exec(cd);
-    const filename = m ? m[1] : 'momotaro-connection-log.csv';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  },
+  downloadConnectionLogCsv: () =>
+    _adminDownload('/api/admin/connection-log.csv', 'momotaro-connection-log.csv'),
 
   // ── Port forwarding (UPnP) ─────────────────────────────────────────────
   // Backs the Port Forwarding section. `getNetworkStatus` is what the UI
@@ -954,7 +924,7 @@ function thumbnailUrl(filename) {
 // the offline shim. Until it's wired we default to "online" so the existing
 // PWA/browser flow is unaffected.
 //
-// `OFFLINE_METHOD_MAP` enumerates which methods get routed. Anything not
+// `OFFLINE_ROUTED_METHODS` enumerates which methods get routed. Anything not
 // listed always uses the raw network path — for read endpoints that means
 // the call will fail with a fetch error when offline (and the calling
 // component is expected to handle it), and for write endpoints that's the

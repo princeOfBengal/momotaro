@@ -2,6 +2,7 @@ const { getDb, DEFAULT_USER_ID } = require('../db/database');
 const userSession = require('../auth/userSession');
 const adminSession = require('../auth/adminSession');
 const { extractAdminToken } = require('./auth');
+const { getSetting } = require('../utils');
 
 /**
  * User-identity middleware. The second of the two access layers:
@@ -24,10 +25,6 @@ const { extractAdminToken } = require('./auth');
  */
 
 const DEFAULT_USER = Object.freeze({ id: DEFAULT_USER_ID, username: 'default', is_admin: 1 });
-
-function getSetting(db, key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
-}
 
 function isMultiUserEnabled(db) {
   // Default ON. Only an explicit '0' disables it.

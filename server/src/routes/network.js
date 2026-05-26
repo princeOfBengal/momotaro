@@ -21,20 +21,11 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { requireAdmin } = require('../middleware/auth');
 const upnp = require('../network/upnp');
+const { getSetting, setSetting } = require('../utils');
 
 const router = express.Router();
 
 const VALID_MODES = new Set(['off', 'upnp', 'manual']);
-
-function getSetting(db, key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) || null;
-}
-
-function setSetting(db, key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, value || '');
-}
 
 function readConfig(db) {
   const mode = getSetting(db, 'port_forwarding_mode') || 'off';

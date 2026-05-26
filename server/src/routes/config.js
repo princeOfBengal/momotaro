@@ -3,6 +3,7 @@ const { getDb, DEFAULT_USER_ID } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 const cbzCache = require('../scanner/cbzCache');
+const { safeJsonParse } = require('../utils');
 
 const router = express.Router();
 
@@ -14,10 +15,6 @@ const router = express.Router();
 // The importer accepts both: v1 payloads fold every per-user row onto the
 // default user, and unmatched usernames in a v2 payload do the same.
 const CONFIG_VERSION = 2;
-
-function safeJsonParse(str, fallback) {
-  try { return JSON.parse(str); } catch { return fallback; }
-}
 
 // ── Export ───────────────────────────────────────────────────────────────────
 

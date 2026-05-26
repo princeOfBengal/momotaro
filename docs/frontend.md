@@ -182,13 +182,13 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - *CBZ Cache* — displays the current cache size alongside the configured cap (e.g. `1.4 GB / 20.0 GB`). **Clear Cache** deletes every extracted chapter directory in `CBZ_CACHE_DIR` (pages are re-extracted on next access). Below the current-size row, an expanded block exposes:
     - *Maximum cache size* — numeric input in GB. Saved value is persisted as `cbz_cache_limit_bytes` in the `settings` table and applied live via `cbzCache.setLimitBytes()` — any chapters over the new cap are evicted immediately.
     - *Auto-clear schedule* — segmented control (Off / Daily / Weekly). **Weekly** reveals a day-of-week `<select>`; both Daily and Weekly reveal a `<input type="time">`. Times are interpreted in server local time. When enabled, a "Next auto-clear: …" status line shows the concrete next fire. Save button fires `PUT /api/admin/cbz-cache-settings` and refreshes the displayed next-run timestamp.
-  - *Configuration Backup* — **Export** triggers a browser download of `momotaro-config-<iso-timestamp>.json` (by navigating to `api.exportConfigUrl()`). **Import** opens a hidden `<input type="file" accept="application/json">`, parses the JSON client-side (so malformed files fail fast), runs a destructive-action confirm dialog, then POSTs to `/api/admin/import-config`. The result is summarised inline as per-section insert counts (`N settings, N libraries, N manga, N lists, N memberships, N progress, N gallery`), and any warnings are listed in a collapsible `<details>` block. See [api.md § Configuration Backup](./api.md#configuration-backup) for the JSON format and behaviour.
+  - *Configuration Backup* — **Export** triggers a download of `momotaro-config-<iso-timestamp>.json` via `api.exportConfig()` (fetch + blob so the `X-Admin-Token` header rides along — a bare `window.location.href` navigation can't carry headers and the mount-line `requireAdmin` gate would 401). **Import** opens a hidden `<input type="file" accept="application/json">`, parses the JSON client-side (so malformed files fail fast), runs a destructive-action confirm dialog, then POSTs to `/api/admin/import-config`. The result is summarised inline as per-section insert counts (`N settings, N libraries, N manga, N lists, N memberships, N progress, N gallery`), and any warnings are listed in a collapsible `<details>` block. See [api.md § Configuration Backup](./api.md#configuration-backup) for the JSON format and behaviour.
   - *Regenerate Thumbnails* — **Regenerate All** fires `POST /api/admin/regenerate-thumbnails`; the job runs in the background and the UI shows a confirmation with the total manga count. For each manga, the AniList cover is restored if available, otherwise a new thumbnail is generated from the first page of the first chapter.
   - *Reset Thumbnails* — **Reset Thumbnails** fires `POST /api/admin/reset-thumbnails` synchronously after a confirm dialog. Re-aligns every manga's active cover to the priority order **AniList → MyAnimeList → MangaUpdates → Doujinshi.info → original scan** and **overrides any manually-picked cover** (`cover_user_set` is reset to 0 across the board). No upstream is contacted — the operation only re-uses cover files already on disk from earlier metadata fetches. The status line breaks down the result per source (e.g. *"301 → AniList, 52 → MAL, 8 → MangaUpdates, 4 → Doujinshi, 18 → original; 49 had no source on disk"*). The same priority pass also runs automatically at the end of every library scan via the scanner — see [scanner.md § Cover Priority](./scanner.md#cover-priority).
   - *Compact Database* — **Compact Database** runs `POST /api/admin/vacuum-db` synchronously and displays the before/after file size
 - **System Logs tab**: shows the server's in-memory log buffer (most recent 2000 entries of `console.log` / `info` / `warn` / `error`). Each row renders the ISO timestamp, level tag (colour-coded: accent for info, amber for warn, red for error), and message in a monospace viewer. Two actions:
   - **Refresh** — re-calls `GET /api/admin/logs` and repopulates the list
-  - **Export as .txt** — navigates the browser to `GET /api/admin/logs/export`, which triggers a native file download (`momotaro-logs-<iso-timestamp>.txt`). Buffer is process-local and resets on server restart.
+  - **Export as .txt** — calls `api.exportSystemLogs()` (fetch + blob with `X-Admin-Token` header) to download `momotaro-logs-<iso-timestamp>.txt`. Buffer is process-local and resets on server restart.
 
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
@@ -219,7 +219,7 @@ account before reaching the library.
   exposes `register` / `login` / `logout` / `getMe` (login/register persist
   the session token + `momotaro_active_user_id`).
 - **Settings → Account** ([components/AccountSection.jsx](../client/src/components/AccountSection.jsx))
-  — the current user, Log out, own reading-history timeline, clear history.
+  — the current user, Log out, **Change password** form (current / new / confirm with an inline status line — `PUT /api/users/me/password` revokes every other session and the helper persists the fresh token returned for the calling device), **Export your data** (two buttons: reading lists `.csv`, reading history `.csv`), then the live reading-history timeline + Clear history. Both CSV downloads go through the `_userDownload` helper (fetch + blob + synthetic `<a download>`) since `requireUser` is header-only and a `window.location.href` navigation would 401.
 - **Settings → Client Management** (admin) renders
   [components/UserManagementBlock.jsx](../client/src/components/UserManagementBlock.jsx):
   multi-user / allow-registration toggles, create-account form, roster with
@@ -371,13 +371,13 @@ api.getCbzCacheSize()          // GET cbz-cache-size → { size_bytes, limit_byt
 api.clearCbzCache()            // POST clear-cbz-cache → { size_bytes: 0 }
 api.getCbzCacheSettings()      // GET cbz-cache-settings → { limit_bytes, autoclear_mode, autoclear_day, autoclear_time, next_run_at, ... }
 api.saveCbzCacheSettings(body) // PUT cbz-cache-settings → updated settings (any subset of { limit_bytes, autoclear_mode, autoclear_day, autoclear_time })
-api.exportConfigUrl()          // returns the GET admin/export-config URL (navigate the browser to trigger a download)
+api.exportConfig()             // GET admin/export-config → triggers JSON download via fetch + blob (X-Admin-Token header)
 api.importConfig(payload)      // POST admin/import-config → { counts, warnings, warnings_truncated, total_warnings } — 5-minute timeout
 api.regenerateThumbnails()     // POST regenerate-thumbnails → { message, total }
 api.resetThumbnails()          // POST reset-thumbnails  → per-source counters; clears every manga's cover_user_set and re-aligns to the priority order (no upstream pings)
 api.vacuumDb()                 // POST vacuum-db → { size_before_bytes, size_after_bytes }
 api.getSystemLogs()            // GET admin/logs → { entries: [{ ts, level, message }], max }
-api.systemLogsExportUrl()      // returns the GET admin/logs/export URL (used as an <a>/download target)
+api.exportSystemLogs()         // GET admin/logs/export → triggers .txt download via fetch + blob (X-Admin-Token header)
 ```
 
 ## Context

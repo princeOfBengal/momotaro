@@ -205,6 +205,47 @@ router.post('/libraries/:id/scan', requireAdmin, asyncWrapper(async (req, res) =
 
 // ── Reading Lists ────────────────────────────────────────────────────────────
 
+// GET /api/reading-lists.csv — downloadable CSV of every membership in the
+// caller's lists. Distinct path (with the .csv suffix) so it can't be matched
+// as `:id` by a later `/reading-lists/:id/...` route. Default + custom lists
+// are both included; the user is welcome to filter in their spreadsheet.
+router.get('/reading-lists.csv', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const userId = req.user.id;
+  const rows = db.prepare(`
+    SELECT rl.name AS list_name, rl.is_default,
+           m.id    AS manga_id, m.title AS manga_title, m.path AS manga_path,
+           l.name  AS library_name,
+           rlm.added_at
+    FROM reading_lists rl
+    JOIN reading_list_manga rlm ON rlm.list_id = rl.id
+    JOIN manga m                ON m.id = rlm.manga_id
+    LEFT JOIN libraries l       ON l.id = m.library_id
+    WHERE rl.user_id = ?
+    ORDER BY rl.is_default DESC, rl.name ASC, m.title COLLATE NOCASE ASC
+  `).all(userId);
+
+  const lines = [];
+  lines.push(['List', 'Built-in', 'Manga', 'Library', 'Folder path', 'Added at (UTC)'].map(csvEscape).join(','));
+  for (const r of rows) {
+    lines.push([
+      r.list_name,
+      r.is_default ? 'yes' : '',
+      r.manga_title || `#${r.manga_id}`,
+      r.library_name || '',
+      r.manga_path || '',
+      formatUnix(r.added_at),
+    ].map(csvEscape).join(','));
+  }
+  // UTF-8 BOM so Excel renders non-ASCII titles correctly. RFC 4180 line endings.
+  const body = '﻿' + lines.join('\r\n') + '\r\n';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="momotaro-reading-lists-${stamp}.csv"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+}));
+
 // GET /api/reading-lists — all lists with manga counts
 router.get('/reading-lists', asyncWrapper(async (req, res) => {
   const db = getDb();
@@ -1234,6 +1275,16 @@ function buildSearchClause(search) {
     ` AND m.id IN (SELECT manga_id FROM manga_genres WHERE genre = ? COLLATE NOCASE)`
   ).join('');
   return { clause, params: terms };
+}
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  return '"' + String(v).replace(/"/g, '""') + '"';
+}
+
+function formatUnix(ts) {
+  if (!ts) return '';
+  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
 }
 
 function toFtsMatchQuery(text) {

@@ -165,12 +165,18 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
 }));
 
 // GET /api/history — the caller's own reading-history timeline (newest first).
+// Accepts `?format=csv` for a downloadable CSV scoped to the same user. The CSV
+// branch ignores the `limit` cap and emits everything so an account export is
+// complete; the JSON branch keeps the cap so the UI list stays bounded.
 router.get('/history', asyncWrapper(async (req, res) => {
   const db = getDb();
   const userId = req.user.id;
+  const wantCsv = req.query?.format === 'csv';
+
   let limit = parseInt(req.query?.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 100;
   if (limit > 1000) limit = 1000;
+
   const rows = db.prepare(`
     SELECT h.id, h.manga_id, m.title AS manga_title, m.cover_image,
            h.chapter_id, c.folder_name AS chapter_folder, c.number AS chapter_number,
@@ -180,8 +186,28 @@ router.get('/history', asyncWrapper(async (req, res) => {
     LEFT JOIN chapters c ON c.id = h.chapter_id
     WHERE h.user_id = ?
     ORDER BY h.read_at DESC, h.id DESC
-    LIMIT ?
-  `).all(userId, limit);
+    ${wantCsv ? '' : 'LIMIT ?'}
+  `).all(...(wantCsv ? [userId] : [userId, limit]));
+
+  if (wantCsv) {
+    const lines = [];
+    lines.push(['Manga', 'Chapter', 'Event', 'Read at (UTC)'].map(csvEscape).join(','));
+    for (const r of rows) {
+      lines.push([
+        r.manga_title || `#${r.manga_id}`,
+        r.chapter_number ?? r.chapter_folder ?? '',
+        r.event,
+        formatUnix(r.read_at),
+      ].map(csvEscape).join(','));
+    }
+    // UTF-8 BOM so Excel renders non-ASCII titles correctly. RFC 4180 line endings.
+    const body = '﻿' + lines.join('\r\n') + '\r\n';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="momotaro-reading-history-${stamp}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(body);
+  }
   res.json({ data: rows });
 }));
 
@@ -261,6 +287,16 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
 
 function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
+}
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  return '"' + String(v).replace(/"/g, '""') + '"';
+}
+
+function formatUnix(ts) {
+  if (!ts) return '';
+  try { return new Date(ts * 1000).toISOString(); } catch { return ''; }
 }
 
 module.exports = router;

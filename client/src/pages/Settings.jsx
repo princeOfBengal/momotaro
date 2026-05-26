@@ -1729,16 +1729,18 @@ function DatabaseSection() {
     return mb < 0.1 ? '<0.1 MB' : `${mb.toFixed(1)} MB`;
   }
 
-  function handleExportConfig() {
-    // Straight browser download — the server emits a Content-Disposition
-    // header so the filename is momotaro-config-<timestamp>.json.
-    window.location.href = api.exportConfigUrl();
+  // Fetch + blob download so the X-Admin-Token header rides along — the
+  // mount-line requireAdmin gate accepts only the header, so a bare
+  // window.location.href navigation would 401. The server's Content-Disposition
+  // header still drives the saved filename via _adminDownload.
+  async function handleExportConfig() {
+    try { await api.exportConfig(); }
+    catch (err) { window.alert('Export failed: ' + err.message); }
   }
 
-  function handleExportSeriesList() {
-    // Straight browser download — the server emits a Content-Disposition
-    // header so the filename is momotaro-series-list-<YYYY-MM-DD>.csv.
-    window.location.href = api.exportSeriesListUrl();
+  async function handleExportSeriesList() {
+    try { await api.exportSeriesList(); }
+    catch (err) { window.alert('Export failed: ' + err.message); }
   }
 
   function triggerImportPicker() {
@@ -2655,8 +2657,12 @@ function SystemLogsSection() {
 
   useEffect(() => { load(); }, []);
 
-  function handleExport() {
-    window.location.href = api.systemLogsExportUrl();
+  async function handleExport() {
+    // Fetch + blob so the X-Admin-Token header rides along (window.location.href
+    // can't carry headers, and the mount-line requireAdmin gate doesn't accept
+    // ?t= the way requireClientOrAdmin does).
+    try { await api.exportSystemLogs(); }
+    catch (err) { window.alert('Export failed: ' + err.message); }
   }
 
   return (

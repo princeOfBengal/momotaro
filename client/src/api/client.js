@@ -252,7 +252,21 @@ async function apiFetch(path, options = {}) {
 async function _adminDownload(path, fallbackName) {
   const adminToken = getAdminToken();
   if (!adminToken) throw new Error('Admin session required');
-  const resp = await fetch(`${getServerUrl()}${path}`, { headers: { 'X-Admin-Token': adminToken } });
+  return _tokenDownload(path, { 'X-Admin-Token': adminToken }, fallbackName);
+}
+
+// Same shape as _adminDownload but signed with the per-user session token.
+// `requireUser` reads only the X-User-Token header (no ?t= fallback), so any
+// CSV/JSON export gated by requireUser has to go through fetch + blob too —
+// the same constraint that drove _adminDownload.
+async function _userDownload(path, fallbackName) {
+  const userToken = getUserToken();
+  if (!userToken) throw new Error('Sign in to export your data');
+  return _tokenDownload(path, { 'X-User-Token': userToken }, fallbackName);
+}
+
+async function _tokenDownload(path, headers, fallbackName) {
+  const resp = await fetch(`${getServerUrl()}${path}`, { headers });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
     try { const j = await resp.json(); if (j?.error) msg = j.error; } catch (_) { /* not JSON */ }
@@ -491,13 +505,16 @@ const _rawApi = {
   resetThumbnails:      () => apiFetch('/api/admin/reset-thumbnails',      { method: 'POST' }),
   vacuumDb: () => apiFetch('/api/admin/vacuum-db', { method: 'POST' }),
 
-  // Config backup (export/import)
-  exportConfigUrl: () => `${getServerUrl()}/api/admin/export-config`,
+  // Config backup (export/import). Routed through _adminDownload so the
+  // X-Admin-Token header rides along — `requireAdmin` is mount-line on
+  // configRoutes/adminRoutes and doesn't accept a `?t=` query token, so a
+  // native browser navigation (window.location.href) would 401.
+  exportConfig: () => _adminDownload('/api/admin/export-config', 'momotaro-config.json'),
   // CSV download: one row per manga, columns: Library, Series Name
   // (AniList/MAL/MangaUpdates/Doujinshi.info), Folder path, Number of
   // chapters, Number of volumes, Author. Used for manually spot-checking
   // that third-party metadata matches are correct.
-  exportSeriesListUrl: () => `${getServerUrl()}/api/admin/export-series-list`,
+  exportSeriesList: () => _adminDownload('/api/admin/export-series-list', 'momotaro-series-list.csv'),
   importConfig: (payload) =>
     apiFetch('/api/admin/import-config', {
       method: 'POST',
@@ -508,7 +525,7 @@ const _rawApi = {
 
   // System Logs
   getSystemLogs: () => apiFetch('/api/admin/logs'),
-  systemLogsExportUrl: () => `${getServerUrl()}/api/admin/logs/export`,
+  exportSystemLogs: () => _adminDownload('/api/admin/logs/export', 'momotaro-system-logs.txt'),
 
   // Home page — single aggregate fetch for every ribbon (continue reading,
   // discover, recently added, art gallery, top-manga-per-genre). Scoped
@@ -663,9 +680,27 @@ const _rawApi = {
   getMe: () => apiFetch('/api/users/me'),
   userExists: (username) =>
     apiFetch(`/api/users/exists?${new URLSearchParams({ username })}`),
+  // Change the signed-in user's own password. The server revokes every other
+  // session for this account and mints a fresh token for the calling device,
+  // which we persist immediately so the next request still authenticates.
+  changeUserPassword: async (currentPassword, newPassword) => {
+    const data = await apiFetch('/api/users/me/password', {
+      method: 'PUT',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    if (data?.user_token) setUserToken(data.user_token);
+    return data;
+  },
   // The caller's own reading-history timeline.
   getHistory: (limit = 100) => apiFetch(`/api/history?limit=${limit}`),
   clearHistory: () => apiFetch('/api/history', { method: 'DELETE' }),
+  // Blob downloads for the caller's own data — fetch + blob so the
+  // X-User-Token header rides along (the mount-line requireUser gate is
+  // header-only, same constraint as _adminDownload).
+  exportReadingHistoryCsv: () =>
+    _userDownload('/api/history?format=csv', 'momotaro-reading-history.csv'),
+  exportReadingListsCsv: () =>
+    _userDownload('/api/reading-lists.csv', 'momotaro-reading-lists.csv'),
 
   adminSetup: async (password) => {
     const data = await apiFetch('/api/admin/setup', {

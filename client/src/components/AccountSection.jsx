@@ -3,14 +3,26 @@ import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
 import { api } from '../api/client';
 
-// "Account" settings section: the logged-in user, a log-out button, and their
-// own reading-history timeline. In single-user / pre-accounts mode there's no
-// session, so it offers a link to log in / create an account instead.
+// "Account" settings section: the logged-in user, a log-out button, password
+// change, data exports, and their own reading-history timeline. In single-user
+// / pre-accounts mode there's no session, so it offers a link to log in /
+// create an account instead.
 export default function AccountSection() {
   const navigate = useNavigate();
   const { user, logout } = useUser();
   const [history, setHistory] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // Change-password form state. `pwMsg` is `{ type: 'ok' | 'err', text }`
+  // — same shape the Settings page uses elsewhere for inline status lines.
+  const [currentPw, setCurrentPw] = useState('');
+  const [newPw, setNewPw]         = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwSaving, setPwSaving]   = useState(false);
+  const [pwMsg, setPwMsg]         = useState(null);
+
+  const [exportingHistory, setExportingHistory] = useState(false);
+  const [exportingLists,   setExportingLists]   = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -31,6 +43,46 @@ export default function AccountSection() {
     if (!window.confirm('Clear your reading history? This cannot be undone.')) return;
     try { await api.clearHistory(); setHistory([]); }
     catch (e) { window.alert('Failed to clear history: ' + e.message); }
+  }
+
+  async function handleChangePassword(e) {
+    e.preventDefault();
+    setPwMsg(null);
+    if (newPw.length < 8) {
+      setPwMsg({ type: 'err', text: 'New password must be at least 8 characters.' });
+      return;
+    }
+    if (newPw !== confirmPw) {
+      setPwMsg({ type: 'err', text: 'New passwords do not match.' });
+      return;
+    }
+    setPwSaving(true);
+    try {
+      // Server revokes every other session for this account; the response
+      // includes a fresh token for this device that the client helper has
+      // already persisted, so the next request still authenticates.
+      await api.changeUserPassword(currentPw, newPw);
+      setCurrentPw(''); setNewPw(''); setConfirmPw('');
+      setPwMsg({ type: 'ok', text: 'Password updated. Other devices have been signed out.' });
+    } catch (err) {
+      setPwMsg({ type: 'err', text: err.message || 'Failed to change password.' });
+    } finally {
+      setPwSaving(false);
+    }
+  }
+
+  async function handleExportHistory() {
+    setExportingHistory(true);
+    try { await api.exportReadingHistoryCsv(); }
+    catch (e) { window.alert('Export failed: ' + e.message); }
+    finally { setExportingHistory(false); }
+  }
+
+  async function handleExportLists() {
+    setExportingLists(true);
+    try { await api.exportReadingListsCsv(); }
+    catch (e) { window.alert('Export failed: ' + e.message); }
+    finally { setExportingLists(false); }
   }
 
   return (
@@ -55,6 +107,89 @@ export default function AccountSection() {
             <button className="btn btn-ghost" onClick={handleLogout} disabled={busy} style={{ marginTop: 12 }}>
               {busy ? 'Logging out…' : 'Log out'}
             </button>
+          </div>
+
+          <div className="cm-block">
+            <p className="cm-block-title">Change password</p>
+            <p className="settings-hint">
+              Updating your password signs you out of every other device. This
+              device stays signed in.
+            </p>
+            <form onSubmit={handleChangePassword} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12, maxWidth: 360 }}>
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="Current password"
+                autoComplete="current-password"
+                value={currentPw}
+                onChange={e => setCurrentPw(e.target.value)}
+                disabled={pwSaving}
+                required
+              />
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="New password (min. 8 characters)"
+                autoComplete="new-password"
+                value={newPw}
+                onChange={e => setNewPw(e.target.value)}
+                disabled={pwSaving}
+                required
+                minLength={8}
+              />
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="Confirm new password"
+                autoComplete="new-password"
+                value={confirmPw}
+                onChange={e => setConfirmPw(e.target.value)}
+                disabled={pwSaving}
+                required
+                minLength={8}
+              />
+              <div>
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={pwSaving || !currentPw || !newPw || !confirmPw}
+                >
+                  {pwSaving ? 'Saving…' : 'Update password'}
+                </button>
+              </div>
+              {pwMsg && (
+                <p
+                  className="settings-hint"
+                  style={{ color: pwMsg.type === 'err' ? 'var(--danger, #c0392b)' : 'var(--text-primary)' }}
+                >
+                  {pwMsg.text}
+                </p>
+              )}
+            </form>
+          </div>
+
+          <div className="cm-block">
+            <p className="cm-block-title">Export your data</p>
+            <p className="settings-hint">
+              Download a CSV snapshot of your reading lists or your full reading
+              history. Files are scoped to your account.
+            </p>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={handleExportLists}
+                disabled={exportingLists}
+              >
+                {exportingLists ? 'Preparing…' : 'Export reading lists (.csv)'}
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={handleExportHistory}
+                disabled={exportingHistory}
+              >
+                {exportingHistory ? 'Preparing…' : 'Export reading history (.csv)'}
+              </button>
+            </div>
           </div>
 
           <div className="cm-block">

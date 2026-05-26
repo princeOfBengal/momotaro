@@ -281,6 +281,7 @@ accounts. Username 3–32 of `[a-z0-9_.-]`, unique case-insensitively; password
 | `POST` | `/api/users/login` | network gate | Verify (lockout-guarded), mint session token. |
 | `POST` | `/api/users/logout` | user | Revoke current session. |
 | `GET`  | `/api/users/me` | user | `{ id, username, display_name }`. |
+| `PUT`  | `/api/users/me/password` | user | Body `{ current_password, new_password }`. Verify current, ≥ 8 chars new, **revoke every existing session for this user**, mint a fresh one for the calling device. Returns `{ user_token }` — other devices fail their next request with 401 and drop to `/login`. Mirrors the admin `/admin/password` pattern. |
 | `GET`  | `/api/users/exists?username=` | network gate | Optional, rate-limited, boolean-only. |
 
 Login/register → `{ data: { user_token, user } }`. Login failure → generic
@@ -317,6 +318,8 @@ No new paths; each gains `requireUser` + a `req.user.id` filter:
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/history` | Caller's history, newest-first, keyset-paginated. |
+| `GET` | `/api/history?format=csv` | CSV download of the caller's full history (ignores the JSON branch's `limit` cap so the export is complete). Columns: _Manga, Chapter, Event, Read at (UTC)_. UTF-8 BOM + RFC 4180 line endings. Fetched via the `_userDownload` helper (fetch + blob + synthetic `<a download>`) since `requireUser` reads only the header. |
+| `GET` | `/api/reading-lists.csv` | CSV download of every membership across the caller's lists (built-in + custom). Columns: _List, Built-in, Manga, Library, Folder path, Added at (UTC)_. Same fetch + blob flow. The `.csv` suffix keeps the path unambiguous from `/api/reading-lists/:id`. |
 | `DELETE` | `/api/history` | Clear the caller's own history. |
 
 ### 7.5 Admin endpoints — total power over accounts (requirement #10)

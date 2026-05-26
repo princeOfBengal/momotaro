@@ -32,8 +32,11 @@ can't register (requirement #6).
 | `POST` | `/api/users/login` | Body: `{ username, password }`. Generic 401 (no enumeration). Returns `{ attempts_remaining }` on failure and `seconds_remaining` when the 5-strikes-→-24h device lockout fires (429). |
 | `POST` | `/api/users/logout` | Revokes the bearer session. |
 | `GET`  | `/api/users/me` | The active account profile. |
+| `PUT`  | `/api/users/me/password` | Body: `{ current_password, new_password }`. Verifies current password, requires ≥ 8 chars, **revokes every existing session for this user** and mints a fresh one for the calling device. Returns `{ user_token }` — the client persists it immediately so the next request still authenticates. Other devices fail their next request with 401 and drop to `/login`. |
 | `GET`  | `/api/users/exists?username=` | Boolean availability check for the register form (rate-limited). |
 | `GET`  | `/api/history?limit=N` | The caller's own reading-history timeline (newest first). |
+| `GET`  | `/api/history?format=csv` | CSV download of the caller's full reading history. Ignores the `limit` cap so the export is complete. Columns: _Manga, Chapter, Event, Read at (UTC)_. UTF-8 BOM + RFC 4180 line endings. Native browser navigation can't carry `X-User-Token`, so the client downloads via fetch + blob + a synthetic `<a download>` (`_userDownload` helper). |
+| `GET`  | `/api/reading-lists.csv` | CSV download of every membership across the caller's reading lists (built-in + custom). Columns: _List, Built-in, Manga, Library, Folder path, Added at (UTC)_. Same fetch + blob flow. The `.csv` suffix keeps the path unambiguous from `/api/reading-lists/:id`. |
 | `DELETE` | `/api/history` | Clear the caller's own reading history. |
 
 ### Admin user management (admin-only)
@@ -949,14 +952,14 @@ Genre aggregation and read-time estimation are computed entirely in SQL against 
 | POST | `/api/admin/clear-cbz-cache` | Delete every extracted chapter directory in `CBZ_CACHE_DIR`; returns new size (always 0) |
 | GET | `/api/admin/cbz-cache-settings` | Get the cache size cap and auto-clear schedule |
 | PUT | `/api/admin/cbz-cache-settings` | Update the cache cap and/or auto-clear schedule (live — no restart needed) |
-| GET | `/api/admin/export-config` | Download the server's user-facing state as a single JSON file (see [Configuration Backup](#configuration-backup)) |
+| GET | `/api/admin/export-config` | Download the server's user-facing state as a single JSON file (see [Configuration Backup](#configuration-backup)). Mount-line `requireAdmin` is header-only, so the SPA fetches via the `_adminDownload` helper (fetch + blob + synthetic `<a download>`) — `window.location.href` would 401 because native navigation can't carry `X-Admin-Token`. |
 | POST | `/api/admin/import-config` | Restore state from a config JSON payload |
 | POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
 | POST | `/api/admin/reset-thumbnails` | Re-align every manga's active cover to the priority order (anilist > mal > mu > doujinshi > original); overrides `cover_user_set`. **Never pings any upstream.** |
 | POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
-| GET | `/api/admin/export-series-list` | Download a CSV listing every manga (`id, title, library_name, path, …`). Used for offline grooming of a large library. `Content-Disposition: attachment; filename="momotaro-series-<iso-timestamp>.csv"`. |
+| GET | `/api/admin/export-series-list` | Download a CSV listing every manga (`id, title, library_name, path, …`). Used for offline grooming of a large library. `Content-Disposition: attachment; filename="momotaro-series-<iso-timestamp>.csv"`. Fetched via `_adminDownload` for the same reason as `/admin/export-config`. |
 | GET | `/api/admin/logs` | Return the in-memory system log buffer as JSON |
-| GET | `/api/admin/logs/export` | Download the log buffer as a plain-text `.txt` file |
+| GET | `/api/admin/logs/export` | Download the log buffer as a plain-text `.txt` file. Fetched via `_adminDownload` for the same reason as `/admin/export-config`. |
 
 **`GET /api/admin/cbz-cache-size` response `data` shape:**
 
@@ -1137,7 +1140,7 @@ Content-Type: text/plain; charset=utf-8
 Content-Disposition: attachment; filename="momotaro-logs-<iso-timestamp>.txt"
 ```
 
-The body is the same entries formatted as `[<iso-ts>] [<LEVEL>] <message>`, one per line. The client triggers the download by navigating the browser directly to this URL (`api.systemLogsExportUrl()`).
+The body is the same entries formatted as `[<iso-ts>] [<LEVEL>] <message>`, one per line. The client triggers the download via `api.exportSystemLogs()` — fetch + blob so the `X-Admin-Token` header rides along (the mount-line `requireAdmin` gate doesn't accept a `?t=` query token, so a bare `window.location.href` navigation would 401).
 
 ---
 

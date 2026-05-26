@@ -156,6 +156,38 @@ router.post('/users/logout', requireUser, asyncWrapper(async (req, res) => {
 }));
 
 /**
+ * PUT /api/users/me/password — change the caller's own password.
+ *
+ * Verifies the current password before updating, then revokes every existing
+ * session for this user and mints a fresh one so the caller stays logged in
+ * while every other device is logged out. Mirrors the admin /admin/password
+ * pattern.
+ */
+router.put('/users/me/password', requireUser, asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const current = typeof req.body?.current_password === 'string' ? req.body.current_password : '';
+  const next    = typeof req.body?.new_password     === 'string' ? req.body.new_password     : '';
+
+  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+  if (!row || !verifyPassword(current, row.password_hash)) {
+    return res.status(401).json({ error: 'Current password is incorrect.' });
+  }
+  if (next.length < MIN_PASSWORD) {
+    return res.status(400).json({ error: `New password must be at least ${MIN_PASSWORD} characters.` });
+  }
+
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), req.user.id);
+  userSession.revokeAllForUser(req.user.id);
+  const token = userSession.create(req.user.id, pairedClientId(req), req);
+
+  connectionLog.recordEvent('user_password_changed', {
+    ...connectionLog.fingerprint(req),
+    username: req.user.username,
+  });
+  res.json({ data: { user_token: token } });
+}));
+
+/**
  * GET /api/users/me — the active account.
  */
 router.get('/users/me', requireUser, asyncWrapper(async (req, res) => {

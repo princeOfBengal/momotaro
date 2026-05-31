@@ -912,7 +912,7 @@ The combined effect is that under typical usage the Browse By Genre page costs *
 
 **Query parameters:**
 
-- `library_id` *(optional)* — positive integer. When omitted, every aggregate covers all manga regardless of `show_in_all`. When provided, every count, sum, ranking, and the read-time estimate is scoped to that library only. Unknown IDs return `404`; non-integer values return `400`.
+- `library_id` *(optional)* — positive integer. When omitted, every aggregate is scoped to libraries visible in the **All Libraries** view (`libraries.show_in_all = 1`, or `manga.library_id IS NULL`) — a library hidden from All Libraries is excluded from these counts, sums, rankings, and the read-time estimate too, matching the visibility rule already enforced for `/api/library`, `/api/home`, `/api/genres`, and `/api/gallery`. When provided, every aggregate is scoped to that single library regardless of its `show_in_all` flag (so per-library stats are still inspectable for hidden libraries via the Statistics dropdown). Unknown IDs return `404`; non-integer values return `400`.
 
 **Response `data` shape:**
 

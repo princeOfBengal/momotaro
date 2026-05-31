@@ -434,6 +434,27 @@
   text-align: right;
 }
 
+/* Homepage Settings → Discover library scope: per-library checklist */
+.hs-lib-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 480px;
+}
+.hs-lib-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.hs-lib-check input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
 /* Override setting-group-label color to be more readable on light card bg */
 .settings-card .setting-group-label {
   font-size: 12px;

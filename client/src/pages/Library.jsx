@@ -5,6 +5,7 @@ import AppSidebar from '../components/AppSidebar';
 import VirtualizedMangaGrid from '../components/VirtualizedMangaGrid';
 import { useScrollPosition } from '../hooks/useScrollPosition';
 import { useConnectivity } from '../context/ConnectivityContext';
+import { useUserPref } from '../context/PreferencesContext';
 import './Library.css';
 // Reuse the skeleton classes (.skeleton-block, .skeleton-line, .skeleton-tile)
 // already defined for Home — same precedent as Home importing Library.css.
@@ -75,9 +76,13 @@ export default function Library() {
   // debounce still keys off `search` directly so the network timer starts
   // immediately on keystroke.
   const deferredSearch = useDeferredValue(search);
+  // Default sort comes from the per-user, server-synced preference
+  // `home_default_sort` (Settings → Homepage Settings → Library default).
+  // `sort` is local-only here — once the page is open the user can change it
+  // from the top bar without flipping their global default.
+  const [defaultSort] = useUserPref('home_default_sort', 'title');
   const [sort, setSort] = useState(() => {
-    const saved = localStorage.getItem('home_default_sort');
-    return ['title', 'updated', 'year', 'rating'].includes(saved) ? saved : 'title';
+    return ['title', 'updated', 'year', 'rating'].includes(defaultSort) ? defaultSort : 'title';
   });
   const [scanning, setScanning] = useState(false);
 

@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import Ribbon from '../components/Ribbon';
 import AppSidebar from '../components/AppSidebar';
+import { useUserPref, usePreferences } from '../context/PreferencesContext';
 // MangaCard is also statically imported by Library, so it lives in the main
 // chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
@@ -14,21 +15,31 @@ import './Home.css';
 // expensive enough to be worth deferring.
 const ArtGalleryRibbon = lazy(() => import('../components/ArtGalleryRibbon'));
 
-// localStorage keys driving the Discover ribbon's daily refresh behaviour.
-const LS_INTERVAL_MS    = 'home_discover_refresh_ms';
+// localStorage keys for the per-device transient rotation state. Everything
+// else has moved to user_preferences (see PreferencesContext); these two
+// stay local because they're shuffle bookkeeping that should differ across
+// devices on purpose.
 const LS_LAST_REFRESH   = 'home_discover_last_refresh';
 const LS_SEED           = 'home_discover_seed';
-// Per-device minimum AniList/MAL score for the per-genre ribbons. The same
-// `discoverSeed` rotates these ribbons too (see GENRE_VISIBLE_COUNT below),
-// so the score threshold and shuffle cadence are decoupled — change the
-// number to broaden / narrow the candidate pool, change the Discover
-// interval to rotate the visible slice faster / slower.
-const LS_GENRE_MIN_SCORE = 'home_genre_score_threshold';
+
+const GALLERY_ORDER_VALUES  = ['chronological', 'random'];
+const DEFAULT_GALLERY_ORDER = 'chronological';
 
 const DEFAULT_DISCOVER_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
-const DISCOVER_VISIBLE_COUNT       = 15;
+const DEFAULT_DISCOVER_VISIBLE     = 15;
 const GENRE_VISIBLE_COUNT          = 15;
 const DEFAULT_GENRE_MIN_SCORE      = 7;
+
+// Default ribbon order — kept in sync with Settings → Homepage Settings
+// (DEFAULT_RIBBON_ORDER over there). When no pref is set or an unknown id
+// appears, Home reconciles against this canonical list.
+const DEFAULT_RIBBON_ORDER = [
+  { id: 'continue', visible: true },
+  { id: 'recent',   visible: true },
+  { id: 'discover', visible: true },
+  { id: 'gallery',  visible: true },
+  { id: 'genres',   visible: true },
+];
 
 // Cover dimensions reserved at layout time so the browser doesn't reflow as
 // images stream in. Matches the actual rendered size on desktop and is a
@@ -62,12 +73,28 @@ function hashStr32(s) {
   return h >>> 0;
 }
 
-function readGenreMinScore() {
-  const raw = localStorage.getItem(LS_GENRE_MIN_SCORE);
-  if (raw === null) return DEFAULT_GENRE_MIN_SCORE;
-  const n = parseFloat(raw);
-  if (!Number.isFinite(n)) return DEFAULT_GENRE_MIN_SCORE;
-  return Math.max(0, Math.min(10, n));
+// Compose the Discover ribbon's empty-state message. Distinguishes "your
+// filters are too aggressive" from "you haven't read anything yet" so the
+// user knows whether to loosen Settings or just keep reading. Returns null
+// to suppress the message when the ribbon has tiles to show.
+function discoverEmptyMessage(data, filters) {
+  if (!data) return null;
+  if (data.discover_candidates.length > 0) return null;
+  const {
+    discoverMinScore, excludedGenres, minMatchCount,
+    discoverLibIds, skipBookmarked, favGenresMode, favGenresManual,
+  } = filters;
+  const anyFilterActive =
+    (discoverMinScore && discoverMinScore > 0) ||
+    (Array.isArray(excludedGenres) && excludedGenres.length > 0) ||
+    (minMatchCount && minMatchCount > 1) ||
+    (Array.isArray(discoverLibIds) && discoverLibIds.length > 0) ||
+    skipBookmarked ||
+    (favGenresMode === 'manual' && Array.isArray(favGenresManual) && favGenresManual.length > 0);
+  if (anyFilterActive) {
+    return 'No titles match your Discover filters. Try loosening them in Settings → Homepage Settings.';
+  }
+  return 'Read some chapters so we can learn your favourite genres.';
 }
 
 function shuffleWithSeed(items, seed) {
@@ -82,16 +109,10 @@ function shuffleWithSeed(items, seed) {
   return arr;
 }
 
-function readIntervalMs() {
-  const raw = localStorage.getItem(LS_INTERVAL_MS);
-  if (raw === null) return DEFAULT_DISCOVER_INTERVAL_MS;
-  if (raw === '0') return 0; // manual-only
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_DISCOVER_INTERVAL_MS;
-}
-
-function resolveDiscoverSeed(now = Date.now()) {
-  const intervalMs = readIntervalMs();
+// `intervalMs` is supplied by the caller from the per-user preference rather
+// than read from localStorage — Home reads its prefs via useUserPref and
+// passes the value in. 0 means manual-only.
+function resolveDiscoverSeed(intervalMs, now = Date.now()) {
   const lastRaw = localStorage.getItem(LS_LAST_REFRESH);
   const last = lastRaw ? parseInt(lastRaw, 10) : 0;
 
@@ -309,12 +330,44 @@ export default function Home() {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
-  const [discoverSeed, setDiscoverSeed] = useState(() => resolveDiscoverSeed());
-  // Score threshold for the "Top Manga in <Genre>" ribbons. Read from
-  // localStorage on mount; the Settings page's Homepage section is the
-  // canonical writer. Changing this in Settings causes Home to remount and
-  // re-fetch with the new value.
-  const [genreMinScore] = useState(() => readGenreMinScore());
+
+  // Per-user, server-synced preferences. Defaults match Home's pre-rollout
+  // behaviour so an empty prefs store renders exactly the same page.
+  const { loading: prefsLoading } = usePreferences();
+  const [discoverIntervalMs] = useUserPref('home_discover_refresh_ms', DEFAULT_DISCOVER_INTERVAL_MS);
+  const [genreMinScore]      = useUserPref('home_genre_score_threshold', DEFAULT_GENRE_MIN_SCORE);
+  const [galleryOrderRaw]    = useUserPref('home_gallery_order', DEFAULT_GALLERY_ORDER);
+  const galleryOrder = GALLERY_ORDER_VALUES.includes(galleryOrderRaw) ? galleryOrderRaw : DEFAULT_GALLERY_ORDER;
+
+  // Discover filter prefs
+  const [discoverMinScore]     = useUserPref('home_discover_min_score', 0);
+  const [excludedGenres]       = useUserPref('home_discover_excluded_genres', []);
+  const [favGenresMode]        = useUserPref('home_favorite_genres_mode', 'auto');
+  const [favGenresManual]      = useUserPref('home_favorite_genres_manual', []);
+  const [minMatchCount]        = useUserPref('home_discover_min_match_count', 1);
+  const [discoverLibIds]       = useUserPref('home_discover_library_ids', []);
+  const [skipBookmarked]       = useUserPref('home_discover_skip_bookmarked', false);
+  const [discoverPoolSize]     = useUserPref('home_discover_pool_size', 30);
+  const [discoverVisibleCount] = useUserPref('home_discover_visible_count', DEFAULT_DISCOVER_VISIBLE);
+
+  // Layout prefs
+  const [ribbonOrder]        = useUserPref('home_ribbon_order', DEFAULT_RIBBON_ORDER);
+  const [resumeHeroEnabled]  = useUserPref('home_resume_hero_enabled', true);
+  const [genreRibbonCount]   = useUserPref('home_genre_ribbon_count', 4);
+  const [recentWindowHours]  = useUserPref('home_recent_window_hours', 0);
+
+  // Discover seed driving the rotation. Recomputed whenever the user-selected
+  // interval changes (Settings change → prefs sync → new seed window applies
+  // immediately rather than waiting out the previous cadence).
+  const [discoverSeed, setDiscoverSeed] = useState(() => resolveDiscoverSeed(discoverIntervalMs));
+  useEffect(() => {
+    setDiscoverSeed(resolveDiscoverSeed(discoverIntervalMs));
+  }, [discoverIntervalMs]);
+
+  // Per-mount shuffle seed — stable across re-renders within a Home session,
+  // reshuffles on navigate-away-and-back. Only consumed when galleryOrder
+  // === 'random', but mint unconditionally so it's a no-cost constant otherwise.
+  const [galleryShuffleSeed] = useState(() => (Math.random() * 0x7fffffff) | 0);
 
   // Sidebar data + drawer state. The sidebar is shared with the Library
   // page; here every selection navigates the user over to /library with
@@ -358,7 +411,18 @@ export default function Home() {
   const load = useCallback(async () => {
     try {
       setLoading(true);
-      const fetched = await api.getHome({ minScore: genreMinScore });
+      const fetched = await api.getHome({
+        minScore: genreMinScore,
+        discoverMinScore,
+        discoverExcludedGenres: excludedGenres,
+        discoverMinMatchCount: minMatchCount,
+        discoverLibraryIds: discoverLibIds,
+        discoverSkipBookmarked: skipBookmarked,
+        discoverPoolSize,
+        favoriteGenres: favGenresMode === 'manual' ? favGenresManual : undefined,
+        genreRibbonCount,
+        recentWindowHours,
+      });
       setData(fetched);
       setError(null);
     } catch (err) {
@@ -366,9 +430,19 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [genreMinScore]);
+  }, [
+    genreMinScore, discoverMinScore, excludedGenres, minMatchCount,
+    discoverLibIds, skipBookmarked, discoverPoolSize, favGenresMode,
+    favGenresManual, genreRibbonCount, recentWindowHours,
+  ]);
 
-  useEffect(() => { load(); }, [load]);
+  // Wait for the initial prefs fetch before hitting /api/home — otherwise the
+  // first request goes out with defaults, the response is cached for 30s,
+  // and the second request (after prefs arrive) hits a stale entry. Once
+  // prefs resolve (success or empty fallback), load fires normally.
+  useEffect(() => {
+    if (!prefsLoading) load();
+  }, [load, prefsLoading]);
 
   // Debounced search. 300 ms matches the Library page so cross-page muscle
   // memory is consistent. Empty query → reset state and let the ribbons show.
@@ -403,18 +477,30 @@ export default function Home() {
   }, [search]);
 
   // Slice discover candidates to a stable visible window. Memoized on the
-  // seed so React does not re-shuffle on every unrelated render.
+  // seed so React does not re-shuffle on every unrelated render. Visible
+  // count comes from the user's `home_discover_visible_count` preference.
   const discoverVisible = useMemo(() => {
     if (!data?.discover_candidates?.length) return [];
     const shuffled = shuffleWithSeed(data.discover_candidates, discoverSeed);
-    return shuffled.slice(0, DISCOVER_VISIBLE_COUNT);
-  }, [data, discoverSeed]);
+    return shuffled.slice(0, discoverVisibleCount);
+  }, [data, discoverSeed, discoverVisibleCount]);
 
-  // Continue Reading minus the first row — that one becomes the Resume hero.
+  // Continue Reading minus the first row when the Resume Hero is enabled —
+  // that one becomes the hero card. With the hero disabled, every title
+  // stays in the ribbon.
   const continueRest = useMemo(() => {
     if (!data?.continue_reading?.length) return [];
-    return data.continue_reading.slice(1);
-  }, [data]);
+    return resumeHeroEnabled ? data.continue_reading.slice(1) : data.continue_reading;
+  }, [data, resumeHeroEnabled]);
+
+  // Art Gallery ribbon ordering. Server returns newest-first; Random mode
+  // applies an in-place Fisher–Yates pass (≤100 items, O(n)) using the
+  // per-mount seed so the order is stable within a session.
+  const galleryItems = useMemo(() => {
+    const raw = data?.art_gallery ?? [];
+    if (galleryOrder !== 'random' || raw.length < 2) return raw;
+    return shuffleWithSeed(raw, galleryShuffleSeed);
+  }, [data, galleryOrder, galleryShuffleSeed]);
 
   // Genre ribbon visible slices. Each genre's pool is shuffled with a seed
   // derived from `discoverSeed` XOR a per-genre hash, so all genre ribbons
@@ -591,91 +677,115 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <ResumeHero manga={data.continue_reading[0]} />
-
-                {continueRest.length > 0 && (
-                  <Ribbon title="Continue Reading">
-                    {continueRest.map((m, i) => (
-                      <ContinueReadingTile key={m.id} manga={m} eager={i === 0} />
-                    ))}
-                  </Ribbon>
+                {resumeHeroEnabled && (
+                  <ResumeHero manga={data.continue_reading[0]} />
                 )}
 
-                {data.recently_added && data.recently_added.length > 0 && (
-                  <Ribbon
-                    title="Recently Added"
-                    viewAllTo={{ pathname: '/library', state: { search: '' } }}
-                  >
-                    {data.recently_added.map((m, i) => (
-                      <MangaTile key={m.id} manga={m} eager={i === 0} />
-                    ))}
-                  </Ribbon>
-                )}
-
-                <Ribbon
-                  title="Discover New Series"
-                  actions={
-                    discoverVisible.length > 0 && (
-                      <>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={handleSurpriseMe}
-                          title="Open a random unread series"
+                {/* Ribbons render in the order the user picked in Settings.
+                    Each entry is { id, visible }; hidden entries are skipped.
+                    Unknown ids are dropped; missing ids fall through to the
+                    DEFAULT_RIBBON_ORDER positions courtesy of RibbonOrderEditor's
+                    persistence shape. */}
+                {ribbonOrder.filter(r => r.visible).map(r => {
+                  switch (r.id) {
+                    case 'continue':
+                      return continueRest.length > 0 ? (
+                        <Ribbon key="continue" title="Continue Reading">
+                          {continueRest.map((m, i) => (
+                            <ContinueReadingTile key={m.id} manga={m} eager={i === 0} />
+                          ))}
+                        </Ribbon>
+                      ) : null;
+                    case 'recent':
+                      return data.recently_added && data.recently_added.length > 0 ? (
+                        <Ribbon
+                          key="recent"
+                          title="Recently Added"
+                          viewAllTo={{ pathname: '/library', state: { search: '' } }}
                         >
-                          Surprise me
-                        </button>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={handleManualDiscoverRefresh}
-                          title="Shuffle new picks"
+                          {data.recently_added.map((m, i) => (
+                            <MangaTile key={m.id} manga={m} eager={i === 0} />
+                          ))}
+                        </Ribbon>
+                      ) : null;
+                    case 'discover':
+                      return (
+                        <Ribbon
+                          key="discover"
+                          title="Discover New Series"
+                          actions={
+                            discoverVisible.length > 0 && (
+                              <>
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={handleSurpriseMe}
+                                  title="Open a random unread series"
+                                >
+                                  Surprise me
+                                </button>
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={handleManualDiscoverRefresh}
+                                  title="Shuffle new picks"
+                                >
+                                  Refresh
+                                </button>
+                              </>
+                            )
+                          }
+                          emptyMessage={discoverEmptyMessage(data, {
+                            discoverMinScore, excludedGenres, minMatchCount,
+                            discoverLibIds, skipBookmarked,
+                            favGenresMode, favGenresManual,
+                          })}
                         >
-                          Refresh
-                        </button>
-                      </>
-                    )
+                          {discoverVisible.map((m, i) => (
+                            <MangaTile
+                              key={m.id}
+                              manga={m}
+                              eager={i === 0}
+                              sub={m.match_count > 1
+                                ? `${m.match_count} matching genres`
+                                : '1 matching genre'}
+                            />
+                          ))}
+                        </Ribbon>
+                      );
+                    case 'gallery':
+                      return (
+                        <Suspense key="gallery" fallback={null}>
+                          {/* fullSize: render each tile at the page's natural
+                              aspect ratio (landscape spreads aren't cropped),
+                              matching the dedicated /art-gallery page. Requires
+                              width/height to be present on each item, which
+                              /api/home started returning alongside this change. */}
+                          <ArtGalleryRibbon
+                            items={galleryItems}
+                            titleHref="/art-gallery"
+                            fullSize
+                          />
+                        </Suspense>
+                      );
+                    case 'genres':
+                      return (
+                        <React.Fragment key="genres">
+                          {genreRibbonsVisible.map(g => (
+                            <Ribbon
+                              key={g.genre}
+                              title={`Top Manga in ${g.genre}`}
+                              viewAllTo={{ pathname: '/library', state: { search: g.genre } }}
+                            >
+                              {g.manga.map((m, i) => (
+                                <MangaTile key={m.id} manga={m} eager={i === 0} />
+                              ))}
+                            </Ribbon>
+                          ))}
+                        </React.Fragment>
+                      );
+                    default:
+                      return null;
                   }
-                  emptyMessage={
-                    data.discover_candidates.length === 0
-                      ? 'Read some chapters so we can learn your favourite genres.'
-                      : null
-                  }
-                >
-                  {discoverVisible.map((m, i) => (
-                    <MangaTile
-                      key={m.id}
-                      manga={m}
-                      eager={i === 0}
-                      sub={m.match_count > 1
-                        ? `${m.match_count} matching genres`
-                        : '1 matching genre'}
-                    />
-                  ))}
-                </Ribbon>
-
-                <Suspense fallback={null}>
-                  {/* fullSize: render each tile at the page's natural
-                      aspect ratio (landscape spreads aren't cropped),
-                      matching the dedicated /art-gallery page. Requires
-                      width/height to be present on each item, which
-                      /api/home started returning alongside this change. */}
-                  <ArtGalleryRibbon
-                    items={data.art_gallery}
-                    titleHref="/art-gallery"
-                    fullSize
-                  />
-                </Suspense>
-
-                {genreRibbonsVisible.map(r => (
-                  <Ribbon
-                    key={r.genre}
-                    title={`Top Manga in ${r.genre}`}
-                    viewAllTo={{ pathname: '/library', state: { search: r.genre } }}
-                  >
-                    {r.manga.map((m, i) => (
-                      <MangaTile key={m.id} manga={m} eager={i === 0} />
-                    ))}
-                  </Ribbon>
-                ))}
+                })}
               </>
             )}
           </>

@@ -32,6 +32,7 @@ const sourcesRoutes = require('./routes/sources');
 const pairingRoutes = require('./routes/pairing');
 const adminAuthRoutes = require('./routes/adminAuth');
 const userRoutes = require('./routes/users');
+const userPreferencesRoutes = require('./routes/userPreferences');
 const networkRoutes = require('./routes/network');
 const appVersionRoutes = require('./routes/appVersion');
 const { requireClientOrAdmin, requireAdmin, enforceLanOnlyMode } = require('./middleware/auth');
@@ -179,6 +180,11 @@ app.use('/api', requireClientOrAdmin, metadataRoutes);
 // dereference a null user.
 app.use('/api', requireClientOrAdmin, requireUser, libraryRoutes);
 app.use('/api', requireClientOrAdmin, requireUser, progressRoutes);
+// Per-user preferences (Homepage Settings + future per-user UI state). Mount
+// at /api/user so the route is /api/user/preferences. requireUser is enforced
+// inside the router too, but the mount-line gate keeps unauthenticated
+// requests from even reaching the handler.
+app.use('/api/user', requireClientOrAdmin, requireUser, userPreferencesRoutes);
 
 // Admin-only operator surfaces: database management, system logs, optimize
 // bulk ops, third-party sourcing, and the config export/import bundle.

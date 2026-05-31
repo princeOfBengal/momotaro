@@ -9,6 +9,7 @@ import AdminTaskBanner from './components/AdminTaskBanner';
 import { api, setConnectivityProbe } from './api/client';
 import { ConnectivityProvider, ConnectivityBanner, useConnectivity } from './context/ConnectivityContext';
 import { UserProvider } from './context/UserContext';
+import { PreferencesProvider } from './context/PreferencesContext';
 import { initDownloader, reconcileNativeProgress } from './api/downloader';
 import { flushOutbox } from './api/outboxSync';
 import { migrateLegacyRoot } from './api/offlineStorage';
@@ -230,6 +231,7 @@ export default function App() {
         <AdminTaskBanner />
         <Suspense fallback={<RouteFallback />}>
           <UserProvider>
+          <PreferencesProvider>
           <FirstLaunchGate>
             <Routes>
               <Route path="/pairing" element={<Pairing />} />
@@ -249,6 +251,7 @@ export default function App() {
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </FirstLaunchGate>
+          </PreferencesProvider>
           </UserProvider>
         </Suspense>
         {/* Mounted outside <Routes> so it persists across navigation. The

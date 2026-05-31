@@ -131,6 +131,11 @@ router.patch('/libraries/:id', requireAdmin, asyncWrapper(async (req, res) => {
   if (show_in_all !== undefined && !name && !newPath) {
     db.prepare('UPDATE libraries SET show_in_all = ? WHERE id = ?')
       .run(show_in_all ? 1 : 0, library.id);
+    // /api/home and /api/stats both scope to libraries with show_in_all = 1
+    // in All Libraries mode; drop their caches so the toggle is visible
+    // immediately instead of after the next TTL expiry.
+    _homeCache.clear();
+    _statsCache.clear();
     const updated = db.prepare(`
       SELECT l.*, COUNT(m.id) as manga_count
       FROM libraries l LEFT JOIN manga m ON m.library_id = l.id
@@ -843,30 +848,41 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     return res.json({ data: cached.payload });
   }
 
-  // Every aggregate either filters `manga.library_id = ?` directly or joins
-  // through `manga` to do so. Building the WHERE fragment once keeps each
-  // query body consistent.
-  const libClause      = libraryId == null ? '' : ' AND m.library_id = ?';
-  const libClauseBare  = libraryId == null ? '' : ' WHERE library_id = ?';
-  const libJoinClause  = libraryId == null ? '' : ' WHERE m.library_id = ?';
-  const libParams      = libraryId == null ? [] : [libraryId];
+  // Every aggregate either filters on `m.library_id` directly or joins
+  // through `manga` to do so. Building the JOIN + WHERE fragments once keeps
+  // each query body consistent. In All-Libraries scope we exclude manga whose
+  // library has `show_in_all = 0` — matching the visibility rule already
+  // enforced for /api/library, /api/home, /api/genres, and /api/gallery — so
+  // hiding a library from All Libraries hides it from these stats too.
+  const libJoin   = libraryId == null
+    ? 'LEFT JOIN libraries l ON l.id = m.library_id'
+    : '';
+  const libFilter = libraryId == null
+    ? '(m.library_id IS NULL OR l.show_in_all = 1)'
+    : 'm.library_id = ?';
+  const libParams = libraryId == null ? [] : [libraryId];
 
-  const { total_manga } = db.prepare(
-    `SELECT COUNT(*) as total_manga FROM manga${libClauseBare}`
-  ).get(...libParams);
+  const { total_manga } = db.prepare(`
+    SELECT COUNT(*) as total_manga
+    FROM manga m
+    ${libJoin}
+    WHERE ${libFilter}
+  `).get(...libParams);
 
   const { total_chapters } = db.prepare(`
     SELECT COUNT(*) as total_chapters
     FROM chapters c
     JOIN manga m ON m.id = c.manga_id
-    ${libJoinClause}
+    ${libJoin}
+    WHERE ${libFilter}
   `).get(...libParams);
 
   const { total_pages } = db.prepare(`
     SELECT COALESCE(SUM(c.page_count), 0) as total_pages
     FROM chapters c
     JOIN manga m ON m.id = c.manga_id
-    ${libJoinClause}
+    ${libJoin}
+    WHERE ${libFilter}
   `).get(...libParams);
 
   // Genre inventory — normalised `manga_genres` table keeps this cheap.
@@ -874,14 +890,16 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     SELECT COUNT(DISTINCT g.genre COLLATE NOCASE) as total_genres
     FROM manga_genres g
     JOIN manga m ON m.id = g.manga_id
-    ${libJoinClause}
+    ${libJoin}
+    WHERE ${libFilter}
   `).get(...libParams);
 
   const top_genres = db.prepare(`
     SELECT g.genre as genre, COUNT(*) as count
     FROM manga_genres g
     JOIN manga m ON m.id = g.manga_id
-    ${libJoinClause}
+    ${libJoin}
+    WHERE ${libFilter}
     GROUP BY g.genre COLLATE NOCASE
     ORDER BY count DESC, g.genre ASC
     LIMIT 10
@@ -899,9 +917,10 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     FROM progress p
     JOIN manga m        ON m.id = p.manga_id
     JOIN manga_genres g ON g.manga_id = p.manga_id
+    ${libJoin}
     WHERE p.user_id = ?
       AND json_array_length(p.completed_chapters) > 0
-    ${libClause}
+      AND ${libFilter}
     GROUP BY g.genre COLLATE NOCASE
     ORDER BY chapters_read DESC, g.genre ASC
     LIMIT 10
@@ -919,8 +938,9 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     FROM progress p, json_each(p.completed_chapters) je
     JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
     JOIN manga m    ON m.id = p.manga_id
+    ${libJoin}
     WHERE p.user_id = ?
-    ${libClause}
+      AND ${libFilter}
   `).get(userId, ...libParams);
 
   // Popular manga — sorted by completed chapter count in SQL
@@ -929,8 +949,9 @@ router.get('/stats', asyncWrapper(async (req, res) => {
            json_array_length(p.completed_chapters) as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
+    ${libJoin}
     WHERE p.user_id = ?
-    ${libClause}
+      AND ${libFilter}
     ORDER BY chapters_read DESC
     LIMIT 10
   `).all(userId, ...libParams).map(r => ({
@@ -942,9 +963,12 @@ router.get('/stats', asyncWrapper(async (req, res) => {
 
   // Total disk size is now a single SUM over cached per-manga values —
   // previously this walked every library, which doesn't scale past a few TB.
-  const { total_size_bytes } = db.prepare(
-    `SELECT COALESCE(SUM(bytes_on_disk), 0) as total_size_bytes FROM manga${libClauseBare}`
-  ).get(...libParams);
+  const { total_size_bytes } = db.prepare(`
+    SELECT COALESCE(SUM(m.bytes_on_disk), 0) as total_size_bytes
+    FROM manga m
+    ${libJoin}
+    WHERE ${libFilter}
+  `).get(...libParams);
 
   const payload = {
     library_id: libraryId,
@@ -1013,6 +1037,51 @@ function clampMinScore(q) {
   return Math.max(0, Math.min(10, n));
 }
 
+// Generic helpers for the Discover-filter query params. The handler tolerates
+// missing / malformed input by falling back to the supplied default — bad
+// values from a stale client never cause a 500.
+function clampScore(q, fallback) {
+  if (q === undefined || q === null || q === '') return fallback;
+  const n = parseFloat(q);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(10, n));
+}
+function clampInt(q, fallback, min, max) {
+  if (q === undefined || q === null || q === '') return fallback;
+  const n = parseInt(q, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function parseCsv(q) {
+  if (typeof q !== 'string' || !q) return [];
+  return q.split(',').map(s => s.trim()).filter(Boolean);
+}
+function parseCsvLower(q) {
+  return parseCsv(q).map(s => s.toLowerCase());
+}
+function parseCsvInt(q) {
+  return parseCsv(q)
+    .map(s => parseInt(s, 10))
+    .filter(n => Number.isFinite(n) && n > 0);
+}
+
+// Short hash for the /api/home cache key. We include every filter param in
+// the key, so a stable, collision-resistant digest keeps the string compact.
+const _crypto = require('crypto');
+function sha1Short(s) {
+  return _crypto.createHash('sha1').update(s).digest('hex').slice(0, 12);
+}
+
+// Drop a single user's /api/home cache slot(s). Called by the userPreferences
+// PUT handler when a home-affecting key changes. Walks the small in-memory
+// Map; cheap at any realistic size (one slot per (user × param-hash)).
+function deleteHomeCacheForUser(userId) {
+  const prefix = `u:${userId}|`;
+  for (const k of _homeCache.keys()) {
+    if (k.startsWith(prefix)) _homeCache.delete(k);
+  }
+}
+
 // GET /api/home
 router.get('/home', asyncWrapper(async (req, res) => {
   // Browser HTTP cache backs up the service worker's StaleWhileRevalidate.
@@ -1021,14 +1090,18 @@ router.get('/home', asyncWrapper(async (req, res) => {
 
   const userId = req.user.id;
   const minScore = clampMinScore(req.query.min_score);
-  // Cache key includes user_id: continue_reading / favorite genres / discover
-  // are all per-user, so one user's Home must never be served to another.
-  const cacheKey = `u:${userId}|s:${minScore}`;
-  const now = Date.now();
-  const cached = _homeCache.get(cacheKey);
-  if (cached && (now - cached.ts) < HOME_TTL_MS) {
-    return res.json({ data: cached.payload });
-  }
+
+  // Discover-ribbon filters. Every one of these is optional and falls back to
+  // a "behave as before" default — a client that doesn't know about a given
+  // param still gets today's behaviour.
+  const discoverMinScore       = clampScore(req.query.discover_min_score, 0);
+  const discoverExcludedGenres = parseCsvLower(req.query.discover_excluded_genres);
+  const discoverMinMatchCount  = clampInt(req.query.discover_min_match_count, 1, 1, 4);
+  const discoverLibraryIds     = parseCsvInt(req.query.discover_library_ids);
+  const discoverSkipBookmarked = req.query.discover_skip_bookmarked === '1';
+  const favoriteGenresOverride = parseCsv(req.query.favorite_genres);
+  const genreRibbonCount       = clampInt(req.query.genre_ribbon_count, 4, 1, 4);
+  const recentWindowHours      = clampInt(req.query.recent_window_hours, 0, 0, 24 * 365);
 
   const db = getDb();
 
@@ -1037,6 +1110,22 @@ router.get('/home', asyncWrapper(async (req, res) => {
   const limGallery  = clampLimit(req.query.gallery_limit,  HOME_LIMITS.gallery);
   const limRibbon   = clampLimit(req.query.ribbon_limit,   HOME_LIMITS.genreRibbons);
   const limRecent   = clampLimit(req.query.recent_limit,   HOME_LIMITS.recent);
+
+  // Cache key includes user_id + a hash of every param that affects the
+  // payload. continue_reading / favorite genres / discover are all per-user,
+  // so one user's Home must never be served to another; the param hash keeps
+  // two clients with different Discover filters from colliding either.
+  const cacheKey = `u:${userId}|` + sha1Short(JSON.stringify({
+    minScore, discoverMinScore, discoverExcludedGenres, discoverMinMatchCount,
+    discoverLibraryIds, discoverSkipBookmarked, favoriteGenresOverride,
+    genreRibbonCount, recentWindowHours,
+    limContinue, limDiscover, limGallery, limRibbon, limRecent,
+  }));
+  const now = Date.now();
+  const cached = _homeCache.get(cacheKey);
+  if (cached && (now - cached.ts) < HOME_TTL_MS) {
+    return res.json({ data: cached.payload });
+  }
 
   // ── Continue Reading ─────────────────────────────────────────────────────
   // Manga the user has opened, most-recent first. Joined to chapters so the
@@ -1078,21 +1167,29 @@ router.get('/home', asyncWrapper(async (req, res) => {
   }));
 
   // ── Favorite genres (scoped to visible libraries) ─────────────────────────
-  const favoriteGenreRows = db.prepare(`
-    SELECT g.genre AS genre,
-           SUM(json_array_length(p.completed_chapters)) AS chapters_read
-    FROM progress p
-    JOIN manga m        ON m.id = p.manga_id
-    JOIN manga_genres g ON g.manga_id = p.manga_id
-    LEFT JOIN libraries l ON l.id = m.library_id
-    WHERE p.user_id = ?
-      AND json_array_length(p.completed_chapters) > 0
-      AND (m.library_id IS NULL OR l.show_in_all = 1)
-    GROUP BY g.genre COLLATE NOCASE
-    ORDER BY chapters_read DESC, g.genre ASC
-    LIMIT 4
-  `).all(userId);
-  const favoriteGenres = favoriteGenreRows.map(r => r.genre);
+  // When the client passes a `favorite_genres` override (the user selected
+  // Manual mode in Settings), skip the chapters-read derivation entirely and
+  // use the supplied list. Capped at 4 to match the auto-derivation limit.
+  let favoriteGenres;
+  if (favoriteGenresOverride.length > 0) {
+    favoriteGenres = favoriteGenresOverride.slice(0, 4);
+  } else {
+    const favoriteGenreRows = db.prepare(`
+      SELECT g.genre AS genre,
+             SUM(json_array_length(p.completed_chapters)) AS chapters_read
+      FROM progress p
+      JOIN manga m        ON m.id = p.manga_id
+      JOIN manga_genres g ON g.manga_id = p.manga_id
+      LEFT JOIN libraries l ON l.id = m.library_id
+      WHERE p.user_id = ?
+        AND json_array_length(p.completed_chapters) > 0
+        AND (m.library_id IS NULL OR l.show_in_all = 1)
+      GROUP BY g.genre COLLATE NOCASE
+      ORDER BY chapters_read DESC, g.genre ASC
+      LIMIT 4
+    `).all(userId);
+    favoriteGenres = favoriteGenreRows.map(r => r.genre);
+  }
 
   // ── Discover New Series ──────────────────────────────────────────────────
   // Unread manga (no progress row, or a progress row with zero completed
@@ -1100,9 +1197,55 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // so a manga matching 3 of the top 4 genres ranks above one matching 1.
   // Unrated AniList/MAL score sinks to the bottom within each match-count
   // tier so the user sees scored picks first.
+  //
+  // Optional user-tunable filters layered on top:
+  //   * discoverMinScore           — `m.score >= ?` (0 disables)
+  //   * discoverExcludedGenres     — drop any manga tagged with a blacklisted
+  //                                  genre, not just the genre row itself, so
+  //                                  Action+Ecchi is removed wholesale when
+  //                                  Ecchi is excluded
+  //   * discoverLibraryIds         — restrict to a subset of libraries (also
+  //                                  must still pass the show_in_all gate)
+  //   * discoverSkipBookmarked     — exclude manga that already appear in any
+  //                                  of the user's reading lists
+  //   * discoverMinMatchCount      — HAVING-clause filter on the COUNT()
   let discover_candidates = [];
   if (favoriteGenres.length > 0) {
     const placeholders = favoriteGenres.map(() => '?').join(',');
+    let extraWhere   = '';
+    let havingClause = '';
+    const extraParams = [];
+
+    if (discoverMinScore > 0) {
+      extraWhere += ' AND m.score >= ?';
+      extraParams.push(discoverMinScore);
+    }
+    if (discoverLibraryIds.length > 0) {
+      extraWhere += ` AND m.library_id IN (${discoverLibraryIds.map(() => '?').join(',')})`;
+      extraParams.push(...discoverLibraryIds);
+    }
+    if (discoverExcludedGenres.length > 0) {
+      const exPh = discoverExcludedGenres.map(() => '?').join(',');
+      extraWhere += `
+        AND m.id NOT IN (
+          SELECT manga_id FROM manga_genres
+          WHERE genre IN (${exPh}) COLLATE NOCASE
+        )`;
+      extraParams.push(...discoverExcludedGenres);
+    }
+    if (discoverSkipBookmarked) {
+      extraWhere += `
+        AND m.id NOT IN (
+          SELECT manga_id FROM reading_list_manga
+          WHERE list_id IN (SELECT id FROM reading_lists WHERE user_id = ?)
+        )`;
+      extraParams.push(userId);
+    }
+    if (discoverMinMatchCount > 1) {
+      havingClause = ' HAVING match_count >= ?';
+      extraParams.push(discoverMinMatchCount);
+    }
+
     discover_candidates = db.prepare(`
       SELECT m.id, m.title, m.cover_image, m.score,
              COUNT(DISTINCT g.genre COLLATE NOCASE) AS match_count
@@ -1115,10 +1258,12 @@ router.get('/home', asyncWrapper(async (req, res) => {
              OR p.completed_chapters IS NULL
              OR p.completed_chapters = '[]')
         AND g.genre IN (${placeholders}) COLLATE NOCASE
+        ${extraWhere}
       GROUP BY m.id
+      ${havingClause}
       ORDER BY match_count DESC, m.score DESC NULLS LAST, m.id ASC
       LIMIT ?
-    `).all(userId, ...favoriteGenres, limDiscover).map(r => ({
+    `).all(userId, ...favoriteGenres, ...extraParams, limDiscover).map(r => ({
       id:          r.id,
       title:       r.title,
       cover_url:   r.cover_image ? thumbnailUrl(r.cover_image) : null,
@@ -1183,7 +1328,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     LIMIT ?
   `);
 
-  const favorite_genres_ribbons = favoriteGenres.map(genre => ({
+  const favorite_genres_ribbons = favoriteGenres.slice(0, genreRibbonCount).map(genre => ({
     genre,
     manga: topByGenreStmt.all(genre, minScore, limRibbon).map(r => ({
       id:        r.id,
@@ -1196,14 +1341,17 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // ── Recently Added ───────────────────────────────────────────────────────
   // Newest manga rows by created_at, scoped to visible libraries. Surfaces
   // titles produced by the most recent scan without forcing a Library re-sort.
+  // `recentWindowHours = 0` (default) keeps today's unbounded behaviour; a
+  // positive value caps the ribbon to "added in the last N hours."
   const recentlyAddedRows = db.prepare(`
     SELECT m.id, m.title, m.cover_image, m.score, m.created_at
     FROM manga m
     LEFT JOIN libraries l ON l.id = m.library_id
     WHERE (m.library_id IS NULL OR l.show_in_all = 1)
+      AND (? = 0 OR m.created_at >= unixepoch() - ? * 3600)
     ORDER BY m.created_at DESC, m.id DESC
     LIMIT ?
-  `).all(limRecent);
+  `).all(recentWindowHours, recentWindowHours, limRecent);
   const recently_added = recentlyAddedRows.map(r => ({
     id:         r.id,
     title:      r.title,
@@ -1285,3 +1433,7 @@ function toFtsMatchQuery(text) {
 }
 
 module.exports = router;
+// Cache invalidation hook used by routes/userPreferences.js when a
+// home-affecting key changes. Kept on the module exports so the prefs route
+// doesn't depend on the internal _homeCache Map directly.
+module.exports.deleteHomeCacheForUser = deleteHomeCacheForUser;

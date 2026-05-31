@@ -7,11 +7,21 @@ import { registerPlugin } from '@capacitor/core';
 // is why the helpers below early-return on `!isNativePlatform()`.
 const ImmersiveMode = registerPlugin('ImmersiveMode');
 
-function isNativeShell() {
-  return typeof window !== 'undefined'
-      && window.Capacitor
+export function isNativeShell() {
+  if (typeof window === 'undefined') return false;
+  // Capacitor's signal (Android APK and, in theory, the Capacitor Electron
+  // platform). Trustworthy on Android.
+  if (window.Capacitor
       && typeof window.Capacitor.isNativePlatform === 'function'
-      && window.Capacitor.isNativePlatform();
+      && window.Capacitor.isNativePlatform()) {
+    return true;
+  }
+  // Electron-only fallback: the preload always exposes window.MomotaroElectron.
+  // Detect the desktop shell directly so the fullscreen button (and any other
+  // native-only path) works even if Capacitor's isNativePlatform() is wrong
+  // on this build (it has been flaky in @capacitor-community/electron 5).
+  if (window.MomotaroElectron && window.MomotaroElectron.ImmersiveMode) return true;
+  return false;
 }
 
 // On the Electron desktop shell the in-tree plugin is exposed by the preload at

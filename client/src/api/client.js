@@ -524,17 +524,79 @@ const _rawApi = {
 
   // Home page — single aggregate fetch for every ribbon (continue reading,
   // discover, recently added, art gallery, top-manga-per-genre). Scoped
-  // server-side to visible libraries; cached for 30 s in-process keyed by
-  // `min_score`. Pass `{ minScore }` to filter the per-genre ribbons by a
-  // rating threshold (default 7); the value is clamped to [0, 10] server-side.
-  getHome: ({ minScore } = {}) => {
+  // server-side to visible libraries; cached for 30 s in-process keyed by the
+  // full filter set. Every option is optional; omitted values fall back to
+  // today's defaults server-side.
+  //
+  // Options:
+  //   minScore                    — `min_score` (per-genre ribbons rating cap)
+  //   discoverMinScore            — quality threshold for Discover (0 = off)
+  //   discoverExcludedGenres      — string[] of genres to drop from Discover
+  //   discoverMinMatchCount       — 1..4 (require ≥N favorite-genre matches)
+  //   discoverLibraryIds          — number[] (empty = all visible libraries)
+  //   discoverSkipBookmarked      — boolean (exclude bookmarked manga)
+  //   discoverPoolSize            — caps the candidate pool (clamped server-side)
+  //   favoriteGenres              — string[] (manual override; max 4)
+  //   genreRibbonCount            — 1..4 (number of per-genre ribbons)
+  //   recentWindowHours           — 0 = unbounded; else "added in last N hours"
+  getHome: ({
+    minScore,
+    discoverMinScore,
+    discoverExcludedGenres,
+    discoverMinMatchCount,
+    discoverLibraryIds,
+    discoverSkipBookmarked,
+    discoverPoolSize,
+    favoriteGenres,
+    genreRibbonCount,
+    recentWindowHours,
+  } = {}) => {
     const params = new URLSearchParams();
     if (minScore !== undefined && minScore !== null) {
       params.set('min_score', String(minScore));
     }
+    if (discoverMinScore !== undefined && discoverMinScore !== null) {
+      params.set('discover_min_score', String(discoverMinScore));
+    }
+    if (Array.isArray(discoverExcludedGenres) && discoverExcludedGenres.length > 0) {
+      params.set('discover_excluded_genres', discoverExcludedGenres.join(','));
+    }
+    if (discoverMinMatchCount !== undefined && discoverMinMatchCount !== null) {
+      params.set('discover_min_match_count', String(discoverMinMatchCount));
+    }
+    if (Array.isArray(discoverLibraryIds) && discoverLibraryIds.length > 0) {
+      params.set('discover_library_ids', discoverLibraryIds.join(','));
+    }
+    if (discoverSkipBookmarked) {
+      params.set('discover_skip_bookmarked', '1');
+    }
+    if (discoverPoolSize !== undefined && discoverPoolSize !== null) {
+      params.set('discover_limit', String(discoverPoolSize));
+    }
+    if (Array.isArray(favoriteGenres) && favoriteGenres.length > 0) {
+      params.set('favorite_genres', favoriteGenres.join(','));
+    }
+    if (genreRibbonCount !== undefined && genreRibbonCount !== null) {
+      params.set('genre_ribbon_count', String(genreRibbonCount));
+    }
+    if (recentWindowHours !== undefined && recentWindowHours !== null) {
+      params.set('recent_window_hours', String(recentWindowHours));
+    }
     const qs = params.toString();
     return apiFetch(`/api/home${qs ? '?' + qs : ''}`);
   },
+
+  // Per-user preferences, synced server-side via /api/user/preferences.
+  // GET returns every key as a flat object; PUT merges (each key in the body
+  // is upserted; keys absent from the body stay untouched) and returns the
+  // full merged object. Backs the PreferencesContext provider; see
+  // docs/design/homepage-settings-expansion.md.
+  getUserPreferences: () => apiFetch('/api/user/preferences'),
+  putUserPreferences: (patch) =>
+    apiFetch('/api/user/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
 
   // Genres — every distinct genre across visible libraries with a
   // representative top-rated cover per genre. Powers the Browse By Genre page.

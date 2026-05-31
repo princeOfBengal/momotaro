@@ -129,6 +129,16 @@ export class ElectronCapacitorApp {
     });
     this.mainWindowState.manage(this.MainWindow);
 
+    // Disable Chromium's native pinch-to-zoom of the visual viewport. Without
+    // this the page-level pinch zoom on touchscreens intercepts multi-touch
+    // and wide horizontal touch gestures *before* they reach the renderer's
+    // pointer-event handlers, so swipes/pinches in the Reader scale the whole
+    // UI instead of paging/zooming the manga page. `touch-action: none` in
+    // ReaderPaged.css only governs DOM-level touch handling and doesn't stop
+    // the visual-viewport gesture; locking both limits to 1 does.
+    // Phase 1 fix for the touch-gesture parity issue on Linux AppImage.
+    this.MainWindow.webContents.setVisualZoomLevelLimits(1, 1).catch(() => { /* best-effort */ });
+
     if (this.CapacitorFileConfig.backgroundColor) {
       this.MainWindow.setBackgroundColor(this.CapacitorFileConfig.electron.backgroundColor);
     }
@@ -205,6 +215,10 @@ export class ElectronCapacitorApp {
 
     // When the web app is loaded we hide the splashscreen if needed and show the mainwindow.
     this.MainWindow.webContents.on('dom-ready', () => {
+      // Re-apply the pinch-zoom lock on every renderer load (dev chokidar
+      // reload, navigation, etc.) so the Reader's pointer-event gesture
+      // system keeps exclusive control of touch input.
+      this.MainWindow.webContents.setVisualZoomLevelLimits(1, 1).catch(() => { /* best-effort */ });
       if (this.CapacitorFileConfig.electron?.splashScreenEnabled) {
         this.SplashScreen.getSplashWindow().hide();
       }

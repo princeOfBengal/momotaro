@@ -7,7 +7,7 @@ import ReaderControls from '../components/ReaderControls';
 import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
-import { enableImmersive, disableImmersive } from '../api/immersive';
+import { enableImmersive, disableImmersive, isNativeShell } from '../api/immersive';
 import {
   isEncryptionEnabled as offlineIsEncryptionEnabled,
   isUnlocked          as offlineIsUnlocked,
@@ -147,7 +147,11 @@ export default function Reader() {
 
   const [showControls, setShowControls] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // On native shells (Electron AppImage, Android APK) the reader enters
+  // window-level fullscreen via enableImmersive() on mount, so seed the
+  // state accordingly. The HTML Fullscreen API used by browsers doesn't
+  // fire `fullscreenchange` for that path, so we must track it manually.
+  const [isFullscreen, setIsFullscreen] = useState(() => isNativeShell());
   const [animKey, setAnimKey] = useState(0);
   const [animDir, setAnimDir] = useState('next');
   // URL `?page=` wins; otherwise fall back to this device's saved resume
@@ -165,6 +169,14 @@ export default function Reader() {
   const scrollerRef = useRef(null);
   const containerRef = useRef(null);
   const hintSuppressTimer = useRef(null);
+  // Active touch counter — set in window touchstart, cleared in touchend/cancel.
+  // Used by the pointermove auto-show handler to hard-block synthesised mouse
+  // events while a finger is on the screen (event-dispatch order between
+  // touch* and pointermove is implementation-defined, so a timestamp gate
+  // would race; a counter that opens on touchstart can't).
+  const activeTouches      = useRef(0);
+  const lastTouchActivity  = useRef(0);  // ms timestamp — guards a short post-touch tail
+  const isFullscreenRef    = useRef(false);  // mirror of isFullscreen for ref-stable handlers
   const [hintsSuppressed, setHintsSuppressed] = useState(false);
 
   // Derived
@@ -267,6 +279,21 @@ export default function Reader() {
   }, [alwaysFullscreen]);
 
   function toggleFullscreen() {
+    // On native shells the HTML Fullscreen API is a no-op — the BrowserWindow
+    // (Electron) or the Activity (Android) is the source of truth. Route the
+    // toggle through the immersive bridge so the button actually changes the
+    // window/system-bar state, and mirror it into local state since neither
+    // path fires `fullscreenchange`.
+    if (isNativeShell()) {
+      if (isFullscreen) {
+        disableImmersive();
+        setIsFullscreen(false);
+      } else {
+        enableImmersive();
+        setIsFullscreen(true);
+      }
+      return;
+    }
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => {});
     } else {
@@ -471,14 +498,60 @@ export default function Reader() {
     ? 'off'
     : (!hintsInitiallySeen.current ? 'first-run' : (showEdgeHints ? 'persistent' : 'off'));
 
-  // Mouse movement auto-shows controls (desktop only).
-  // Touch/pen interactions must not trigger this — mobile browsers fire
-  // synthetic mousemove compatibility events on every tap, which would
-  // show controls on side taps and cancel out center taps.
-  // Filtering to pointerType === 'mouse' isolates real mouse movement.
+  // Keep the isFullscreen mirror in sync for ref-stable handlers below.
+  useEffect(() => { isFullscreenRef.current = isFullscreen; }, [isFullscreen]);
+
+  // Mouse movement auto-shows controls in windowed mode. In fullscreen the
+  // user expects the reader UI to appear only on a center tap, so the entire
+  // auto-show path is disabled there — swipes, side taps, *and* trackpad/
+  // mouse movement all stay distraction-free until the user taps the centre
+  // explicitly. The "side taps and swipes should never trigger the UI" rule
+  // is enforced two ways at once:
+  //   1) Active-touch counter: window touchstart increments, touchend/cancel
+  //      decrement. While any finger is on the screen, the pointermove
+  //      handler hard-bails. touchstart reliably fires *before* the first
+  //      pointermove of the same gesture, so unlike a timestamp gate this
+  //      can't race with event-dispatch order — long swipes that produce
+  //      many pointermove events between touchmoves still see counter > 0.
+  //   2) Post-touch tail: lastTouchActivity is stamped on every touch event,
+  //      and a 1.0 s window after the last touch keeps the gate closed so
+  //      the trailing synthesised mouse events Chromium fires after a
+  //      touchend can't slip through.
+  // Real mouse users (separate trackpad / external mouse) recover
+  // hover-to-show in windowed mode as soon as touch goes idle.
+  useEffect(() => {
+    function onStart(e) {
+      activeTouches.current += e.changedTouches.length;
+      lastTouchActivity.current = Date.now();
+    }
+    function onEnd(e) {
+      activeTouches.current = Math.max(0, activeTouches.current - e.changedTouches.length);
+      lastTouchActivity.current = Date.now();
+    }
+    function onMove() { lastTouchActivity.current = Date.now(); }
+    window.addEventListener('touchstart',  onStart, { passive: true });
+    window.addEventListener('touchmove',   onMove,  { passive: true });
+    window.addEventListener('touchend',    onEnd,   { passive: true });
+    window.addEventListener('touchcancel', onEnd,   { passive: true });
+    return () => {
+      window.removeEventListener('touchstart',  onStart);
+      window.removeEventListener('touchmove',   onMove);
+      window.removeEventListener('touchend',    onEnd);
+      window.removeEventListener('touchcancel', onEnd);
+    };
+  }, []);
+
   useEffect(() => {
     function onPointerMove(e) {
-      if (e.pointerType === 'mouse') showControlsAndReset();
+      if (e.pointerType !== 'mouse') return;
+      // In fullscreen the user reveals the UI only via the center-tap
+      // gesture. No exceptions — not even a real mouse hover.
+      if (isFullscreenRef.current) return;
+      // Windowed mode: still block while a touch is active, and for a
+      // 1.0 s tail after the last touch event.
+      if (activeTouches.current > 0) return;
+      if (Date.now() - lastTouchActivity.current < 1000) return;
+      showControlsAndReset();
     }
     window.addEventListener('pointermove', onPointerMove);
     return () => window.removeEventListener('pointermove', onPointerMove);

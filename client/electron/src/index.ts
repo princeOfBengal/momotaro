@@ -12,6 +12,24 @@ import { registerNativePlugins, OFFLINE_SCHEME } from './plugins';
 // Graceful handling of unhandled errors.
 unhandled();
 
+// ── Touch-input hygiene (Reader gestures) ───────────────────────────────────
+// Chromium ships two touch behaviors that fight the Reader's custom gesture
+// system on Linux touchscreens:
+//   1) browser-level pinch-to-zoom of the visual viewport — intercepts
+//      two-finger gestures and wide horizontal swipes BEFORE they reach the
+//      renderer, so swipes/pinches scale the whole UI instead of paging or
+//      triggering our JS pinch zoom. `--disable-pinch` is the Chromium switch
+//      that turns this off. (`setVisualZoomLevelLimits(1,1)` in setup.ts only
+//      governs JS-driven visual viewport zoom; the touchscreen gesture path is
+//      separate.)
+//   2) on some Linux configurations Chromium defaults touch-event delivery to
+//      "auto", which can collapse a touchscreen into mouse-only events. The
+//      `touch-events=enabled` switch forces touch events to fire so the
+//      ReaderPaged handler sees real touchstart/move/end events.
+// Both switches MUST be appended before `app.whenReady()` resolves.
+app.commandLine.appendSwitch('disable-pinch');
+app.commandLine.appendSwitch('touch-events', 'enabled');
+
 // Define our menu templates (these are optional)
 const trayMenuTemplate: (MenuItemConstructorOptions | MenuItem)[] = [new MenuItem({ label: 'Quit App', role: 'quit' })];
 const appMenuBarMenuTemplate: (MenuItemConstructorOptions | MenuItem)[] = [

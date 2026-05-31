@@ -305,6 +305,19 @@ function createUserTables(db) {
       token_expires_at INTEGER,
       updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
     );
+
+    -- Per-user, server-synced preferences. Key/value blob keyed by user_id so
+    -- a single account converges on one configuration across every device.
+    -- The value column is JSON-encoded text so booleans, numbers, and arrays
+    -- survive a round trip. Powers Homepage Settings (default sort, discover
+    -- filters, ribbon layout); see docs/design/homepage-settings-expansion.md.
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      key        TEXT    NOT NULL,
+      value      TEXT    NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (user_id, key)
+    ) WITHOUT ROWID;
   `);
 }
 

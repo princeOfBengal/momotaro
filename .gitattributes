@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must always be LF in the working tree, even on Windows where
+# core.autocrlf=true would otherwise convert them to CRLF. Bash chokes on
+# `set -euo pipefail\r` and similar — these get executed inside Linux Docker
+# builders (scripts/deploy-linux-appimage.sh, scripts/docker-build-linux.sh)
+# where CRLF is fatal.
+*.sh text eol=lf
+# Same reasoning for cross-platform tooling that runs under Bash/sh.
+gradlew text eol=lf

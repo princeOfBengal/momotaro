@@ -63,6 +63,8 @@ export default function ReaderControls({
   grayscale,
   brightness,
   prefetchPages,
+  fastChapterOpen,
+  predictNextChapter,
   scaleType,
   pageLayout,
   showSettings,
@@ -81,6 +83,8 @@ export default function ReaderControls({
   onGrayscaleChange,
   onBrightnessChange,
   onPrefetchPagesChange,
+  onFastChapterOpenChange,
+  onPredictNextChapterChange,
   onScaleTypeChange,
   onPageLayoutChange,
   readingOrientation,
@@ -241,6 +245,10 @@ export default function ReaderControls({
               className={`settings-tab ${activeTab === 'paged' ? 'active' : ''}`}
               onClick={() => setActiveTab('paged')}
             >Paged</button>
+            <button
+              className={`settings-tab ${activeTab === 'advanced' ? 'active' : ''}`}
+              onClick={() => setActiveTab('advanced')}
+            >Advanced</button>
           </div>
 
           <div className="settings-tab-content">
@@ -331,12 +339,6 @@ export default function ReaderControls({
                   label="Always Full Screen"
                   value={alwaysFullscreen}
                   onChange={onAlwaysFullscreenChange}
-                />
-                <ToggleSetting
-                  label="Preload upcoming pages"
-                  desc="Fetch the next pages in the background so taps feel instant"
-                  value={prefetchPages}
-                  onChange={onPrefetchPagesChange}
                 />
 
                 <button
@@ -450,6 +452,29 @@ export default function ReaderControls({
                     <option value="double-manga">Double Page (Manga)</option>
                   </select>
                 </div>
+              </>
+            )}
+
+            {activeTab === 'advanced' && (
+              <>
+                <ToggleSetting
+                  label="Preload upcoming pages"
+                  desc="Warm the next few page images of the CURRENT chapter into the browser cache so tapping forward feels instant. Skipped on metered (Save-Data) connections."
+                  value={prefetchPages}
+                  onChange={onPrefetchPagesChange}
+                />
+                <ToggleSetting
+                  label="Fast chapter open"
+                  desc="Open CBZ chapters as soon as the first few pages are extracted; the rest of the archive extracts in the background. Cuts the wait on the first page noticeably for large volumes. Only affects CBZ chapters — folder-based chapters open instantly either way."
+                  value={fastChapterOpen}
+                  onChange={onFastChapterOpenChange}
+                />
+                <ToggleSetting
+                  label="Pre-load next chapter"
+                  desc="Start preparing the next chapter on the server as you near the end of the current one, so navigating to it is near-instant. Combine with Fast chapter open for the biggest improvement. Skipped on metered (Save-Data) connections."
+                  value={predictNextChapter}
+                  onChange={onPredictNextChapterChange}
+                />
               </>
             )}
           </div>

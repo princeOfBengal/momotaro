@@ -1719,12 +1719,35 @@ function clampAnimSpeed(n) {
   return Math.min(2, Math.max(0.5, n));
 }
 
+// Mirrors Reader.jsx — see that file for the rationale. Inherits from the
+// pre-existing `reader_prefetchPages` setting on first read so a user who
+// turned image prefetch off doesn't suddenly start getting background
+// next-chapter pre-extraction requests after this feature ships.
+function resolveInitialPredictNextChapter() {
+  const stored = localStorage.getItem('reader_predictNextChapter');
+  if (stored !== null) return stored !== 'false';
+  const inherited = localStorage.getItem('reader_prefetchPages') !== 'false';
+  try { localStorage.setItem('reader_predictNextChapter', String(inherited)); }
+  catch { /* private browsing — fine */ }
+  return inherited;
+}
+
 function ReadingSection() {
   const [readingMode, setReadingMode]             = useState(() => localStorage.getItem('reader_readingMode') || 'rtl');
   const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
   const [pageAnimation, setPageAnimation]         = useState(resolveInitialPageAnimation);
   const [pageAnimSpeed, setPageAnimSpeed]         = useState(() => clampAnimSpeed(Number(localStorage.getItem('reader_pageAnimSpeed')) || 1));
   const [showEdgeHints, setShowEdgeHints]         = useState(() => localStorage.getItem('reader_edgeHints') === 'true');
+  // Fast CBZ open — see [server/src/scanner/cbzCache.js]. Default off so
+  // existing users see no behaviour change until they opt in.
+  const [fastChapterOpen, setFastChapterOpen]     = useState(() => localStorage.getItem('reader_fastChapterOpen') === 'true');
+  // Predictive next-chapter pre-extraction. Initial value migrates from
+  // `reader_prefetchPages` on first read (see resolveInitialPredictNextChapter
+  // above) so existing users keep today's implicit coupling. When
+  // fastChapterOpen is also on, the prefetch routes through the fast-mode
+  // endpoint so the next chapter opens nearly instantly. See
+  // [client/src/hooks/useReaderPrefetch.js].
+  const [predictNextChapter, setPredictNextChapter] = useState(resolveInitialPredictNextChapter);
   const [gesturesEnabled, setGesturesEnabled]     = useState(() => localStorage.getItem('reader_gestures') !== 'false');
   const [alwaysFullscreen, setAlwaysFullscreen]   = useState(() => localStorage.getItem('reader_alwaysFS') === 'true');
   const [bgColor, setBgColor]                     = useState(() => localStorage.getItem('reader_bgColor') || 'black');
@@ -1739,6 +1762,8 @@ function ReadingSection() {
   useEffect(() => { localStorage.setItem('reader_pageAnimation', pageAnimation); },      [pageAnimation]);
   useEffect(() => { localStorage.setItem('reader_pageAnimSpeed', String(pageAnimSpeed)); }, [pageAnimSpeed]);
   useEffect(() => { localStorage.setItem('reader_edgeHints',    String(showEdgeHints)); }, [showEdgeHints]);
+  useEffect(() => { localStorage.setItem('reader_fastChapterOpen', String(fastChapterOpen)); }, [fastChapterOpen]);
+  useEffect(() => { localStorage.setItem('reader_predictNextChapter', String(predictNextChapter)); }, [predictNextChapter]);
   useEffect(() => { localStorage.setItem('reader_gestures',     gesturesEnabled); },     [gesturesEnabled]);
   useEffect(() => { localStorage.setItem('reader_alwaysFS',     alwaysFullscreen); },    [alwaysFullscreen]);
   useEffect(() => { localStorage.setItem('reader_bgColor',      bgColor); },             [bgColor]);
@@ -1877,12 +1902,6 @@ function ReadingSection() {
             value={alwaysFullscreen}
             onChange={setAlwaysFullscreen}
           />
-          <ToggleRow
-            label="Preload upcoming pages"
-            desc="Fetch the next pages in the background so taps feel instant. Skipped automatically on metered (Save-Data) connections."
-            value={prefetchPages}
-            onChange={setPrefetchPages}
-          />
 
           <div className="rs-divider" />
 
@@ -1968,6 +1987,31 @@ function ReadingSection() {
               <option value="double-manga">Double Page (Manga)</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      {/* Advanced */}
+      <div className="rs-group">
+        <p className="rs-group-title">Advanced</p>
+        <div className="settings-card">
+          <ToggleRow
+            label="Preload upcoming pages"
+            desc="Warm the next few page images of the CURRENT chapter into the browser cache so tapping forward feels instant. Skipped on metered (Save-Data) connections. Does not download images you don't read — it only nudges the browser to fetch the next few in parallel."
+            value={prefetchPages}
+            onChange={setPrefetchPages}
+          />
+          <ToggleRow
+            label="Fast chapter open"
+            desc="Open CBZ chapters as soon as the first few pages are extracted; the rest of the archive extracts in the background. Cuts the wait on the first page noticeably for large volumes. Only affects CBZ chapters — folder-based chapters open instantly either way."
+            value={fastChapterOpen}
+            onChange={setFastChapterOpen}
+          />
+          <ToggleRow
+            label="Pre-load next chapter"
+            desc="Start preparing the next chapter on the server as you near the end of the current one, so navigating to it is near-instant. Combine with Fast chapter open for the biggest improvement. Skipped on metered (Save-Data) connections."
+            value={predictNextChapter}
+            onChange={setPredictNextChapter}
+          />
         </div>
       </div>
     </div>

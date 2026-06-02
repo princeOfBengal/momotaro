@@ -20,6 +20,8 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | `/settings` | `Settings` | App settings + AniList OAuth |
 | `/auth/anilist/callback` | `AnilistCallback` | OAuth redirect handler |
 | `/pairing` | `Pairing` | First-launch pairing wizard for the Android APK — 5 steps: welcome → server URL → device name → PIN entry → done. See [android.md § Pairing wizard](./android.md#pairing-wizard). |
+| `/login` | `Login` | Two-tab Log in / Create account screen, with live `attempts_remaining` and the 24 h lockout countdown driven by structured error bodies from the API client. Reached automatically when the server reports `user_required` from `/api/admin/auth-status`. See [User Accounts & Login](#user-accounts--login). |
+| `/downloads` | `Downloads` | Offline-mode queue + library management — two tabs (*Queue* listing every job from the persistent downloader, *Library* listing every series with at least one downloaded chapter). Capacitor-only surface backed by the offline subsystem in [offline.md](./offline.md). |
 | `*` | — | Anything else `Navigate`s to `/`. |
 
 Every route except `/`, `/library`, and `/manga/:id` is `React.lazy`-loaded. The main bundle is the Home → Library → MangaDetail click-through path; the Reader, Settings, Libraries, EditManga, Genres, ArtGallery, ThirdPartySourcing, and AnilistCallback chunks are fetched on first visit and then cached by the service worker for offline-instant subsequent navigations.
@@ -169,7 +171,7 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - *Default sort order* — picker with A–Z (title) / Recently Updated / Year / Rating (AniList / MyAnimeList). Backed by `localStorage.home_default_sort`; `Library.jsx` reads it on mount.
   - *Discover refresh interval* — picker with Every 6 hours / Every 12 hours / Daily (default) / Weekly / Manual only. Backed by `localStorage.home_discover_refresh_ms` (value in ms, `0` = manual-only). `Home.jsx` reads it when deciding whether to re-seed the Discover shuffle. Also writes `home_discover_last_refresh` on change so lowering the cadence starts a fresh window immediately. A **Reshuffle now** button clears the stamp so Home picks a new seed on the next visit. The same seed (XORed with a per-genre hash) drives the *Top Manga in &lt;Genre&gt;* ribbons, so reshuffling rotates both at once.
   - *Genre ribbon rating threshold* — slider from `0` (any rating) to `10` in `0.5` steps, default `7`. Backed by `localStorage.home_genre_score_threshold`. Sent to `/api/home` as `min_score`; the server filters every per-genre ribbon's candidate pool to titles whose AniList/MAL `score >= threshold`. Titles with no rating are never included regardless of threshold.
-- **Reading Settings tab**: defaults that the reader picks up on next open. Every entry is per-device (`localStorage`) and mirrored by the in-reader settings panel — last write wins. See [reader.md § Page-Turn Animations](./reader.md#page-turn-animations) and [reader.md § Edge Hints](./reader.md#edge-hints) for behavioural detail.
+- **Reading Settings tab**: defaults that the reader picks up on next open. Every entry is per-device (`localStorage`) and mirrored by the in-reader settings panel — last write wins. The tab is organised into four sub-groups: **General**, **Display**, **Paged Mode**, and **Advanced**. The Advanced sub-group has a one-to-one twin in the in-reader settings menu — see [reader.md § ReaderControls — Tabs](./reader.md#readercontrols--tabs). See [reader.md § Page-Turn Animations](./reader.md#page-turn-animations) and [reader.md § Edge Hints](./reader.md#edge-hints) for behavioural detail on the other groups.
   - *Reading Mode* / *Reading Orientation* — `localStorage.reader_readingMode` and `reader_orientation`.
   - *Page Transition* — picker with Off / Slide / Fade / Curl. Backed by `localStorage.reader_pageAnimation` (default `slide`). The legacy boolean `reader_animTrans` is migrated on first read (`true → 'slide'`, `false → 'off'`) and removed.
   - *Animation Speed* — slider from `0.5×` to `2×` in `0.25` steps, default `1×`. Backed by `localStorage.reader_pageAnimSpeed`. Surfaces as the CSS variable `--reader-anim-mult` on `.reader-page` and scales every transition's `animation-duration` via `calc()`. Disabled (and shows a hint) when *Page Transition* is `Off`.
@@ -178,6 +180,10 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
   - *Background Color* / *Grayscale* — `localStorage.reader_bgColor` and `reader_grayscale`.
   - *Scale Type* / *Page Layout* — `localStorage.reader_scaleType` and `reader_pageLayout`.
   - **Reset reader hints** — clears `localStorage.reader_hintsSeen` so the one-time edge-hint pulse fires again on the next chapter open.
+  - **Advanced sub-group** (three settings that affect server-side or background work — grouped so a user wanting to control resource usage can find them together):
+    - *Preload upcoming pages* — `localStorage.reader_prefetchPages` (default on). Gates the in-chapter image warm-up in [useReaderPrefetch.js](../client/src/hooks/useReaderPrefetch.js).
+    - *Fast chapter open* — `localStorage.reader_fastChapterOpen` (default off, opt-in). When on, the reader's `getPagesWithMeta` call sends `?fast=1` so the server returns after Phase 1 (~1–3 s) and continues extracting the rest of the CBZ in the background. See [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast).
+    - *Pre-load next chapter* — `localStorage.reader_predictNextChapter` (default migrated from `reader_prefetchPages` on first read; independent thereafter). Gates the near-end-of-chapter prefetch in `useReaderPrefetch`. When combined with *Fast chapter open*, the prefetch routes through the fast-mode endpoint so navigating to the next chapter lands on a near-instant cache hit.
 - **Database tab**: maintenance operations for the server's database and on-disk cache:
   - *CBZ Cache* — displays the current cache size alongside the configured cap (e.g. `1.4 GB / 20.0 GB`). **Clear Cache** deletes every extracted chapter directory in `CBZ_CACHE_DIR` (pages are re-extracted on next access). Below the current-size row, an expanded block exposes:
     - *Maximum cache size* — numeric input in GB. Saved value is persisted as `cbz_cache_limit_bytes` in the `settings` table and applied live via `cbzCache.setLimitBytes()` — any chapters over the new cap are evicted immediately.
@@ -193,6 +199,36 @@ URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 ### AnilistCallback (`src/pages/AnilistCallback.jsx`)
 
 Landing page for the AniList OAuth redirect. Extracts `?code=` from the URL, POSTs to `POST /api/auth/anilist/exchange`, then redirects to `/settings` on success.
+
+### Login (`src/pages/Login.jsx`)
+
+Two-tab Log in / Create account screen reached when the server's
+`/api/admin/auth-status` reports `user_required`. Surfaces live
+`attempts_remaining` and the 24 h lockout countdown driven by structured
+error bodies returned from `POST /api/users/login` (5-strikes-→-24h
+device lockout). Styled with the pairing-wizard primitives (`pw-*`) plus
+tabs in `Login.css`. See [User Accounts & Login](#user-accounts--login).
+
+### Downloads (`src/pages/Downloads.jsx`)
+
+Top-level downloads-management page mounted at `/downloads` via the lazy
+route in [App.jsx](../client/src/App.jsx). Two tabs:
+
+- **Queue** — every job (queued, running, failed, cancelled, plus
+  `done` within the last day) from the persistent downloader
+  ([client/src/api/downloader.js](../client/src/api/downloader.js)).
+  Rows show progress / failure reason / cancel / retry; the page
+  subscribes via `onDownloaderChange` so state updates push live.
+- **Library** — every series with at least one downloaded chapter,
+  pulled from `listOfflineManga` ([client/src/api/offlineDb.js](../client/src/api/offlineDb.js)).
+  Per-series delete and per-chapter delete go through the downloader's
+  delete helpers so the IndexedDB index, filesystem files, and queue
+  references all stay consistent.
+
+`useConnectivity()` gates "Resume downloads" buttons: with `wifiOnly =
+true`, a queued job only runs while the device is on Wi-Fi, so the page
+also surfaces a "waiting for Wi-Fi" hint on running rows. See
+[offline.md](./offline.md) for the offline subsystem architecture.
 
 ## User Accounts & Login
 
@@ -282,6 +318,68 @@ Windowed grid renderer used by Library when the result set grows large enough th
 ### `ArtGalleryRibbon`
 
 Shared between the Home Art Gallery ribbon and the dedicated `/art-gallery` page. The Home variant auto-scrolls via a pure-CSS keyframe (pauses on hover/focus/touch/off-screen/`prefers-reduced-motion`); the standalone-page variant is rendered statically per series with natural-aspect-ratio tiles.
+
+### `AdminTaskBanner`
+
+Top-of-app banner that surfaces long-running admin tasks the operator
+triggered (typically in another tab or device). Polls
+`GET /api/admin/tasks/list` every 5 s while an admin token is in
+`localStorage` and the tab is visible, then renders a fixed banner when
+any *degrading* task (`vacuum-db`, `clear-cbz-cache`, `reset-thumbnails`)
+is in `running` state. Non-degrading tasks (`regenerate-thumbnails`,
+`optimize-manga:*`, `bulk-optimize-library:*`) are tracked in their own
+per-card UIs and are deliberately not surfaced here. Renders nothing for
+non-admin paired clients. See [api.md § Async admin tasks](./api.md#async-admin-tasks).
+
+### `AccountSection`
+
+The "Account" sub-section inside Settings, rendered by
+[components/AccountSection.jsx](../client/src/components/AccountSection.jsx).
+Shows the currently logged-in user, **Log out**, a *Change password*
+form (current / new / confirm with an inline status line — `PUT
+/api/users/me/password` revokes every other session and the helper
+persists the fresh token returned for the calling device), *Export your
+data* (two CSV buttons: reading lists, reading history), then the live
+reading-history timeline + *Clear history*. Both CSV downloads route
+through the `_userDownload` helper (fetch + blob + synthetic `<a
+download>`) since `requireUser` is header-only and a `window.location.href`
+navigation would 401. In single-user / pre-accounts mode (no logged-in
+user) the section collapses to a "Log in or create an account" link.
+
+### `UserManagementBlock`
+
+Admin "User accounts" panel rendered inside Client Management
+([components/UserManagementBlock.jsx](../client/src/components/UserManagementBlock.jsx)).
+Drives the multi-user / allow-registration toggles, create-account form,
+roster with per-user actions (Export / Reset password / Force sign-out /
+Disable / Delete), all-users reading-history CSV download, and the
+login-lockouts list + clear button. All operations flow through the
+admin user-management endpoints documented in
+[api.md § Admin user management](./api.md#admin-user-management-admin-only).
+
+### `RibbonOrderEditor`
+
+Edits the Home page's ribbon order + visibility — used by Settings →
+Homepage Settings → *Layout*. Value shape is
+`[{ id: string, visible: boolean }, …]`. Each row carries a visibility
+toggle and ↑ / ↓ buttons; drag-and-drop is deliberately omitted in v1 to
+keep the bundle lean (the ↑ / ↓ buttons are also keyboard- and
+screen-reader-friendly by default). Unknown / missing ribbon ids are
+reconciled at render time so adding a new ribbon in the future doesn't
+strand users whose persisted order predates it: any id from the
+canonical set that's missing from `value` is appended in its default
+position. Persists to `home_ribbon_order` in [`PreferencesContext`](#context).
+
+### `GenreChipPicker`
+
+Multi-select chip picker for genre names, used by Settings → Homepage
+Settings for both the Discover *Excluded genres* blacklist and the
+Manual *Favorite genres* picker (same UI, different role — controlled by
+the `mode` prop). Fetches once from `GET /api/genres`. When `max` is
+set, selecting beyond the limit unselects the oldest entry so the cap
+holds. `mode = 'exclude'` toggles a CSS hook so excluded chips render
+struck-through vs filled. Persists to `home_discover_excluded_genres` /
+`home_favorite_genres_manual` in [`PreferencesContext`](#context).
 
 ### `AppSidebar`
 
@@ -382,7 +480,20 @@ api.exportSystemLogs()         // GET admin/logs/export → triggers .txt downlo
 
 ## Context
 
-`SidebarContext` (`src/context/SidebarContext.jsx`) — boolean `sidebarOpen` + `setSidebarOpen` shared between `Library` page and `Sidebar` component.
+Five React contexts wrap the app tree (set up in [client/src/App.jsx](../client/src/App.jsx)).
+
+- **`SidebarContext`** ([src/context/SidebarContext.jsx](../client/src/context/SidebarContext.jsx)) — boolean `sidebarOpen` + `setSidebarOpen` shared between `Library` page and `Sidebar` component.
+- **`UserContext`** ([src/context/UserContext.jsx](../client/src/context/UserContext.jsx)) — holds the logged-in user, hydrates from `GET /api/users/me` on mount, exposes `login` / `register` / `logout` / `useUser()`. Identity only; independent of connectivity and pairing.
+- **`PreferencesContext`** ([src/context/PreferencesContext.jsx](../client/src/context/PreferencesContext.jsx)) — per-user, server-synced UI preferences. Fetches once via `GET /api/user/preferences` on mount, holds the prefs map in memory, and exposes `useUserPref(key, default)` / `setPref(key, value)`. Writes are **optimistic locally + debounced 300 ms PUT** to `/api/user/preferences`; on failure the patch is requeued for the next flush. Re-fetches on `visibilitychange` so a change made on Device A appears on Device B the next time B's tab regains focus. Real-time push is out of scope. On first mount, a one-shot legacy migration copies any of the four pre-existing `home_*` `localStorage` keys to the server and removes them locally — gated by `localStorage.home_prefs_migrated = '1'`. See [api.md § User Preferences](./api.md#user-preferences) for the wire format.
+- **`ConnectivityContext`** ([src/context/ConnectivityContext.jsx](../client/src/context/ConnectivityContext.jsx)) — source of truth for "are we online and is the server reachable". Combines `navigator.onLine`, `@capacitor/network` (for the Android WebView, whose `online`/`offline` events fire inconsistently), and a periodic `/api/health` ping (30 s while online, 7.5 s while offline). Exposes `mode` (`'online' | 'offline-auto' | 'offline-forced'`), `online`, `forced` / `forceOffline(bool)`, `networkType` (`wifi` / `cellular` / `ethernet` / `unknown` / `none`), and `wifiOnly` (persisted setting that gates the downloader on metered networks). The forced flag persists across launches via `localStorage[momotaro_force_offline]`; `wifiOnly` via `localStorage[momotaro_wifi_only_downloads]`. Drives the offline routing in [client/src/api/client.js](../client/src/api/client.js) and the [Downloads page](#downloads-srcpagesdownloadsjsx).
+
+## Hooks
+
+- **`useReaderPrefetch`** ([src/hooks/useReaderPrefetch.js](../client/src/hooks/useReaderPrefetch.js)) — proactively warm up the next chapter's page bytes while the reader is on the current chapter.
+- **`useGridColumnCount`** ([src/hooks/useGridColumnCount.js](../client/src/hooks/useGridColumnCount.js)) — observes a container's actual width through `ResizeObserver` and reports the live column count. Used by `VirtualizedMangaGrid` to map the visible viewport onto a slice of the manga array.
+- **`useScrollPosition`** ([src/hooks/useScrollPosition.js](../client/src/hooks/useScrollPosition.js)) — windowed-grid scroll bookkeeping for `VirtualizedMangaGrid`.
+- **`useAppUpdateCheck`** ([src/hooks/useAppUpdateCheck.js](../client/src/hooks/useAppUpdateCheck.js)) — polls `GET /api/app/version` and reports whether the server's reported version differs from the bundled [`APP_VERSION`](../client/src/version.js). Gated on `Capacitor.isNativePlatform()` so the PWA never sees the banner. Powers [`UpdateBanner`](#updatebanner). See [android.md § Update mechanism](./android.md#end-to-end-update-flow).
+- **`useAdminTask`** ([src/hooks/useAdminTask.js](../client/src/hooks/useAdminTask.js)) — drives the UI of a long-running admin action (vacuum, cache wipe, reset thumbnails, regenerate). Kicks off the `POST`, adopts an already-running task on mount or on `409`, polls the status companion endpoint (`GET /api/admin/<task>/status`) at 1.5 s while running, exposes an elapsed-time counter, and reset()s after the user dismisses the badge. Polling pauses while the tab is hidden and refreshes immediately on visibility return. In-flight responses from earlier requests are discarded on race. Pairs with the [Async admin tasks contract](./api.md#async-admin-tasks).
 
 ## PWA
 

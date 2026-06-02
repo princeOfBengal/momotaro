@@ -70,11 +70,13 @@ function findLocalMetadata(mangaPath) {
 
 /**
  * Map a raw parsed JSON object onto our internal metadata shape.
- * Handles the HentaiNexus format and common variants.
+ * Handles the HentaiNexus format, common variants, and the
+ * scraper format keyed by `primary_title` (AniList/MangaUpdates aggregator).
  * Returns null if the object yields nothing useful.
  */
 function normalizeLocalMeta(raw) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  if (str(raw.primary_title)) return normalizeScraperMeta(raw);
 
   // Title — try several common key names
   const title =
@@ -132,6 +134,58 @@ function normalizeLocalMeta(raw) {
     str(raw.circle) ||
     str(raw.Circle) ||
     null;
+
+  if (!title && genres.length === 0 && !description) return null;
+
+  return { title, description, genres, year, score, author };
+}
+
+/**
+ * Scraper-style sidecar (e.g. `primary_title`, `authors[]`, `anilist_score`,
+ * `start_date.year`, `sources.anilist`). Genres are taken from the explicit
+ * `genres` field — `tags`/`categories` in this format are content descriptors
+ * we don't want to surface as primary genres.
+ */
+function normalizeScraperMeta(raw) {
+  const title = str(raw.primary_title) || null;
+  const description = str(raw.description) || null;
+
+  let genres = [];
+  if (Array.isArray(raw.genres) && raw.genres.length > 0) {
+    genres = raw.genres
+      .map(t => (typeof t === 'string' ? t.trim() : String(t)))
+      .filter(Boolean);
+  }
+
+  let year = null;
+  const sdYear = raw.start_date && raw.start_date.year;
+  if (typeof sdYear === 'number' && sdYear >= 1900 && sdYear <= 2100) {
+    year = sdYear;
+  } else if (raw.year != null) {
+    const n = parseInt(String(raw.year).slice(0, 4), 10);
+    if (n >= 1900 && n <= 2100) year = n;
+  }
+
+  // Score: anilist_score is 0–100; the *_rating fields look like 0–10.
+  let score = null;
+  const anilistScore = parseFloat(raw.anilist_score);
+  if (!isNaN(anilistScore) && anilistScore > 0) {
+    score = Math.min(10, anilistScore / 10);
+  } else {
+    for (const key of ['mangaupdates_bayesian_rating', 'mangaupdates_rating', 'animeplanet_rating']) {
+      const v = parseFloat(raw[key]);
+      if (!isNaN(v) && v > 0) {
+        score = v > 10 ? Math.min(10, v / 10) : Math.min(10, v);
+        break;
+      }
+    }
+  }
+
+  let author = null;
+  if (Array.isArray(raw.authors) && raw.authors.length > 0) {
+    const names = raw.authors.map(a => str(a)).filter(Boolean);
+    if (names.length > 0) author = names.join(', ');
+  }
 
   if (!title && genres.length === 0 && !description) return null;
 

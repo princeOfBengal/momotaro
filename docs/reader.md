@@ -34,7 +34,29 @@ The reader is a fullscreen page viewer with three reading modes and rich gesture
 
 ### Double-Manga Spread Detection
 
-`mangaSpreads` (computed in `Reader.jsx`) builds an array of spread groups. A page is considered **wide** when `page.is_wide === 1` — set by the API whenever the page is landscape (`width > height`), since such pages typically represent a spread. Wide pages and the first page always render solo. Normal pages are paired greedily.
+`mangaSpreads` (computed in `Reader.jsx`) builds an array of spread groups. A page is considered **wide** when `page.is_wide === true` — set by the API whenever the page is landscape (`width > height`), since such pages typically represent a spread. Wide pages and the first page always render solo. Normal pages are paired greedily.
+
+**Defensive default for unknown dimensions.** Pages with `is_wide === null` (dimensions not yet known — happens transiently for CBZ chapters under fast-mode extraction when the Phase 1 256 KB header sniff fails for some pages) render **solo**. The pair-with-next check requires both pages to be **explicitly known not-wide** (`is_wide === false`). Rationale: rendering an unknown page solo briefly looks like one tile alongside another, which is suboptimal but never *wrong*. Rendering an unknown page paired with its neighbour can crush a wide spread into half-screen — visibly broken. Defaulting to solo eliminates the broken case entirely; the layout self-corrects within seconds as dims arrive.
+
+**How dims arrive after a fast-mode chapter open** (four independent paths, layered for resilience):
+
+1. **Phase 1 dim probe** — sharp header sniff per entry during chapter open. Most reliable for standard image formats; fast (~5–15 ms per entry).
+2. **Phase 2 server-side re-probe** — after each background extract, `sharp.metadata()` runs on the on-disk file and the dim is written via `UPDATE … WHERE … AND (width IS NULL OR height IS NULL)`. Reliable where the 256 KB sniff was not, since it reads the full file.
+3. **Cache-hit heal pass** — on subsequent chapter opens, any row with null dims triggers a `backfillDimsFromDisk` over the existing extracted files. Catches anything (1) and (2) missed.
+4. **Client onLoad probe** — when an `<img>` finishes decoding, the reader reads `naturalWidth`/`naturalHeight` and reports them via `POST /api/pages/dims`. The browser's native decoder is the final source of truth — catches any format `sharp` couldn't read. Implemented in `ReaderPaged.jsx`, `ReaderScroll.jsx`, and the `new Image()` instances in `useReaderPrefetch.js`. See [Backup client-side dim probe](#backup-client-side-dim-probe) below.
+
+The reader updates its local `pages` state when dims are learned. `mangaSpreads` recomputes via its `useMemo` deps; `currentPage` re-anchors **by page index** (not by spread index) so a dim update never jumps the user to a different image. Most corrections happen for pages the prefetcher loaded a few pages ahead of where the user is reading, so the visible layout shift is rare in practice.
+
+### Backup client-side dim probe
+
+When an `<img>` finishes decoding in the reader, `e.target.naturalWidth` / `naturalHeight` are authoritative. The Reader registers an `onPageDimsLearned` callback that:
+
+1. Patches local `pages` state via a `setPages` updater that only mutates rows where `is_wide` is currently `null` (idempotent — re-renders that fire the same onLoad against a now-known row no-op).
+2. Calls `api.reportPageDimensions(pageId, width, height)`, a buffered helper that dedupes by `page_id` (`Map`-keyed), batches up to 16 entries, and flushes after 800 ms of idle to `POST /api/pages/dims`. The server's UPDATE filter `AND (width IS NULL OR height IS NULL)` guarantees client reports never overwrite a server-probed value.
+
+Coverage: every image rendered in `ReaderPaged.jsx` (1 or 2 displayed) and `ReaderScroll.jsx` (every visible page in scroll mode), plus every `new Image()` instance the prefetch hook warms. The prefetched path is especially valuable — it runs 1–5 pages ahead of where the user is reading, so dim corrections typically arrive **before** the user navigates to the affected page (invisible layout fix).
+
+Offline behaviour: the local pages-state patch still applies (in-session layout correct). The `POST /api/pages/dims` is buffered + fire-and-forget; offline failures are caught and swallowed, so the buffer clears on the attempt and the local state remains correct.
 
 ## Scale Types (Paged Mode)
 
@@ -69,8 +91,13 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_pageLayout` | `single` |
 | `reader_orientation` | `ltr` |
 | `reader_prefetchPages` | `true` (any value other than the literal string `false` is treated as on — see [Page Prefetch](#page-prefetch)) |
+| `reader_fastChapterOpen` | `false` (opt-in; the `?fast=1` flag for `/api/chapters/:id/pages` — see [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast)) |
+| `reader_predictNextChapter` | `true` for users who had `reader_prefetchPages` on (preserves today's implicit behaviour), `false` for users who had it off. One-time migration via `resolveInitialPredictNextChapter`; settings independent thereafter. |
 
-**Legacy migration**: the previous boolean key `reader_animTrans` is translated on first read (`true` → `'slide'`, `false` → `'off'`) and then removed from `localStorage`. New installs default to `'slide'`.
+**Legacy migrations**:
+
+- `reader_animTrans` (boolean) → `reader_pageAnimation` (`'slide'` / `'off'`) on first read, then removed.
+- `reader_predictNextChapter` initial value inherits from `reader_prefetchPages` on first read (no-set scenario), then persists independently. Existing users who had image prefetch off don't suddenly start getting background next-chapter pre-extraction requests after upgrade.
 
 ## Page Prefetch
 
@@ -90,7 +117,12 @@ Currently-displayed pages (`currentPage`, `page2Index`) are excluded from target
 
 **De-duplication.** A `Set<string>` of issued URLs lives in a hook-scoped ref. Each loop skips URLs already seen, so rapid forward/backward paging never re-issues an in-flight `new Image()` for the same page. The set is reset when `chapterId` changes and trimmed to the most recent ~200 entries to bound memory.
 
-**Next-chapter warm-up.** When `currentPage >= pages.length - 3`, the hook fetches `api.getPages(nextChapterId)` once per chapter transition (also gated by a ref-set) and prefetches the first two pages of the result. This populates the SW's `chapter-pages-meta` cache (CacheFirst, 30-day TTL) at the same time, so the cold-start cost of opening the next chapter is paid in the background rather than on the user's tap.
+**Next-chapter warm-up.** When `currentPage >= pages.length - 3`, the hook calls `api.getPages(nextChapterId)` (or `api.getPagesWithMeta(nextChapterId, { fast: true })` when both `predictNextChapter` and `fastChapterOpen` are on) once per chapter transition (gated by a ref-set), then warms the first two pages of the result. This populates the SW's `chapter-pages-meta` cache (CacheFirst, 30-day TTL) at the same time, so the cold-start cost of opening the next chapter is paid in the background rather than on the user's tap.
+
+Two independent settings govern next-chapter prefetch:
+
+- **`reader_predictNextChapter`** (default inherits from `reader_prefetchPages` on first read; independent thereafter) gates the next-chapter prefetch entirely. Off → no `getPages(next.id)` fires near end-of-chapter.
+- **`reader_fastChapterOpen`** (default off — opt-in) decides which endpoint flavour the prefetch hits. When both flags are on, the prefetch returns after server-side Phase 1 (~1–3 s) instead of holding the connection for a full extract. Phase 2 continues in the background, so user navigation lands on a near-instant cache hit. See [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast).
 
 **Skipped when:**
 
@@ -137,7 +169,18 @@ A `reader-brightness-overlay` div (`position: fixed; inset: 0; background: #000;
 
 The `brightness` state is initialised from `localStorage` (`reader_brightness`, default 100) and updated via the slider in the **Display** tab of the settings panel.
 
-## ReaderControls — General Tab
+## ReaderControls — Tabs
+
+The in-reader settings panel has four tabs that mirror the layout of Settings → Reading Settings on the main Settings page:
+
+| Tab | Contents |
+| --- | --- |
+| **General** | Reading Mode, Reading Orientation, Page Transition, Animation Speed, Show edge hints, Gestures, Always Full Screen, plus the per-page actions (Make Current Image Thumbnail / Add to Art Gallery / Download Current Page) |
+| **Display** | Background Color, Grayscale, Brightness |
+| **Paged** | Scale Type, Page Layout (Single / Double / Double Page (Manga)) |
+| **Advanced** | **Preload upcoming pages** (`reader_prefetchPages`), **Fast chapter open** (`reader_fastChapterOpen`), **Pre-load next chapter** (`reader_predictNextChapter`). Three settings that affect server-side or background work — grouped together so a user wanting to control resource usage can find them in one place. Each toggle in the in-reader Advanced tab is wired to the same `localStorage` key as its twin in Settings → Reading Settings → Advanced, so changes from either surface propagate. |
+
+### General Tab
 
 The **General** tab of the settings panel contains a **Make Current Image Thumbnail** button. Clicking it calls `POST /api/manga/:id/set-thumbnail` with the current page's `page_id`. The button cycles through four states:
 

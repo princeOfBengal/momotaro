@@ -592,6 +592,18 @@ async function getHome() {
 // fall through to `unsupported` (see api/client.js routing) and throw an
 // OfflineUnavailableError on call.
 
+// Wrap getPages to match the server's `/api/chapters/:id/pages` envelope
+// when the Reader asks for the fast-open variant. Offline chapters are
+// served from individual page files on the local filesystem (no CBZ
+// extraction), so `extracting` is always false and `total_pages` is the
+// array length. Reader.jsx's downstream logic only branches on
+// `extracting`, so this keeps the fast-open code path correct offline
+// without dragging the CBZ machinery into the offline subsystem.
+async function getPagesWithMeta(chapterId /* , opts */) {
+  const pages = await getPages(chapterId);
+  return { data: pages, extracting: false, total_pages: pages.length };
+}
+
 export const offlineApi = {
   // Read paths that work offline.
   getLibrary,
@@ -599,6 +611,7 @@ export const offlineApi = {
   getChapters,
   getChapter,
   getPages,
+  getPagesWithMeta,
   getProgress,
   getHome,
 

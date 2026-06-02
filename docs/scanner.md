@@ -288,29 +288,114 @@ Folding the CBZ's floor-seconds mtime into the directory name is the staleness g
 
 Extracted files are renamed to `NNNN.<ext>` (zero-padded count of image entries) so directory listings natural-sort into exact page order regardless of the archive's internal naming. The original basename is preserved separately on the `pages.filename` column for display.
 
-**Chapter-open flow** (`GET /api/chapters/:id/pages` in [server/src/routes/pages.js](../server/src/routes/pages.js)):
+### Extraction modes
 
-1. `cbzCache.ensureChapterExtracted(chapterId, cbzPath)` — cache hit returns the existing directory; cache miss extracts every image entry in one pass, deduped via an `inFlight` map so parallel requests share a single extraction.
-2. On a fresh extraction (or when existing DB rows don't match the directory contents), `pages` rows for the chapter are rebuilt: `DELETE FROM pages WHERE chapter_id = ?` followed by inserts in natural-sort order, with `pages.path` set to the cache filename and page dimensions filled in from `sharp.metadata()` on the extracted files.
-3. The response goes back to the client with correctly-ordered pages and real dimensions (which is what the Double Page reader mode needs for wide-spread detection).
+`ensureChapterExtracted(chapterId, cbzPath, opts)` accepts a `mode` flag with two values:
 
-**Page-serve flow** (`GET /api/pages/:id/image`):
+| Mode | When | What happens |
+|---|---|---|
+| `'full'` (default) | Reader without Fast chapter open opted in; every thumbnail / cover / metadata / `getCbzPageFile` caller | Single-shot decompress of every image entry, write `.ready`, resolve. Matches pre-feature behaviour. |
+| `'fast'` | Reader with Fast chapter open opted in (`?fast=1` on `/api/chapters/:id/pages`) | Two-phase extract — see [Fast mode (first-page-fast)](#fast-mode-first-page-fast) below. |
+
+A `full`-mode caller arriving while a `fast` Phase 2 is still running waits for Phase 2 to complete before resolving, so thumbnail/cover generation always sees a fully-extracted directory.
+
+### Fast mode (first-page-fast)
+
+The fast path returns to the client after only a handful of pages are on disk; the rest extract in the background. Two phases:
+
+**Phase 1** (blocks the API response):
+
+1. `planChapterPages(cbzPath)` reads the central directory and computes deterministic per-page output filenames (`0001.jpg`, `0002.jpg`, …) without writing any image bytes.
+2. `probeChapterDimensions` streams up to `CBZ_DIM_PROBE_BUFFER_BYTES` per entry through `sharp.metadata()` to learn width/height. Cheap header sniff — most image formats land their dimensions in the first few KB. Runs at `CBZ_DIM_PROBE_CONCURRENCY` workers in parallel.
+3. Extract pages `[0..CBZ_FAST_PREFIX-1]` to disk (sequential, awaited). An optional `resumePage` hint extends the prefix to cover a small window around the user's resume position.
+4. Phase 1 resolves with `{ dir, plannedPages, freshlyExtracted: true, extracting: true }`. The `/api/chapters/:id/pages` route then UPSERTs the page rows with Phase 1's probed dims and returns the response.
+
+**Phase 2** (background, never blocks the response):
+
+- Bounded by `CBZ_PHASE2_CONCURRENCY` slots across the whole library — a binge-clicker can't spawn unbounded background extracts.
+- Extracts every entry not yet on disk, in strict ascending page-index order (with priority-hint reordering — see below).
+- After each successful page extract, fires an `onPageExtracted(pageIndex, absPath)` callback that the route uses to backfill any dims Phase 1's header sniff missed. Read via `sharp.metadata()` on the on-disk file (reliable where the 256 KB sniff was not). UPDATEs are batched and run only against rows whose current `width`/`height` are still NULL, so a good Phase 1 dim is never clobbered.
+- Periodically re-stats the source CBZ (`CBZ_PHASE2_RESTAT_INTERVAL` pages) to detect rename / rewrite / delete mid-flight. A mismatched mtime + size aborts cleanly via `ARCHIVE_REMOVED` — the partial directory is removed and pageWaiters reject with `410 Gone`.
+- `.ready` is written when the last entry has been renamed into place.
+
+**Per-page waiters**: while Phase 2 is in flight, individual `/api/pages/:id/image` requests for pages not yet extracted block on `waitForPageFile(chapterDir, cacheFilename, { timeoutMs })`. The wait resolves when the rename-into-place succeeds for that specific filename; rejects on cancellation (`CHAPTER_REMOVED` → HTTP 410), archive removal, or timeout (`PAGE_WAIT_TIMEOUT` → HTTP 503 + `Retry-After: 2`). Capped at 32 waiters per chapter so a key-mashing user can't pin arbitrary HTTP slots.
+
+**Priority hints**: `POST /api/chapters/:id/prioritize-pages` (called from the reader on scrubber/jump) moves the named page indices to the front of the Phase 2 work queue. Ensures that a user who scrubs ahead doesn't end up waiting on Phase 2 to reach their target in strict ascending order. No-op when there's no active fast extraction or when the chapter row has been removed.
+
+**Page IDs are now stable across re-extractions.** Both full and fast modes UPSERT `pages` rows by `(chapter_id, page_index)` rather than the pre-feature `DELETE FROM pages` + INSERT pattern. A cache eviction followed by a re-extract preserves every row's `pages.id`, so art-gallery entries and any client-cached page-id references survive intact.
+
+### Tunables
+
+Read from environment variables via [server/src/config.js](../server/src/config.js) (defaults in parentheses):
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `CBZ_FAST_PREFIX` | 6 | Pages extracted synchronously in Phase 1. Default chosen so a paged reader's first spread + prefetch lookahead are all on disk by the time Phase 1 returns. |
+| `CBZ_DIM_PROBE_CONCURRENCY` | 6 | Parallel header-probe workers in Phase 1. |
+| `CBZ_DIM_PROBE_BUFFER_BYTES` | 262144 (256 KB) | Per-entry cap when sniffing image headers; sharp stops as soon as it has dims. |
+| `CBZ_PHASE2_CONCURRENCY` | 2 | Global cap on concurrent Phase 2 extractions across all chapters. |
+| `CBZ_PAGE_WAIT_TIMEOUT_MS` | 30000 | Ceiling on `waitForPageFile`. |
+| `CBZ_PHASE2_RESTAT_INTERVAL` | 8 | How often Phase 2 re-stats the source CBZ to catch rename / rewrite / delete. |
+
+### Chapter-open flow
+
+`GET /api/chapters/:id/pages` in [server/src/routes/pages.js](../server/src/routes/pages.js):
+
+1. Pick mode from `?fast=1`. Default is `full`.
+2. `cbzCache.ensureChapterExtracted(chapterId, cbzPath, { mode, resumePage, onPageExtracted })`. Concurrent calls for the same chapter share state via the `chapterStates` Map.
+3. On a fresh extraction, UPSERT `pages` rows from `plannedPages` keyed on `(chapter_id, page_index)`. Stable IDs.
+4. Heal pass: detect path mismatch (rows point at a stale filename scheme) OR any null-dim rows; in either case re-read sharp on the extracted file via `backfillDimsFromDisk`. The null-dim heal is what catches Phase 1 probe failures — without it, a dim that the 256 KB sniff missed would stay NULL until the next chapter re-open. With it, the client's late re-fetch loop picks up the corrected dim and Double Page (Manga) layout self-corrects.
+5. Respond with `{ data: pages[], extracting, total_pages }`. The client uses `extracting` to schedule a re-fetch a few seconds later.
+
+### Page-serve flow
+
+`GET /api/pages/:id/image`:
 
 1. Lookup `pages.path` + chapter meta.
-2. `cbzCache.ensureChapterExtracted(...)` — if the chapter was LRU-evicted since it was opened, re-extract. Extraction is deterministic from archive bytes, so the filenames produced match what `pages.path` already stores — no row rebuild needed on the serve path.
-3. `res.sendFile(<dir>/<pages.path>)`.
+2. `cbzCache.ensureChapterExtracted(...)` (mode inherited from `?fast=1`) — if the chapter was LRU-evicted since it was opened, re-extract. Extraction is deterministic from archive bytes, so the filenames produced match what `pages.path` already stores — no row rebuild needed on the serve path.
+3. If the requested file is already on disk, `res.sendFile(<dir>/<pages.path>)`.
+4. Otherwise wait on `waitForPageFile`. Either resolve and `sendFile`, or map errors to 410 Gone (chapter removed) / 503 Retry-After (timeout).
 
-**Size cap:** runtime-configurable. Defaults to 20 GB (`DEFAULT_CACHE_LIMIT_BYTES = 20 × 1024³`) and is overridden at startup from the `cbz_cache_limit_bytes` row in the `settings` table if present. `setLimitBytes(n)` changes the cap live from the admin API — any chapters over the new cap are evicted immediately. Enforced on every successful extraction.
+### Size cap and eviction
 
-**Eviction:** whole-chapter, auto-clear. When a new extraction pushes the global total over the cap, every cached `<chapterId>_<mtime>` directory is `rm -rf`'d in one pass — *except* the chapter that triggered the overflow, which is kept on disk so the caller that drove the addition (a reader opening a chapter, the regenerate-thumbnails loop, the metadata cover picker) still gets a working file and forward progress is preserved. Evictions driven by `setLimitBytes()` (user lowered the cap from Settings) and the rebuilt index in `init()` skip the protection and wipe everything. Evicting at page granularity would leave partially-populated chapter directories behind, forcing re-extractions mid-read; per-chapter eviction keeps the invariant that a directory is either fully present or entirely absent.
+**Size cap:** runtime-configurable. Defaults to 20 GB (`DEFAULT_CACHE_LIMIT_BYTES = 20 × 1024³`) and is overridden at startup from the `cbz_cache_limit_bytes` row in the `settings` table if present. `setLimitBytes(n)` changes the cap live from the admin API — any chapters over the new cap are evicted immediately.
+
+**Eviction is LRU per-chapter** (insertion order of the in-memory `index` Map). When `totalBytes > cap`:
+
+- Iterate `index` from oldest to newest.
+- Skip the optional `protectedDir` (the chapter that just triggered the overflow — the caller still needs it).
+- Skip every directory in `activeExtractionDirs()` — chapters whose Phase 1 or Phase 2 is still running. Wiping an in-progress extraction would corrupt the caller's view of the cache.
+- Otherwise `rm -rf` the directory and remove it from the index, until total drops below cap.
+
+Evicting at page granularity would leave partially-populated chapter directories behind, forcing re-extractions mid-read. Per-chapter eviction keeps the invariant that a directory is either fully present or entirely absent.
 
 **Crash-safety:** each image file is written to `<target>.tmp` and renamed into place on `finish`. The `.ready` marker is the final step of a successful extraction — directories missing it on startup are assumed to be partial extractions from a crashed run and are deleted.
 
-**Persistence across restarts:** `init(limitBytes?)` walks `CBZ_CACHE_DIR`, validates each subdirectory's `.ready` marker, and rebuilds the in-memory index from the files that remain. Warm cache survives a restart. [server/src/index.js](../server/src/index.js) reads the saved `cbz_cache_limit_bytes` row before calling `init()` so the rebuilt index is validated against the user's configured cap, not the 20 GB default. An immediate eviction pass runs if the rebuilt total exceeds the cap (e.g. the user lowered the limit since the last boot).
+**Persistence across restarts:** `init(limitBytes?)` walks `CBZ_CACHE_DIR`, validates each subdirectory's `.ready` marker, and rebuilds the in-memory index from the files that remain. Warm cache survives a restart. [server/src/index.js](../server/src/index.js) reads the saved `cbz_cache_limit_bytes` row before calling `init()` so the rebuilt index is validated against the user's configured cap, not the 20 GB default. An immediate eviction pass runs if the rebuilt total exceeds the cap.
 
-**Cover generation paths** — `POST /api/admin/regenerate-thumbnails` and `POST /api/manga/:id/set-thumbnail` for CBZ pages resolve through `cbzCache.getCbzPageFile(chapterId, cbzPath, pageIndex)`, which extracts the chapter on demand and returns the absolute path of the Nth file in natural-sort order. Scanner-time thumbnail generation still uses the streaming fast path (`openCbzEntryStream`) so the initial walk of a large library doesn't explode into gigabytes of extracted covers.
+### Cancellation and orphan audit
 
-Admin endpoints `GET /api/admin/cbz-cache-size`, `POST /api/admin/clear-cbz-cache`, `GET /api/admin/cbz-cache-settings`, and `PUT /api/admin/cbz-cache-settings` expose the current size and configured cap, a manual wipe, and the size + auto-clear-schedule settings. See [api.md § Admin / Database Management](./api.md#admin--database-management).
+CBZ cache state must survive deletions and renames cleanly — a manga or chapter removed mid-read shouldn't leave a hung extraction or an orphan directory.
+
+**`cancelChapter(chapterId, reason)`** — wired into every chapter-deletion path:
+
+- [`removeManga`](../server/src/scanner/libraryScanner.js) (called by `scanLibrary` cleanup and `scanMangaDirectory`).
+- Chapter-pruning pass inside [`scanMangaDirectory`](../server/src/scanner/libraryScanner.js) — collects the type-CBZ chapter IDs about to be deleted and calls `cancelChapters` before the `DELETE`.
+- `DELETE /api/manga/:id` — collects the manga's CBZ chapter IDs before the CASCADE.
+- `DELETE /api/libraries/:id` — joins through manga to collect every CBZ chapter ID in the library.
+
+Each cancellation aborts the chapter's `AbortController`, rejects every open page waiter with `CHAPTER_REMOVED` (mapped to HTTP 410 by the page-image route), removes the cache directory, and drops the state slot. Calls against a chapter with no active extraction are no-ops.
+
+**`auditOrphans(db)`** — closes the watcher's depth-0 / missing-`unlinkDir` blind spot. Walks `CBZ_CACHE_DIR`, parses `<chapterId>` from each subdirectory's name, drops any dir whose chapter ID is no longer present in the `chapters` table. Defensive: never touches a directory that's currently in `chapterStates` (an active extraction) even if the chapter row appears missing — concurrent rename + new-id resolution would otherwise tear an in-flight extraction. Runs:
+
+- Once at end of `init()` (boot-time).
+- Once at the end of every `scanLibrary` run, after the manga-level pruning pass.
+
+This catches the case where a manga folder is removed while the server is down (or while it's running but the watcher missed it).
+
+**Cover generation paths** — `POST /api/admin/regenerate-thumbnails` and `POST /api/manga/:id/set-thumbnail` for CBZ pages resolve through `cbzCache.getCbzPageFile(chapterId, cbzPath, pageIndex)`, which always uses `mode: 'full'` so the caller sees a complete directory before listing. Scanner-time thumbnail generation still uses the streaming fast path (`openCbzEntryStream`) so the initial walk of a large library doesn't explode into gigabytes of extracted covers.
+
+Admin endpoints `GET /api/admin/cbz-cache-size`, `POST /api/admin/clear-cbz-cache`, `GET /api/admin/cbz-cache-settings`, and `PUT /api/admin/cbz-cache-settings` expose the current size and configured cap, a manual wipe, and the size + auto-clear-schedule settings. `stats()` also reports `in_progress_extractions` so operators can see how many Phase 2 workers are active. See [api.md § Admin / Database Management](./api.md#admin--database-management).
 
 ### Auto-Clear Scheduler
 

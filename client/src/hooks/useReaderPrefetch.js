@@ -77,6 +77,29 @@ export function useReaderPrefetch({
   allChapters,
   chapterId,
   enabled,
+  // Predictive next-chapter pre-extraction. Independent of `enabled` (which
+  // controls in-chapter image warm-up). When on, the hook fires a
+  // best-effort getPages(next.id) call near end-of-chapter so the server
+  // starts extracting the next chapter ahead of the navigation. The first
+  // few images of the next chapter are also warmed into the browser cache
+  // — both effects happen on the SAME getPages call.
+  predictNextChapter = true,
+  // When predictNextChapter is on AND fastChapterOpen is on, route the
+  // pre-extraction through the fast-mode page-list endpoint so the server
+  // returns after Phase 1 (~1–3 s) instead of holding the HTTP connection
+  // for the full extraction. Phase 2 keeps running server-side; the
+  // actual navigation lands on a cache hit. When fast mode is off, the
+  // pre-extraction falls back to the legacy path (synchronous full
+  // extract). Default false so the hook's behaviour matches today's prior
+  // to the fast-open feature.
+  fastChapterOpen = false,
+  // Backup dim-probe callback — fires when a prefetched image finishes
+  // decoding and the corresponding page row's `is_wide` is still unknown.
+  // Each Image() instance gets its own onload that calls back with the
+  // real naturalWidth/Height the browser observed. Especially valuable
+  // here because the prefetch warms pages 1–5 ahead of the user, so dim
+  // corrections arrive BEFORE the user navigates to those pages.
+  onPageDimsLearned,
 }) {
   const issuedUrls = useRef(new Set());
   const warmedNextChapters = useRef(new Set());
@@ -99,6 +122,20 @@ export function useReaderPrefetch({
       issuedUrls.current.add(url);
       const img = new Image();
       img.decoding = 'async';
+      // Capture page so the closure has the right is_wide/id even after
+      // the loop moves on. Same dim-probe-on-load pattern as the displayed
+      // <img> in ReaderPaged / ReaderScroll. Idempotent thanks to the
+      // is_wide guard plus the buffer dedupe in api.reportPageDimensions.
+      if (onPageDimsLearned) {
+        const pg = page;
+        img.onload = () => {
+          if (pg.is_wide !== null && pg.is_wide !== undefined) return;
+          const w = img.naturalWidth;
+          const h = img.naturalHeight;
+          if (!w || !h) return;
+          onPageDimsLearned(pg.id, w, h);
+        };
+      }
       img.src = url;
     }
 
@@ -106,10 +143,15 @@ export function useReaderPrefetch({
       const trimmed = Array.from(issuedUrls.current).slice(-PREFETCHED_URL_CAP);
       issuedUrls.current = new Set(trimmed);
     }
-  }, [enabled, isPaged, pages, currentPage, page2Index, pageLayout, mangaSpreads]);
+  }, [enabled, isPaged, pages, currentPage, page2Index, pageLayout, mangaSpreads, onPageDimsLearned]);
 
   useEffect(() => {
-    if (!enabled) return;
+    // Gated on `predictNextChapter` (the Reading Settings toggle) rather
+    // than `enabled`. This effect controls BOTH the server-side pre-extract
+    // and the first-page browser-cache warm-up, since the same getPages
+    // call powers both. A user who wants in-chapter image prefetch but not
+    // next-chapter pre-extract sets `enabled=true` + `predictNextChapter=false`.
+    if (!predictNextChapter) return;
     if (!pages || pages.length === 0) return;
     if (!allChapters || allChapters.length === 0) return;
     if (isMeteredConnection()) return;
@@ -124,8 +166,18 @@ export function useReaderPrefetch({
     warmedNextChapters.current.add(next.id);
 
     let cancelled = false;
-    api.getPages(next.id).then(nextPages => {
+    // Fast mode → server returns after Phase 1 (~1-3 s), Phase 2 continues
+    // in the background. Legacy → server blocks until full extract completes
+    // before responding (unchanged from pre-feature behaviour).
+    const pagesPromise = fastChapterOpen
+      ? api.getPagesWithMeta(next.id, { fast: true })
+      : api.getPages(next.id);
+
+    pagesPromise.then(result => {
       if (cancelled) return;
+      // getPagesWithMeta returns { data, extracting, total_pages }; the
+      // legacy getPages returns the plain array.
+      const nextPages = Array.isArray(result) ? result : result?.data;
       if (!Array.isArray(nextPages)) return;
       for (let i = 0; i < Math.min(NEXT_CHAPTER_PAGES_TO_WARM, nextPages.length); i++) {
         const p = nextPages[i];
@@ -135,6 +187,23 @@ export function useReaderPrefetch({
         issuedUrls.current.add(url);
         const img = new Image();
         img.decoding = 'async';
+        // NOTE: the callback here is fired for pages of the NEXT chapter,
+        // not the current one. Reader's setPages targets the current
+        // chapter's array — so the local-state patch is effectively a
+        // no-op for next-chapter pages (they're not in state yet). The
+        // server-side report still persists, so when the user opens the
+        // next chapter the row already has dims. Both effects are useful
+        // independently.
+        if (onPageDimsLearned) {
+          const pg = p;
+          img.onload = () => {
+            if (pg.is_wide !== null && pg.is_wide !== undefined) return;
+            const w = img.naturalWidth;
+            const h = img.naturalHeight;
+            if (!w || !h) return;
+            onPageDimsLearned(pg.id, w, h);
+          };
+        }
         img.src = url;
       }
     }).catch(() => {});
@@ -160,7 +229,7 @@ export function useReaderPrefetch({
     }
 
     return () => { cancelled = true; };
-  }, [enabled, pages, currentPage, allChapters, chapterId]);
+  }, [predictNextChapter, fastChapterOpen, pages, currentPage, allChapters, chapterId, onPageDimsLearned]);
 
   useEffect(() => {
     issuedUrls.current = new Set();

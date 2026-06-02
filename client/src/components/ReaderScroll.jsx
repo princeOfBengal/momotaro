@@ -2,7 +2,18 @@ import React, { useRef, useEffect, useCallback, forwardRef, useImperativeHandle 
 import { api } from '../api/client';
 import './ReaderScroll.css';
 
-const ReaderScroll = forwardRef(function ReaderScroll({ pages, initialPage, onPageChange, zoom, isWebtoon }, ref) {
+const ReaderScroll = forwardRef(function ReaderScroll({
+  pages,
+  initialPage,
+  onPageChange,
+  zoom,
+  isWebtoon,
+  // Backup dim-probe: see ReaderPaged.jsx for the rationale. In scroll mode
+  // every visible page hits onLoad as the user scrolls; we patch dims on the
+  // way past so Double Page (Manga) is correct even if the user switches
+  // layout mid-chapter.
+  onPageDimsLearned,
+}, ref) {
   const containerRef = useRef(null);
   const imageRefs = useRef([]);
   const scrolledToInitial = useRef(false);
@@ -56,6 +67,13 @@ const ReaderScroll = forwardRef(function ReaderScroll({ pages, initialPage, onPa
             alt={`Page ${idx + 1}`}
             className="scroll-page-img"
             loading="lazy"
+            onLoad={(e) => {
+              if (page.is_wide !== null && page.is_wide !== undefined) return;
+              const w = e.target.naturalWidth;
+              const h = e.target.naturalHeight;
+              if (!w || !h) return;
+              onPageDimsLearned?.(page.id, w, h);
+            }}
           />
         </div>
       ))}

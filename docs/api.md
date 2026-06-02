@@ -63,6 +63,84 @@ The `multi_user_enabled` and `allow_registration` flags are part of
 
 ---
 
+## User Preferences
+
+Per-user, server-synced UI preferences. Replaces the four pre-existing
+`localStorage` Homepage Settings (`home_default_sort`, `home_discover_refresh_ms`,
+`home_genre_score_threshold`, `home_gallery_order`) and adds twelve new
+Discover / ribbon-layout / Recently-Added keys so the same account sees
+the same Home configuration across every device. Backed by the
+`user_preferences (user_id, key, value, updated_at)` SQLite table — see
+[database.md](./database.md).
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/user/preferences` | Returns every preference for the calling user as a flat `{ key: value }` object. Values are JSON-decoded server-side so booleans, numbers, and arrays round-trip with their original types. |
+| `PUT` | `/api/user/preferences` | Partial merge. Body is `{ key: value, … }`; each key is upserted, omitted keys are left untouched. Returns the full merged object so the client can sync state without a follow-up GET. Empty body is a no-op. Wrapped in a single transaction so a partial failure leaves no half-written prefs. |
+
+The endpoint is mounted at `/api/user` under `requireClientOrAdmin +
+requireUser`; both the mount-line and the inner router enforce
+`requireUser`, so an unauthenticated request 401s before it can read or
+write per-user state.
+
+**Cache invalidation.** Routes that mirror prefs into a `?query` (notably
+`/api/home`, whose cache key is derived from the same params) must
+invalidate their per-user cache slot when a sync write changes a
+home-affecting key. The PUT handler imports
+[`deleteHomeCacheForUser`](../server/src/routes/library.js) from the
+library router and calls it whenever any of the known
+`home_*` keys change. The HOME_AFFECTING_KEYS allowlist lives in
+[server/src/routes/userPreferences.js](../server/src/routes/userPreferences.js)
+and must be kept in sync with the prefs read in
+[client/src/pages/Home.jsx](../client/src/pages/Home.jsx).
+
+**Pre-existing keys (migrated from `localStorage`):**
+
+| Key | Default | Type |
+|---|---|---|
+| `home_default_sort` | `"title"` | string (`title` / `updated` / `year` / `rating`) |
+| `home_discover_refresh_ms` | `86400000` (24 h) | number, milliseconds; `0` = manual only |
+| `home_genre_score_threshold` | `7` | number 0–10 |
+| `home_gallery_order` | `"chronological"` | string |
+
+**Keys added by the Homepage Settings expansion:**
+
+| Key | Default | Type / range |
+|---|---|---|
+| `home_discover_min_score` | `0` | number 0–10 |
+| `home_discover_excluded_genres` | `[]` | string[] |
+| `home_favorite_genres_mode` | `"auto"` | `"auto"` \| `"manual"` |
+| `home_favorite_genres_manual` | `[]` | string[] (max 4) |
+| `home_discover_min_match_count` | `1` | number 1–4 |
+| `home_discover_library_ids` | `[]` (empty = all) | number[] |
+| `home_discover_skip_bookmarked` | `false` | boolean |
+| `home_discover_pool_size` | `30` | number |
+| `home_discover_visible_count` | `15` | number |
+| `home_ribbon_order` | see [frontend.md § Homepage Settings](./frontend.md#settings-srcpagessettingsjsx) | `{ id, visible }[]` |
+| `home_resume_hero_enabled` | `true` | boolean |
+| `home_genre_ribbon_count` | `4` | number 1–4 |
+| `home_recent_window_hours` | `0` (no window) | number |
+
+**Per-device transient keys that stay in `localStorage`** (they
+*shouldn't* sync — they're rotation state, not settings):
+`home_discover_last_refresh`, `home_discover_seed`, `home_prefs_migrated`.
+
+**Legacy migration.** On the first mount after upgrade, the
+[`PreferencesProvider`](../client/src/context/PreferencesContext.jsx)
+copies any of the four pre-existing `home_*` `localStorage` keys to the
+server via a single PUT, deletes them locally, and sets
+`localStorage.home_prefs_migrated = '1'` so the migration runs exactly
+once per browser.
+
+**Forwarding prefs to `/api/home`.** `/api/home` continues to accept
+filters as query parameters (matches the existing `min_score` /
+`discover_limit` pattern). The client reads prefs out of
+`PreferencesContext` and forwards them — the server does **not** read
+prefs directly, so the cache key stays derivable purely from query
+params.
+
+---
+
 ## Libraries
 
 | Method | Path | Description |
@@ -328,20 +406,88 @@ Both return `{ data: { deleted: true } }` on success; neither is an error if the
 ## Chapters & Pages
 
 | Method | Path | Description |
-|---|---|---|
+| --- | --- | --- |
 | GET | `/api/manga/:mangaId/chapters` | List chapters for a manga |
 | GET | `/api/chapters/:id` | Get single chapter |
-| GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide) |
-| GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`) |
+| GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide). Accepts `?fast=1` and `?resume_page=N` for the first-page-fast CBZ flow. |
+| POST | `/api/chapters/:id/prioritize-pages` | Priority hint for fast-mode Phase 2 — move named page indices to front of the work queue. No-op when no active fast extraction. |
+| POST | `/api/pages/dims` | Client-reported page dimensions (backup safety net from `<img onLoad>`). Batch of up to 100. UPDATE filter `AND (width IS NULL OR height IS NULL)` so client reports never overwrite server-probed values. |
+| GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`). May return HTTP 410 Gone (chapter removed) or HTTP 503 + `Retry-After` (fast-mode Phase 2 didn't deliver the page within `CBZ_PAGE_WAIT_TIMEOUT_MS`). |
 
-Page images are served via `res.sendFile` in both cases:
+### `GET /api/chapters/:id/pages`
+
+Lists pages for a chapter. For folder chapters this is a straight DB read; for CBZ chapters it drives `cbzCache.ensureChapterExtracted` and UPSERTs page rows keyed on `(chapter_id, page_index)` so IDs survive cache evictions and re-extractions.
+
+**Query parameters:**
+
+| Param | Meaning |
+| --- | --- |
+| `fast=1` | Opt into fast-mode extraction. Server runs Phase 1 (plan + probe dims + extract the first `CBZ_FAST_PREFIX` pages) and returns; Phase 2 continues in the background. Sent by the reader when the per-device "Fast chapter open" setting is on. Folder chapters ignore this flag — they're already instant. |
+| `resume_page=N` | Resume-position hint. When fast mode is on, Phase 1 also extracts a small window around `N` so a deep-link / saved-resume entry doesn't block on `waitForPageFile` for the user's landing page. Ignored in full mode. |
+
+**Response shape:**
+
+```json
+{
+  "data": [
+    { "id": 100, "page_index": 0, "filename": "001.jpg", "width": 1280, "height": 1840, "is_wide": false },
+    ...
+  ],
+  "extracting": false,
+  "total_pages": 200
+}
+```
+
+- `extracting` is `true` only on a fresh fast-mode response while Phase 2 is still running. The client schedules a re-fetch loop while this is `true`; the loop re-anchors `currentPage` by page-index (not spread index) so Double Page (Manga) layout never jumps the user to a different page when dims update.
+- `total_pages` is the planned page count — useful while `extracting: true` because rows for not-yet-extracted pages exist with their dims and IDs set.
+- HTTP 410 if the chapter was removed mid-call (cancellation from `DELETE /api/manga/:id`, scanner pruning, etc).
+
+`width`/`height` populated for every page. Folder chapters get them at scan time. CBZ chapters get them via fast-mode Phase 1 dim probe (256 KB header sniff per entry) OR via Phase 2's per-page sharp re-probe OR via the route's null-dim heal pass that re-reads `sharp.metadata()` on the extracted file. The healing path is what catches Phase 1 sniff failures — see [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast).
+
+`is_wide` is computed at serve time from `width`/`height` and is `true` whenever `width > height`. The reader uses this in Double Page (Manga) mode. `null` means dimensions are still unknown — the reader's defensive default renders unknown-dim pages **solo** rather than paired, so a wide spread whose dims aren't known yet can never be visually mispaired. See [reader.md § Double-Manga Spread Detection](./reader.md#double-manga-spread-detection).
+
+### `POST /api/chapters/:id/prioritize-pages`
+
+Body: `{ "page_indices": [80, 81, 82] }`. Moves the named page indices to the front of fast-mode Phase 2's work queue. Driven by the reader when the user scrubs or jumps. No-op when there's no active fast extraction (priority hints are only meaningful then). Returns 404 if the chapter row was deleted between the client's hint and the server processing it.
+
+### `POST /api/pages/dims`
+
+Client-side dimension reporter — the final safety net for Double Page (Manga) when every server-side probe path missed (Phase 1 256 KB header sniff failed, Phase 2's sharp.metadata also failed, cache-hit heal didn't run because rows look complete). The browser has already decoded the image when the reader's `<img onLoad>` fires, so `naturalWidth`/`naturalHeight` is authoritative for that page.
+
+**Body:**
+
+```json
+{
+  "dims": [
+    { "page_id": 100, "width": 1280, "height": 1840 },
+    ...
+  ]
+}
+```
+
+Batch limit 100 per request. Server validates each entry (positive integers, ≤30000 px) and silently drops out-of-range rows.
+
+**Response:**
+
+```json
+{ "data": { "updated": 7 } }
+```
+
+The route runs one transaction of `UPDATE pages SET width=?, height=? WHERE id=? AND (width IS NULL OR height IS NULL)`. The `IS NULL` filter is the trust boundary — clients can fill in unknowns, never overwrite a server-probed value. Race with Phase 2's server-side re-probe is idempotent (both decode the same bytes, both write the same value, UPDATE filter ensures only the first writer's value lands).
+
+Client behaviour: dim reports are buffered (Map keyed by `page_id` for dedupe) and flushed in batches when the buffer reaches 16 entries OR after 800 ms of inactivity. Offline failures are silently swallowed — the local pages-state patch in the reader still applies, so in-session Double Page (Manga) layout is correct even when the server-side persistence can't reach.
+
+### `GET /api/pages/:id/image`
+
+Page images are served via `res.sendFile`:
 
 - **Folder chapters** — `res.sendFile(pages.path)` against the absolute filesystem path stored on the page row. Express handles `ETag`, `Last-Modified`, and conditional 304 responses.
-- **CBZ chapters** — `cbzCache.ensureChapterExtracted(chapterId, chapterPath)` is called first to make sure the archive's per-chapter cache directory under `CBZ_CACHE_DIR/<chapterId>_<mtimeFloor>/` exists; if the cache was evicted since the chapter was opened it re-extracts on the fly. Then `res.sendFile(<dir>/<pages.path>)` serves the page like a plain folder image. `Cache-Control: max-age=86400` is set on both branches via `sendFile`'s `maxAge` option, plus standard ETag / Last-Modified.
+- **CBZ chapters** — `cbzCache.ensureChapterExtracted(chapterId, chapterPath, { mode })` is called first to make sure the archive's per-chapter cache directory under `CBZ_CACHE_DIR/<chapterId>_<mtimeFloor>/` exists; if the cache was evicted since the chapter was opened it re-extracts on the fly. Mode inherits from `?fast=1`. If the requested page file is already on disk → `res.sendFile`. Otherwise wait on `waitForPageFile` for fast-mode Phase 2 to land the file. `Cache-Control: max-age=86400` is set on both branches via `sendFile`'s `maxAge` option, plus standard ETag / Last-Modified.
 
-`width` and `height` in `/api/chapters/:id/pages` are populated for every page. Folder-chapter pages get them at scan time; CBZ-chapter pages start out null (dimension fetching is skipped during the scan to avoid decompressing every entry) and the route then populates them lazily on the first open of each chapter — see [scanner.md → Image Dimension Fetching](./scanner.md#image-dimension-fetching). The first open of a CBZ chapter therefore briefly waits while it is fully extracted to the cache directory and every extracted file is read through `sharp.metadata()`; subsequent opens hit the cache and respond from the persisted page rows.
+Error responses specific to fast mode:
 
-`is_wide` is computed at serve time from the stored `width`/`height` and is `true` whenever the page is landscape — i.e. `width > height`. The reader uses this to render such pages solo in Double Page (Manga) mode, since landscape pages typically represent a spread or otherwise shouldn't be paired. It is `null` only when dimensions are still unknown (e.g. an unreadable CBZ entry).
+- **HTTP 410 Gone** — chapter (or its archive) was removed while the request was waiting. The reader surfaces this as a distinct "this chapter is no longer available" screen with a back link, rather than retrying as a generic error.
+- **HTTP 503 + `Retry-After: 2`** — fast-mode Phase 2 didn't extract the requested page within `CBZ_PAGE_WAIT_TIMEOUT_MS` (default 30 s), or the per-chapter waiter cap was hit. Client may retry once.
 
 ---
 
@@ -944,22 +1090,180 @@ Genre aggregation and read-time estimation are computed entirely in SQL against 
 
 ---
 
+## Admin Auth & Sessions
+
+Public-but-narrow endpoints used to bootstrap the admin session and the SPA's
+first-launch routing. Backed by [server/src/auth/adminSession.js](../server/src/auth/adminSession.js)
+and gated by `requireAdmin` once a password is set.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`  | `/api/admin/auth-status` | Public discovery endpoint. Reports `configured`, `logged_in`, `auth_enabled`, `lan_bypass_enabled`, `caller_is_lan`, `pairing_required`, `multi_user_enabled`, `user_required`, `allow_registration`, and `logged_in_user`. The SPA's [`FirstLaunchGate`](../client/src/App.jsx) reads `pairing_required` / `user_required` to decide whether to route to `/pairing` or `/login` before showing library content. |
+| `POST` | `/api/admin/setup` | One-shot — only reachable while no admin password has been set. Body `{ password }` (≥ 8 chars); persists the scrypt hash under `settings.admin_password_hash` and mints an admin session token. Returns 409 once configured. |
+| `POST` | `/api/admin/login` | Body `{ password }`. Rate-limited to `LOGIN_LIMIT_PER_MIN = 10` per IP/minute; failure events recorded to the connection log. Returns `{ admin_token }`. |
+| `POST` | `/api/admin/logout` | Idempotent. Revokes the bearer admin token. |
+| `PUT`  | `/api/admin/password` | Body `{ current_password, new_password }`. Verifies the current password, persists the new scrypt hash, **revokes every admin session** and mints a fresh one for the caller. |
+| `GET`  | `/api/admin/security-settings` | Returns `{ auth_enabled, lan_bypass_enabled, multi_user_enabled, allow_registration }`. |
+| `PUT`  | `/api/admin/security-settings` | Body accepts any subset of those four booleans; persisted to the `settings` table. |
+
+---
+
+## Pairing & Clients
+
+Used by the Android APK and PWA first-launch pairing wizard and by the
+Client Management UI. The public `/api/pairing/*` endpoints are the
+bootstrap path for an unpaired device; the `/api/admin/*` ones drive the
+operator UI. See also [android.md § Pairing wizard](./android.md#pairing-wizard).
+
+### Public pairing flow
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/pairing/request` | Body `{ device_name, platform? }`. Generates a `pairing_id` + a 6-digit PIN with a 5-minute TTL. **The PIN is not returned here** — it's visible only via the admin UI (`GET /api/admin/pairings/pending`). Rate-limited to 10 requests/min per IP. Returns `{ pairing_id, expires_at, ttl_seconds }`. |
+| `GET`  | `/api/pairing/status/:id` | Client poll while waiting for admin approval. Returns `{ state: 'pending' }` or `{ state: 'approved', token, device_name }` (token is delivered exactly once and the row is deleted). 404 + `{ error: 'expired' }` once the row is gone (timed out or already consumed). Not rate-limited — clients are expected to poll every 2–3 s for up to 5 min. |
+| `POST` | `/api/pairing/submit-pin` | Body `{ pairing_id, pin }`. On match, generates a client token, stores its SHA-256 hash in `paired_clients`, and stashes the plaintext on the pending row so the next status poll picks it up. Wrong-PIN increments per-pending `attempts` and per-IP `pin_lockouts`; reaching the admin-configured cap (default 5) deletes the pending row and locks the IP out for 24 h. Rate-limited to 15/min per IP. |
+
+### Admin pairing & client management
+
+All gated by `requireAdmin`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`    | `/api/admin/pairings/pending` | Lists every active pending pairing **with its PIN**, so the operator can read it aloud or type it into the requesting client. Expired rows are pruned opportunistically. |
+| `DELETE` | `/api/admin/pairings/:id` | Manually cancel a pending pairing. |
+| `GET`    | `/api/admin/clients` | Roster of paired clients with forensic fingerprint (`device_name`, `platform`, OS / browser / device type, first- and last-seen IPs, `request_count`, `revoked`). Tokens are never returned — only metadata. Buffered request counts are flushed first so the numbers are current. |
+| `DELETE` | `/api/admin/clients/:id` | Soft-delete a paired client (`paired_clients.revoked = 1`). Future requests with that token are rejected by the auth middleware. Idempotent. |
+| `GET`    | `/api/admin/pairing-pin-settings` | Returns `{ max_attempts, default_max_attempts, min_max_attempts, max_max_attempts, lockout_duration_sec, active_lockouts: [{ ip, failed_attempts, locked_until, updated_at }] }`. Expired lockout rows are pruned opportunistically. |
+| `PUT`    | `/api/admin/pairing-pin-settings` | Body `{ max_attempts }` (clamped to `[MIN_MAX_ATTEMPTS, MAX_MAX_ATTEMPTS]`). |
+| `DELETE` | `/api/admin/pairing-pin-lockouts/:ip` | Admin escape hatch for a household member who fat-fingered the PIN past the cap. Idempotent. |
+
+---
+
+## Connection Log
+
+Forensic record of every connection attempt, paired-client request, and
+auth event. Backed by the `connection_attempts` table and surfaced under
+the Connection Log section of Client Management. Useful for incident
+response on a server reachable from outside the LAN.
+
+All routes are gated by `requireAdmin`. Events are buffered in memory and
+flushed on each query via `connectionLog.flushAll()` so the listed rows
+are current.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`    | `/api/admin/connection-log` | Newest-first event timeline with keyset cursor pagination. Query params: `limit` (≤ 5000, default 100), `cursor` (opaque base64url of `<occurred_at>:<id>`), `event_type` (comma-separated), `severity` (`all` / `failures` / `successes`), `ip` (substring match), `q` (LIKE across `device_name`, `user_agent`, `reverse_dns`, `country`, `city`, `path`, `detail`, `referer`), `paired_client_id`, `since`, `until`. Returns `{ entries, total, filtered_total, next_cursor }`. |
+| `GET`    | `/api/admin/connection-log/sources` | Grouped-by-source rollup: one row per `(real_ip, user_agent, paired_client_id)` tuple, with first / last seen, event counts, and the most recent fingerprint fields. Default window 30 days; `?since=<unix>` extends. Caps at 500 rows. |
+| `GET`    | `/api/admin/connection-log.csv` | Two-section CSV download: paired devices + every connection event, newest first. UTF-8 BOM + RFC 4180 line endings so Windows Excel renders Japanese / accented strings cleanly. **Auth fallback**: accepts the admin session token via the `?t=` query string when no `X-Admin-Token` header is present, so the file can be downloaded via a plain `<a download>` if needed. |
+| `DELETE` | `/api/admin/connection-log` | Wipes the event log. Useful before handing off a server or after archiving a CSV. |
+
+Event types tracked include `pairing_request`, `pin_correct`, `pin_wrong`,
+`lockout`, `lockout_blocked`, `pair_rate_limited`, `request_rate_limited`,
+`admin_login_ok` / `admin_login_fail` / `admin_login_rate_limited`,
+`client_request`, `admin_action`, `request_denied`, `request_error`,
+`user_register`, `user_login_ok`, `user_login_fail`, `user_login_locked`,
+`user_logout`, `user_password_changed`, and
+`connection_log_exported`. The `severity = 'failures'` and `'successes'`
+shortcuts select pre-defined subsets of those types (see the
+`FAILURE_EVENTS` / `SUCCESS_EVENTS` constants in
+[server/src/routes/adminAuth.js](../server/src/routes/adminAuth.js)).
+
+---
+
+## Network / Port Forwarding
+
+Admin endpoints for the Port Forwarding section of Settings, driven by the
+[UPnP module](../server/src/network/upnp.js). Settings are persisted in
+the `settings` table under `port_forwarding_mode` (`'off' | 'upnp' |
+'manual'`, default `off`) and `upnp_external_port` (string integer,
+defaults to the server `PORT`).
+
+All routes are gated by `requireAdmin`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`  | `/api/admin/network/status` | `{ config: { mode, external_port, internal_port }, upnp: { ...current UPnP state } }`. |
+| `PUT`  | `/api/admin/network/config` | Body accepts any subset of `{ mode, external_port }`. Switching to `upnp` starts the refresh loop with the configured mapping; switching to `off` or `manual` stops it (the difference is purely cosmetic in the UI — `manual` tells the user they're expected to forward the port by hand). |
+| `POST` | `/api/admin/network/probe` | One-shot UPnP probe — answers "does my router speak UPnP?" without altering any mapping. |
+| `POST` | `/api/admin/network/public-ip` | HTTP-based public-IP detection. Independent of UPnP — works whether the router supports it or not. Used by the *Detect public IP* button in Manual mode and as a fallback in UPnP mode when the gateway doesn't return an external IP. |
+| `POST` | `/api/admin/network/refresh` | Force a re-map right now (only valid when mode is `upnp`; 409 otherwise). |
+
+The mapping refresh loop is also re-armed at server boot when
+`port_forwarding_mode = 'upnp'` so a previously-enabled tunnel persists
+across restarts.
+
+---
+
 ## Admin / Database Management
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/api/admin/cbz-cache-size` | Current size and configured cap of the CBZ extract cache |
-| POST | `/api/admin/clear-cbz-cache` | Delete every extracted chapter directory in `CBZ_CACHE_DIR`; returns new size (always 0) |
+| POST | `/api/admin/clear-cbz-cache` | **Async** — returns `202` and runs in the background (see [Async admin tasks](#async-admin-tasks)). Deletes every extracted chapter directory in `CBZ_CACHE_DIR`. |
+| GET | `/api/admin/clear-cbz-cache/status` | Status companion — current task state for the clear-cache runner |
 | GET | `/api/admin/cbz-cache-settings` | Get the cache size cap and auto-clear schedule |
 | PUT | `/api/admin/cbz-cache-settings` | Update the cache cap and/or auto-clear schedule (live — no restart needed) |
 | GET | `/api/admin/export-config` | Download the server's user-facing state as a single JSON file (see [Configuration Backup](#configuration-backup)). Mount-line `requireAdmin` is header-only, so the SPA fetches via the `_adminDownload` helper (fetch + blob + synthetic `<a download>`) — `window.location.href` would 401 because native navigation can't carry `X-Admin-Token`. |
 | POST | `/api/admin/import-config` | Restore state from a config JSON payload |
-| POST | `/api/admin/regenerate-thumbnails` | Rebuild active cover for every manga — responds immediately, runs in background |
-| POST | `/api/admin/reset-thumbnails` | Re-align every manga's active cover to the priority order (anilist > mal > mu > doujinshi > original); overrides `cover_user_set`. **Never pings any upstream.** |
-| POST | `/api/admin/vacuum-db` | Run `VACUUM` on the SQLite database file; returns size before and after |
-| GET | `/api/admin/export-series-list` | Download a CSV listing every manga (`id, title, library_name, path, …`). Used for offline grooming of a large library. `Content-Disposition: attachment; filename="momotaro-series-<iso-timestamp>.csv"`. Fetched via `_adminDownload` for the same reason as `/admin/export-config`. |
+| POST | `/api/admin/regenerate-thumbnails` | **Async** — returns `202`; runner walks every manga, restoring AniList cover when on disk or regenerating from the first page. Progress reported as `i / N` via the status companion. |
+| GET | `/api/admin/regenerate-thumbnails/status` | Status companion for the regenerate-thumbnails runner |
+| POST | `/api/admin/reset-thumbnails` | **Async** — returns `202`. Re-aligns every manga's active cover to the priority order (anilist > mal > mu > doujinshi > original); overrides `cover_user_set`. **Never pings any upstream.** |
+| GET | `/api/admin/reset-thumbnails/status` | Status companion for the reset-thumbnails runner |
+| POST | `/api/admin/vacuum-db` | **Async** — returns `202` and runs `VACUUM` in the background. Persisted across restarts (the one task whose state survives in `admin_tasks`). |
+| GET | `/api/admin/vacuum-db/status` | Status companion for the vacuum-db runner; survives a restart via the persisted `admin_tasks` row (flipped from `running` to `interrupted` at boot if the server died mid-VACUUM). |
+| GET | `/api/admin/tasks/list` | Snapshot of every long-running admin task currently in the in-process registry (vacuum, cache wipe, reset thumbnails, regenerate, per-manga / per-library optimize). Powers the [`AdminTaskBanner`](../client/src/components/AdminTaskBanner.jsx). |
+| GET | `/api/admin/export-series-list` | Download a CSV listing every manga (`Library, Series Name (AniList/MAL/MangaUpdates/Doujinshi), Folder path, # chapters, # volumes, Author`). Per-source title cells are read from the on-disk per-source metadata cache — never re-pings any upstream. `Content-Disposition: attachment; filename="momotaro-series-list-<date>.csv"`. Fetched via `_adminDownload` for the same reason as `/admin/export-config`. |
 | GET | `/api/admin/logs` | Return the in-memory system log buffer as JSON |
 | GET | `/api/admin/logs/export` | Download the log buffer as a plain-text `.txt` file. Fetched via `_adminDownload` for the same reason as `/admin/export-config`. |
+
+### Async admin tasks
+
+The four long-running admin actions (`clear-cbz-cache`,
+`regenerate-thumbnails`, `reset-thumbnails`, `vacuum-db`) used to run
+synchronously on the request thread; on large libraries the client
+timed out before the server finished, even though the work completed.
+They now flow through the [task registry](../server/src/admin/taskRegistry.js):
+
+- The `POST` enqueues the task and returns **`202 Accepted`** immediately
+  with the initial `{ status: { kind, status: 'running', started_at, … } }`
+  state.
+- A second `POST` while the same task is running returns **`409`** with
+  `{ error, status: <existing state> }` so the UI can adopt the existing
+  run instead of starting a duplicate.
+- The runner is invoked via `setImmediate` so the route handler can
+  flush the 202 before any synchronous heavy work (`db.exec('VACUUM')`,
+  `fs.rmSync` loop) blocks the event loop.
+- A `GET /api/admin/<task>/status` companion returns the same state
+  shape — used by the [`useAdminTask`](../client/src/hooks/useAdminTask.js)
+  hook (1.5 s polling, paused while the tab is hidden, in-flight responses
+  discarded on race).
+
+**State shape** returned by every status endpoint and inside the 202 body:
+
+```json
+{
+  "kind":         "vacuum-db",
+  "resource_id":  null,
+  "status":       "running",
+  "started_at":   1713200000000,
+  "finished_at":  null,
+  "progress":     { "current": 142, "total": 5000, "label": "Regenerated 140, 2 errors" },
+  "result":       null,
+  "error":        null
+}
+```
+
+`status` is one of `running`, `done`, `failed`, or `interrupted`
+(VACUUM only — the persisted row is rewritten at boot if the server
+died mid-task). `result` is the runner's return value once complete
+(e.g. `{ size_before_bytes, size_after_bytes }` for `vacuum-db`).
+
+**Persistence.** Only `vacuum-db` mirrors its state to the
+`admin_tasks` table — restarting the server mid-VACUUM otherwise made
+the UI return a "no task ever ran" answer, which is misleading on a
+multi-TB DB that legitimately takes minutes. Every other kind is
+in-memory only; a server restart drops the "done — 312 MB freed" badge,
+which is acceptable.
 
 **`GET /api/admin/cbz-cache-size` response `data` shape:**
 

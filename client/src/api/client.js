@@ -281,6 +281,58 @@ async function _tokenDownload(path, headers, fallbackName) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// ── Client-side page-dimension reporter ───────────────────────────────────
+// Buffer for dims learned from <img onLoad> in the reader. The browser's
+// naturalWidth/Height is authoritative — sometimes more reliable than the
+// server-side sharp probe (which can fail on a 256 KB header sniff or on
+// formats sharp doesn't fully support). We batch reports because the reader
+// can fire dozens in rapid succession as the prefetch hook warms images
+// near where the user is reading.
+//
+// Map keyed by page_id automatically dedupes parallel reports for the same
+// page (the displayed <img> in ReaderPaged AND the new Image() in the
+// prefetch hook may both fire onLoad). One flush per chapter open is
+// typical; bursts of >16 trigger an immediate flush.
+const _pageDimMap = new Map();   // pageId -> { width, height }
+let   _pageDimTimer = null;
+const PAGE_DIM_BATCH_SIZE   = 16;
+const PAGE_DIM_FLUSH_IDLE_MS = 800;
+
+function _flushPageDims() {
+  if (_pageDimTimer) { clearTimeout(_pageDimTimer); _pageDimTimer = null; }
+  if (_pageDimMap.size === 0) return;
+  const batch = Array.from(_pageDimMap.entries()).map(([pageId, { width, height }]) => ({
+    page_id: pageId,
+    width,
+    height,
+  }));
+  _pageDimMap.clear();
+  // Fire-and-forget. The server's UPDATE filter (`AND width IS NULL OR
+  // height IS NULL`) guarantees we never clobber good data even if the
+  // batch races with a Phase 2 server-side re-probe. Failure is harmless —
+  // the cache-hit heal pass on the next chapter open will catch any null
+  // dims that didn't reach the server.
+  apiFetch('/api/pages/dims', {
+    method: 'POST',
+    body: JSON.stringify({ dims: batch }),
+  }).catch(() => { /* best-effort persistence */ });
+}
+
+function _reportPageDimensions(pageId, width, height) {
+  if (!Number.isInteger(pageId) || pageId <= 0) return;
+  if (!Number.isFinite(width)  || width  <= 0 || width  > 30000) return;
+  if (!Number.isFinite(height) || height <= 0 || height > 30000) return;
+  // Dedupe: if already buffered, ignore. Different observers (the displayed
+  // <img> and the prefetch's new Image()) frequently fire for the same page.
+  if (_pageDimMap.has(pageId)) return;
+  _pageDimMap.set(pageId, { width: Math.round(width), height: Math.round(height) });
+  if (_pageDimMap.size >= PAGE_DIM_BATCH_SIZE) {
+    _flushPageDims();
+  } else if (!_pageDimTimer) {
+    _pageDimTimer = setTimeout(_flushPageDims, PAGE_DIM_FLUSH_IDLE_MS);
+  }
+}
+
 const _rawApi = {
   // Library
   getLibrary: (params = {}, options = {}) => {
@@ -299,6 +351,35 @@ const _rawApi = {
   getChapters: (mangaId) => apiFetch(`/api/manga/${mangaId}/chapters`),
   getChapter: (id) => apiFetch(`/api/chapters/${id}`),
   getPages: (chapterId) => apiFetch(`/api/chapters/${chapterId}/pages`),
+  // Variant of getPages that returns the full server envelope including the
+  // `extracting` flag and `total_pages` count emitted by the first-page-fast
+  // CBZ path. The plain `getPages` above stays array-returning so the
+  // downloader and offline shim don't need to change. Used by Reader.jsx,
+  // which forwards `fast` and `resumePage` from the reader's setting and
+  // schedules a late dim re-fetch when `extracting` is true.
+  getPagesWithMeta: (chapterId, { fast = false, resumePage = null } = {}) => {
+    const params = new URLSearchParams();
+    if (fast) params.set('fast', '1');
+    if (Number.isInteger(resumePage) && resumePage >= 0) params.set('resume_page', String(resumePage));
+    const q = params.toString();
+    return apiFetch(
+      `/api/chapters/${chapterId}/pages${q ? '?' + q : ''}`,
+      { raw: true }
+    );
+  },
+  // Tell the server to extract these page indices ahead of others still
+  // queued in Phase 2. Called when the reader scrubs / jumps so the user
+  // doesn't time out waiting on pages way past the current Phase 2 pointer.
+  // Fire-and-forget from the caller's perspective; 404 + 200 both fine.
+  prioritizePages: (chapterId, pageIndices) =>
+    apiFetch(`/api/chapters/${chapterId}/prioritize-pages`, {
+      method: 'POST',
+      body: JSON.stringify({ page_indices: pageIndices }),
+    }).catch(() => { /* best-effort priority hint — never block the reader */ }),
+  // Synchronous client-side helper — buffers dims learned from <img onLoad>
+  // and flushes them to the server in batches. See _reportPageDimensions
+  // above for the buffering policy.
+  reportPageDimensions: _reportPageDimensions,
   triggerScan: () => apiFetch('/api/scan', { method: 'POST' }),
   getScanStatus: () => apiFetch('/api/scan/status'),
   // Re-scan only one manga's folder. Synchronous on the server — the
@@ -1041,6 +1122,7 @@ const OFFLINE_ROUTED_METHODS = new Set([
   'getChapters',
   'getChapter',
   'getPages',
+  'getPagesWithMeta',
   'getProgress',
   'getHome',
   'getLibraries',

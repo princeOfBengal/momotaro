@@ -33,6 +33,24 @@ function clampAnimSpeed(n) {
   return Math.min(2, Math.max(0.5, n));
 }
 
+// Initial value for `reader_predictNextChapter`. If the user hasn't set it
+// yet, fall back to whatever `reader_prefetchPages` is — that's the setting
+// that implicitly gated next-chapter prefetch before this feature shipped.
+// This preserves today's behaviour for upgrade: a user who turned image
+// prefetch off doesn't suddenly start getting next-chapter pre-extraction
+// requests; a user with the default on stays in the same state. We write
+// the resolved value back to localStorage so subsequent reads (and the
+// Settings page) see a concrete value rather than re-running the migration
+// after the user later flips `prefetchPages`.
+function resolveInitialPredictNextChapter() {
+  const stored = localStorage.getItem('reader_predictNextChapter');
+  if (stored !== null) return stored !== 'false';
+  const inherited = localStorage.getItem('reader_prefetchPages') !== 'false';
+  try { localStorage.setItem('reader_predictNextChapter', String(inherited)); }
+  catch { /* private browsing — fine */ }
+  return inherited;
+}
+
 const PROGRESS_DEBOUNCE_MS = 2000;
 
 // Renders the inline "Unlock to read" passphrase prompt when the user
@@ -144,6 +162,30 @@ export default function Reader() {
   const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
   const [brightness, setBrightness] = useState(() => Number(localStorage.getItem('reader_brightness')) || 100);
   const [prefetchPages, setPrefetchPages] = useState(() => localStorage.getItem('reader_prefetchPages') !== 'false');
+  // First-page-fast CBZ open. Per-device toggle from Settings → Reading
+  // Settings → Advanced (and the matching Advanced tab in the in-reader
+  // settings menu). Default off so the existing full-extract path stays the
+  // default until users opt in. When on, the Reader passes `?fast=1` to
+  // /api/chapters/:id/pages and the server returns after only the prefix is
+  // on disk, with the remainder extracting in the background.
+  const [fastChapterOpen, setFastChapterOpen] = useState(() => localStorage.getItem('reader_fastChapterOpen') === 'true');
+  // Predictive next-chapter pre-extraction. Default ON for users who had
+  // `reader_prefetchPages` on (today's implicit behaviour: the prefetch hook
+  // already fired getPages(next.id) for them). Default OFF for users who had
+  // prefetchPages off (today's behaviour was no next-chapter prefetch). See
+  // `resolveInitialPredictNextChapter` above for the migration rationale.
+  const [predictNextChapter, setPredictNextChapter] = useState(resolveInitialPredictNextChapter);
+  // `extracting: true` from the server means Phase 2 is still running. The
+  // Reader schedules one delayed re-fetch to pick up the late dim values
+  // (in case the Phase 1 probe failed for some entries) and the freshly-
+  // landed page rows. Kept off the localStorage path on purpose — it's
+  // session-only state, not a preference.
+  const [extracting, setExtracting] = useState(false);
+  // Distinguished error state for HTTP 410 from /api/pages/:id/image and
+  // /api/chapters/:id/pages — the chapter (or its archive) was removed
+  // while the reader was open. Different copy than a network error so the
+  // user knows to navigate back, not retry.
+  const [gone, setGone] = useState(false);
 
   const [showControls, setShowControls] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -187,21 +229,38 @@ export default function Reader() {
   // Spread map for Double Page (Manga): array of [pageIdx] or [pageIdx, pageIdx+1]
   // Page 0 is always solo (title/cover). Wide pages are always solo.
   // After any solo page, the next normal page starts a fresh pair.
+  //
+  // Unknown dims (`is_wide === null`) are treated as **wide** here — the page
+  // renders solo until the real value lands. This matters under fast chapter
+  // open: Phase 1's 256 KB header probe can fail for a corrupt header or an
+  // unusual codec, leaving is_wide=null until Phase 2's re-probe (or the
+  // cache-hit heal on a later re-fetch) corrects it. If we treated null as
+  // not-wide (the old default), a genuinely wide spread would get crammed
+  // into half the screen alongside its neighbour — visibly broken. Treating
+  // unknown as wide → render solo means the worst outcome is a normal page
+  // briefly rendered alone, which is suboptimal but never wrong. The dim
+  // correction triggers a mangaSpreads recompute and the paired layout
+  // appears within seconds. Full-mode CBZ and folder chapters always have
+  // dims populated, so this branch only changes behaviour for fast-mode
+  // probe failures.
   const mangaSpreads = useMemo(() => {
     if (!isPaged || pageLayout !== 'double-manga' || pages.length === 0) return null;
     const spreads = [];
     let i = 0;
     while (i < pages.length) {
-      const isCover = i === 0;
-      const isWide = pages[i]?.is_wide; // null treated as false (unknown = assume normal)
-      if (isCover || isWide) {
+      const isCover        = i === 0;
+      const isWideOrUnknown = pages[i]?.is_wide !== false; // null OR true → solo
+      if (isCover || isWideOrUnknown) {
         spreads.push([i]);
         i++;
-      } else if (i + 1 < pages.length && !pages[i + 1]?.is_wide) {
+      } else if (i + 1 < pages.length && pages[i + 1]?.is_wide === false) {
+        // Pair only when BOTH the current page AND the next page are
+        // explicitly known not-wide. Unknown next-page also stays solo so
+        // we never pair a normal page with a possibly-wide neighbour.
         spreads.push([i, i + 1]);
         i += 2;
       } else {
-        // Last page, or next page is wide — stay solo
+        // Last page, or next page is wide / unknown — stay solo
         spreads.push([i]);
         i++;
       }
@@ -229,6 +288,32 @@ export default function Reader() {
     return null;
   }, [isPaged, pageLayout, currentPage, pages.length, mangaSpreads]);
 
+  // Backup dim-probe: fires when any rendered or prefetched <img> finishes
+  // decoding and the corresponding page row's `is_wide` is still null.
+  // Patches the local pages array (so mangaSpreads recomputes within one
+  // render cycle and Double Page (Manga) self-corrects) AND fires a
+  // batched POST via api.reportPageDimensions so the fix persists to the
+  // server for the next chapter open.
+  //
+  // The setPages updater is defensive: it only mutates if the row still
+  // has null is_wide, preventing a stale onLoad from clobbering dims
+  // that Phase 2's server-side hook just landed via the 6 s re-fetch.
+  // The api helper has its own dedupe at the buffer level, so duplicate
+  // reports from the displayed <img> + prefetch Image() pair are cheap.
+  const handlePageDimsLearned = useCallback((pageId, width, height) => {
+    setPages(prev => {
+      let changed = false;
+      const next = prev.map(p => {
+        if (p.id !== pageId) return p;
+        if (p.is_wide !== null && p.is_wide !== undefined) return p;
+        changed = true;
+        return { ...p, width, height, is_wide: width > height };
+      });
+      return changed ? next : prev;
+    });
+    api.reportPageDimensions(pageId, width, height);
+  }, []);
+
   useReaderPrefetch({
     pages,
     currentPage,
@@ -239,6 +324,9 @@ export default function Reader() {
     allChapters,
     chapterId,
     enabled: prefetchPages,
+    predictNextChapter,
+    fastChapterOpen,
+    onPageDimsLearned: handlePageDimsLearned,
   });
 
   // Persist settings
@@ -264,6 +352,8 @@ export default function Reader() {
   useEffect(() => { localStorage.setItem('reader_orientation', readingOrientation); }, [readingOrientation]);
   useEffect(() => { localStorage.setItem('reader_brightness', brightness); }, [brightness]);
   useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
+  useEffect(() => { localStorage.setItem('reader_fastChapterOpen', String(fastChapterOpen)); }, [fastChapterOpen]);
+  useEffect(() => { localStorage.setItem('reader_predictNextChapter', String(predictNextChapter)); }, [predictNextChapter]);
 
   // Fullscreen
   useEffect(() => {
@@ -351,16 +441,45 @@ export default function Reader() {
 
       if (!cancelled) setNeedsUnlock(false);
       try {
-        const [ch, pgs] = await Promise.all([
+        // Capture the resume page once before either fetch starts. When fast
+        // mode is on, we forward it as ?resume_page= so the server extracts
+        // a small window around it during Phase 1 — otherwise the user's
+        // deep-link landing at page 50 would block for seconds waiting on
+        // Phase 2 to reach it.
+        const urlPage = searchParams.get('page');
+        const initialResume =
+          urlPage !== null
+            ? parseInt(urlPage, 10) || 0
+            : (getResumePageForChapter(mangaId, chapterId) ?? 0);
+
+        const pagesPromise = fastChapterOpen
+          ? api.getPagesWithMeta(chapterId, { fast: true, resumePage: initialResume })
+          : api.getPages(chapterId);
+
+        const [ch, pagesResult] = await Promise.all([
           api.getChapter(chapterId),
-          api.getPages(chapterId),
+          pagesPromise,
         ]);
         if (cancelled) return;
+
+        // getPagesWithMeta returns { data, extracting, total_pages }; the
+        // legacy getPages returns the plain array.
+        const pgs = Array.isArray(pagesResult) ? pagesResult : pagesResult.data;
+        const stillExtracting = !Array.isArray(pagesResult) && !!pagesResult.extracting;
+
         setChapter(ch);
         setPages(pgs);
+        setExtracting(stillExtracting);
         setLoading(false);
       } catch (err) {
-        if (!cancelled) { setError(err.message); setLoading(false); }
+        if (cancelled) return;
+        if (err.status === 410) {
+          setGone(true);
+          setLoading(false);
+        } else {
+          setError(err.message);
+          setLoading(false);
+        }
       }
     }
 
@@ -389,6 +508,63 @@ export default function Reader() {
         .catch(() => { /* shim not loaded — fine */ });
     };
   }, [chapterId, reloadKey]);
+
+  // Late-dim re-fetch for fast-open extractions.
+  //
+  // When the server returns extracting:true the first response contains the
+  // full pages array (so the reader paints immediately) but page width/height
+  // may be NULL for entries whose probe failed. After ~6s Phase 2 has either
+  // finished or come close, so re-fetch once to pick up real dims and any
+  // newly-landed page metadata.
+  //
+  // CRITICAL for Double Page (Manga): mangaSpreads recomputes from `pages`,
+  // so when dims update the spread groupings can shift. We capture the
+  // user's *page index* before applying the new pages and re-anchor to that
+  // same page index afterwards — never the spread index, which would jump
+  // the user to an unrelated page.
+  // Hold the latest currentPage in a ref so the refetch can read it without
+  // having to put currentPage in the effect's deps array (which would reset
+  // the timer on every page flip).
+  const currentPageRef = useRef(currentPage);
+  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+
+  useEffect(() => {
+    if (!extracting) return;
+    if (!fastChapterOpen) return;
+    let cancelled = false;
+    let timer = null;
+    let stillExtracting = true;
+
+    async function refetchOnce() {
+      try {
+        const anchor = currentPageRef.current;
+        const result = await api.getPagesWithMeta(chapterId, { fast: true });
+        if (cancelled) return;
+        const pgs = result.data;
+        setPages(pgs);
+        stillExtracting = !!result.extracting;
+        setExtracting(stillExtracting);
+        // Re-anchor by *page index*, never by spread index. mangaSpreads will
+        // recompute from the new pages on the next render; if dims for a
+        // previously-misclassified page just arrived, the spread layout may
+        // shift slightly, but `currentPage` still references the same image
+        // the user was looking at.
+        if (anchor >= pgs.length) setCurrentPage(Math.max(0, pgs.length - 1));
+        // If Phase 2 still hasn't finished (rare — implies a very long
+        // chapter or a slow disk), arm another wait.
+        if (stillExtracting && !cancelled) {
+          timer = setTimeout(refetchOnce, 6000);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        if (err.status === 410) setGone(true);
+        // Other errors are non-fatal — keep showing what we already have.
+      }
+    }
+
+    timer = setTimeout(refetchOnce, 6000);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [extracting, fastChapterOpen, chapterId]);
 
   // Load manga + sibling chapters
   useEffect(() => {
@@ -627,6 +803,22 @@ export default function Reader() {
       scrollerRef.current.scrollToPage(snapped);
     }
     saveProgress(snapped, snapped >= pages.length - 1);
+
+    // Fast-open priority hint: when Phase 2 is still running and the user
+    // jumped ahead of the natural extraction order (scrubber, deep link),
+    // ask the server to extract the target pages next. No-op when Phase 2
+    // already passed these indices, when the chapter isn't a CBZ, or when
+    // fast mode is off — the endpoint just returns 200 with touched:0.
+    if (extracting && fastChapterOpen) {
+      // Cover the target spread plus a small lookahead so the user can flip
+      // forward one or two pages while the rest of Phase 2 catches up.
+      const targets = new Set();
+      for (let off = 0; off <= 4; off++) {
+        const i = snapped + off;
+        if (i >= 0 && i < pages.length) targets.add(i);
+      }
+      api.prioritizePages(chapterId, Array.from(targets));
+    }
   }
 
   function handleScrubStart() {
@@ -676,6 +868,19 @@ export default function Reader() {
     />
   );
 
+  if (gone) return (
+    <div className="reader-loading">
+      <h2>This chapter is no longer available</h2>
+      <p style={{ maxWidth: 420, textAlign: 'center', color: 'var(--text-muted)' }}>
+        The chapter or its archive was removed or renamed. Return to the
+        manga page to see the current chapter list.
+      </p>
+      <Link to={mangaId ? `/manga/${mangaId}` : '/'} className="btn btn-primary" style={{ marginTop: 16 }}>
+        Back to manga
+      </Link>
+    </div>
+  );
+
   if (error) return (
     <div className="reader-loading">
       <h2>Failed to load chapter</h2>
@@ -704,6 +909,8 @@ export default function Reader() {
       grayscale={grayscale}
       brightness={brightness}
       prefetchPages={prefetchPages}
+      fastChapterOpen={fastChapterOpen}
+      predictNextChapter={predictNextChapter}
       scaleType={scaleType}
       pageLayout={pageLayout}
       showSettings={showSettings}
@@ -722,6 +929,8 @@ export default function Reader() {
       onGrayscaleChange={setGrayscale}
       onBrightnessChange={setBrightness}
       onPrefetchPagesChange={setPrefetchPages}
+      onFastChapterOpenChange={setFastChapterOpen}
+      onPredictNextChapterChange={setPredictNextChapter}
       onScaleTypeChange={setScaleType}
       onPageLayoutChange={setPageLayout}
       readingOrientation={readingOrientation}
@@ -809,6 +1018,7 @@ export default function Reader() {
           onCenterTap={handleCenterTap}
           onZoomChange={setZoom}
           onAnyTap={handleAnyTap}
+          onPageDimsLearned={handlePageDimsLearned}
         />
       ) : (
         <ReaderScroll
@@ -818,6 +1028,7 @@ export default function Reader() {
           onPageChange={handlePageChange}
           zoom={zoom}
           isWebtoon={isWebtoon}
+          onPageDimsLearned={handlePageDimsLearned}
         />
       )}
       <ReaderEdgeHints mode={hintMode} rtl={isRtl} suppressed={hintsSuppressed} />

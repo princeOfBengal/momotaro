@@ -244,6 +244,18 @@ async function start() {
   // cap is evicted immediately.
   cbzCache.init(Number.isFinite(savedLimit) && savedLimit > 0 ? savedLimit : undefined);
 
+  // Orphan audit at boot: a manga folder deleted while the server was down
+  // (or while it was up but the watcher's depth-0/no-unlinkDir blind spot
+  // missed it) leaves cache directories whose chapter ids no longer exist.
+  // Reap them now so totals reported by stats() are honest from the first
+  // request. Safe even when no chapters table exists yet (auditOrphans
+  // returns zero rather than throwing).
+  try {
+    cbzCache.auditOrphans(db);
+  } catch (err) {
+    console.warn(`[CBZ Cache] Startup orphan audit failed: ${err.message}`);
+  }
+
   // Start the cache auto-clear scheduler (no-op if mode is 'off').
   cbzCacheSchedule.reschedule();
 

@@ -9,6 +9,7 @@ const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { requireAdmin } = require('../middleware/auth');
 const genresCache = require('../genresCache');
+const cbzCache = require('../scanner/cbzCache');
 const { safeJsonParse, csvEscape, formatUnix } = require('../utils');
 
 const router = express.Router();
@@ -185,6 +186,22 @@ router.delete('/libraries/:id', requireAdmin, asyncWrapper(async (req, res) => {
 
   // Stop file watcher first
   await removeLibraryWatch(library.id);
+
+  // Cancel every active CBZ extraction belonging to this library before the
+  // CASCADE runs. Without this, Phase 2 workers continue writing dim
+  // UPDATEs to rows that are about to be deleted and any readers holding
+  // page waiters hang for the full timeout. The query joins through manga
+  // because chapters → libraries is mediated by manga.library_id.
+  let cbzIds = [];
+  try {
+    cbzIds = db.prepare(`
+      SELECT c.id
+      FROM chapters c
+      JOIN manga m ON m.id = c.manga_id
+      WHERE m.library_id = ? AND c.type = 'cbz'
+    `).all(library.id).map(r => r.id);
+  } catch (_) { /* defensive — schema variation in tests */ }
+  if (cbzIds.length > 0) cbzCache.cancelChapters(cbzIds, 'Library removed');
 
   // ON DELETE SET NULL on manga.library_id — manually delete manga so cascade
   // removes chapters/pages/progress
@@ -674,8 +691,18 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
   const manga = db.prepare('SELECT * FROM manga WHERE id = ?').get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  // Collect chapter IDs before the cascade delete clears them
-  const chapters = db.prepare('SELECT id FROM chapters WHERE manga_id = ?').all(manga.id);
+  // Collect CBZ chapter IDs and cancel any active extractions before the
+  // CASCADE clears them. cbzCache.cancelChapters aborts Phase 2 workers,
+  // rejects every open page waiter with CHAPTER_REMOVED (→ HTTP 410 from
+  // the image route), and removes the per-chapter cache directories. The
+  // cache dirs are keyed by `<chapterId>_<mtime>`, which is why the old
+  // `fs.rmSync(path.join(CBZ_CACHE_DIR, String(ch.id)))` did nothing
+  // useful — it tried to remove `<CACHE_DIR>/<id>` without the mtime
+  // suffix and silently no-op'd.
+  const cbzIds = db.prepare(
+    "SELECT id FROM chapters WHERE manga_id = ? AND type = 'cbz'"
+  ).all(manga.id).map(r => r.id);
+  if (cbzIds.length > 0) cbzCache.cancelChapters(cbzIds, 'Manga removed');
 
   // Remove from DB — CASCADE deletes chapters, pages, progress
   db.prepare('DELETE FROM manga WHERE id = ?').run(manga.id);
@@ -683,13 +710,6 @@ router.delete('/manga/:id', asyncWrapper(async (req, res) => {
   // Delete thumbnail
   if (manga.cover_image) {
     try { fs.unlinkSync(thumbnailPath(manga.cover_image)); } catch (_) {}
-  }
-
-  // Delete CBZ cache for every chapter
-  for (const ch of chapters) {
-    try {
-      fs.rmSync(path.join(config.CBZ_CACHE_DIR, String(ch.id)), { recursive: true, force: true });
-    } catch (_) {}
   }
 
   // Delete the manga folder on disk

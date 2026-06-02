@@ -8,6 +8,7 @@ const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
 const { reinforceAllCovers } = require('./coverResolver');
 const { enforceMetadataPriorityForLibrary } = require('../routes/metadata');
+const cbzCache = require('./cbzCache');
 
 // Concurrency knobs.
 //   MANGA_CONCURRENCY — how many manga directories we walk in parallel. Sharp
@@ -93,8 +94,24 @@ function naturalSort(a, b) {
 /**
  * Delete a manga record and its thumbnail file.
  * CASCADE on the DB handles chapters / pages / progress automatically.
+ *
+ * Before the row is deleted we collect every CBZ chapter id and call
+ * cbzCache.cancelChapters so any in-flight Phase 2 extractions stop cleanly:
+ * abort signals fire, page waiters reject with CHAPTER_REMOVED (routed to
+ * HTTP 410 by the reader's image route), the cache directories are removed,
+ * and the in-memory state slots are dropped. Without this, a delete while a
+ * reader is mid-binge leaves the request hanging until the per-page timeout.
  */
 function removeManga(db, manga) {
+  let chapterIds = [];
+  try {
+    chapterIds = db.prepare(
+      "SELECT id FROM chapters WHERE manga_id = ? AND type = 'cbz'"
+    ).all(manga.id).map(r => r.id);
+  } catch (_) { /* table may be missing in tests — fine */ }
+  if (chapterIds.length > 0) {
+    cbzCache.cancelChapters(chapterIds, 'Manga removed');
+  }
   db.prepare('DELETE FROM manga WHERE id = ?').run(manga.id);
   if (manga.cover_image) {
     try { fs.unlinkSync(thumbnailPath(manga.cover_image)); } catch (_) {}
@@ -312,6 +329,18 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
       console.warn(`[Scanner] Cover priority reinforcement failed: ${err.message}`);
     }
 
+    // CBZ extract-cache orphan audit. Closes the watcher's depth-0 +
+    // missing-unlinkDir blind spot: when a manga folder is removed (or
+    // renamed, which the watcher sees as add+remove) the cache dirs for its
+    // chapters become unreferenced. We've just finished pruning every dead
+    // chapter row above, so the live chapters set is current — anything in
+    // CBZ_CACHE_DIR whose chapter id isn't in that set is genuinely stale.
+    try {
+      cbzCache.auditOrphans(db);
+    } catch (err) {
+      console.warn(`[Scanner] CBZ cache orphan audit failed: ${err.message}`);
+    }
+
     console.log(`[Scanner] Done scanning library "${library.name}".`);
   } finally {
     if (claimedState) {
@@ -429,11 +458,18 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
     })
     .sort(naturalSort);
 
-  // Remove DB records for chapters no longer on disk
+  // Remove DB records for chapters no longer on disk. Cancel any active CBZ
+  // extraction for these chapters first so an in-flight Phase 2 doesn't
+  // continue writing into a directory the scanner is about to orphan, and
+  // any reader holding pageWaiters gets a prompt CHAPTER_REMOVED rejection
+  // (rendered as HTTP 410 by /api/pages/:id/image).
   const scannedSet = new Set(chapterEntries);
-  const dbChapters = db.prepare('SELECT id, folder_name FROM chapters WHERE manga_id = ?').all(mangaId);
-  for (const row of dbChapters) {
-    if (!scannedSet.has(row.folder_name)) {
+  const dbChapters = db.prepare('SELECT id, folder_name, type FROM chapters WHERE manga_id = ?').all(mangaId);
+  const stale = dbChapters.filter(row => !scannedSet.has(row.folder_name));
+  if (stale.length > 0) {
+    const cbzIds = stale.filter(r => r.type === 'cbz').map(r => r.id);
+    if (cbzIds.length > 0) cbzCache.cancelChapters(cbzIds, 'Chapter removed by scanner');
+    for (const row of stale) {
       db.prepare('DELETE FROM chapters WHERE id = ?').run(row.id);
     }
   }

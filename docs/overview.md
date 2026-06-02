@@ -22,7 +22,7 @@ or just create one account and let everyone share it. Design docs:
 | Backend | Node.js + Express |
 | Database | SQLite via `better-sqlite3` |
 | Image processing | `sharp` (WebP thumbnails) |
-| Archive reads | `yauzl` — central-directory-only reads at scan time; full per-chapter extraction to disk on first reader open (see [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache)) |
+| Archive reads | `yauzl` — central-directory-only reads at scan time; two-mode per-chapter extraction (full vs first-page-fast) on first reader open (see [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache) and [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast)) |
 | Archive writes | `adm-zip` (CBZ creation in the optimize endpoint only) |
 | File watching | `chokidar` |
 | Frontend | React 18 + React Router 6 |
@@ -38,27 +38,31 @@ momotaro/
 │   └── src/
 │       ├── index.js              # App entry point + graceful shutdown
 │       ├── config.js             # Env-var configuration
+│       ├── utils.js              # Shared helpers (`safeJsonParse`, `csvEscape`, `formatUnix`, `getSetting` / `setSetting`)
 │       ├── logger.js             # Console interceptor → in-memory log ring buffer (2000 entries)
 │       ├── genresCache.js        # In-memory payload cache backing /api/genres
 │       ├── db/database.js        # SQLite init + migrations
-│       ├── routes/               # API route handlers (library, chapters, pages, progress, settings, metadata, optimize, admin, gallery, config, sources)
+│       ├── routes/               # API route handlers (library, chapters, pages, progress, settings, metadata, optimize, admin, adminAuth, gallery, config, sources, pairing, network, users, userPreferences, appVersion)
 │       ├── scanner/              # Library scanning, CBZ extract cache + scheduler, thumbnails, cover priority
 │       ├── metadata/             # AniList / MAL / MangaUpdates / Doujinshi.info + per-source JSON cache
 │       ├── sources/              # Third Party Sourcing adapters (mangadex, weebcentral, mangaball, mangataro, mangadotnet, comikuro, comix.to, mangakakalot, mangafire) + URL parser
 │       ├── downloader/queue.js   # Persistent FIFO download queue for the Third Party Sourcing flow
 │       ├── scheduler/            # Per-manga `manga_schedules` poll loop and run-now worker
-│       ├── middleware/           # `asyncWrapper` + central error handler
+│       ├── auth/                 # Sessions + auth primitives — `adminSession`, `userSession`, `loginLockout` / `pinLockout`, `rateLimit`, `connectionLog`, `crypto` (scrypt password hash + token gen), `ipEnrichment`, `userAgent`
+│       ├── admin/taskRegistry.js # Shared task primitive for async admin actions (vacuum, cache wipe, reset/regenerate thumbnails) — in-memory state with optional `admin_tasks` mirroring
+│       ├── network/upnp.js       # UPnP IGD client driving the Port Forwarding admin UI
+│       ├── middleware/           # `asyncWrapper`, `auth` (network gate, admin gate), `userAuth` (per-user gate), `requestLogger`, central error handler
 │       └── watcher/              # chokidar watcher
 ├── client/              # React SPA + Android wrapper
 │   ├── capacitor.config.json  # Capacitor scheme / hostname / mixed-content config — see [android.md](./android.md)
 │   ├── android/               # Capacitor-generated Android project (Gradle build, AndroidManifest, NSC, release keystore wiring)
 │   └── src/
-│       ├── api/client.js      # All API calls + device ID + timeout + `rewriteMediaUrls` for APK absolute URLs
+│       ├── api/               # `client.js` (all API calls + device/user/admin tokens + `rewriteMediaUrls`), plus the offline subsystem — `offlineApi`, `offlineDb`, `offlineFolder`, `offlineStorage`, `offlineCrypto`, `outboxSync`, `downloader`, `downloadKeepAlive`, `immersive` (see [offline.md](./offline.md))
 │       ├── version.js         # APP_VERSION constant — kept in sync with `versionName` in `android/app/build.gradle`
-│       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback, Pairing)
-│       ├── components/        # Shared UI components (AppSidebar, MangaCard, Ribbon, ArtGalleryRibbon, InstallPrompt, UpdateBanner, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
-│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`
-│       └── context/           # React context (sidebar)
+│       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback, Pairing, Login, Downloads)
+│       ├── components/        # Shared UI components (AppSidebar, Sidebar, MangaCard, Ribbon, ArtGalleryRibbon, RibbonOrderEditor, GenreChipPicker, InstallPrompt, UpdateBanner, AdminTaskBanner, AccountSection, UserManagementBlock, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
+│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`, `useAdminTask`
+│       └── context/           # React contexts: `SidebarContext`, `UserContext`, `PreferencesContext`, `ConnectivityContext`
 ├── assets/              # Source artwork / logo files
 ├── data/                # Runtime data: DB, thumbnails, CBZ extract cache, per-source metadata cache, downloads/ (signed APK + version.json — see [android.md](./android.md)) — gitignored
 ├── py_scripts/          # Stand-alone helper Python scripts for library cleanup (not invoked by the server)

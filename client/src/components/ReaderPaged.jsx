@@ -55,6 +55,13 @@ export default function ReaderPaged({
   onCenterTap,
   onZoomChange,
   onAnyTap,
+  // Backup dim-probe: when sharp's server-side dim probe failed for a page
+  // (Phase 1 256 KB header sniff couldn't read it, Phase 2 re-probe missed
+  // it), the browser's native image decoder still knows the real dims as
+  // soon as <img onLoad> fires. We forward (pageId, w, h) up so Reader can
+  // patch local pages state (mangaSpreads recomputes → Double Page (Manga)
+  // pairing self-corrects) and persist via api.reportPageDimensions.
+  onPageDimsLearned,
 }) {
   const rootRef = useRef(null);
 
@@ -456,6 +463,15 @@ export default function ReaderPaged({
             alt={leftAlt}
             className="reader-page-img"
             draggable={false}
+            onLoad={(e) => {
+              // Skip if dims are already known — the server-side path
+              // populated them (or a previous onLoad already did).
+              if (leftPage.is_wide !== null && leftPage.is_wide !== undefined) return;
+              const w = e.target.naturalWidth;
+              const h = e.target.naturalHeight;
+              if (!w || !h) return;
+              onPageDimsLearned?.(leftPage.id, w, h);
+            }}
           />
           {page2 && (
             <img
@@ -463,6 +479,13 @@ export default function ReaderPaged({
               alt={rightAlt}
               className="reader-page-img"
               draggable={false}
+              onLoad={(e) => {
+                if (rightPage.is_wide !== null && rightPage.is_wide !== undefined) return;
+                const w = e.target.naturalWidth;
+                const h = e.target.naturalHeight;
+                if (!w || !h) return;
+                onPageDimsLearned?.(rightPage.id, w, h);
+              }}
             />
           )}
         </div>

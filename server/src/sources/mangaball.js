@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { createPacer } = require('./_pacer');
 
 // MangaBall source adapter — full chapter download support, third source
 // after MangaDex and WeebCentral with the complete download lifecycle.
@@ -60,7 +61,7 @@ const REQUEST_INTERVAL_MS = 250;
 // CSRF for hours and discover failure on the first download attempt.
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
-let _lastRequestAt = 0;
+const _pacer = createPacer(REQUEST_INTERVAL_MS);
 let _session = null; // { csrf, cookieHeader, warmedAt }
 
 // ── Cookie / session helpers ──────────────────────────────────────────────
@@ -90,9 +91,7 @@ function cookieHeaderFromMap(map) {
  * floor matches the rest of our adapters.
  */
 async function pacedFetch(url, options = {}) {
-  const wait = REQUEST_INTERVAL_MS - (Date.now() - _lastRequestAt);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastRequestAt = Date.now();
+  await _pacer.wait();
 
   return fetch(url, {
     redirect: 'follow',

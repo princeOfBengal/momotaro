@@ -10,6 +10,7 @@ import {
   onChange as onDownloaderChange,
 } from '../api/downloader';
 import { listOfflineManga, clearFinishedJobs } from '../api/offlineDb';
+import { appConfirm } from '../dialog/dialogService';
 import {
   isAvailable as offlineStorageAvailable,
   getStatus   as offlineGetStatus,
@@ -83,14 +84,14 @@ export default function Downloads() {
   }, [jobs]);
 
   async function handleClearFinished() {
-    if (!window.confirm('Clear all done and cancelled rows from the queue?')) return;
+    if (!(await appConfirm('Clear all done and cancelled rows from the queue?', { okLabel: 'Clear' }))) return;
     setBusy(true);
     try { await clearFinishedJobs(); await reload(); }
     finally { setBusy(false); }
   }
 
   async function handleDeleteSeries(mangaId) {
-    if (!window.confirm('Remove this downloaded series from the device? On-disk files will be deleted.')) return;
+    if (!(await appConfirm('Remove this downloaded series from the device? On-disk files will be deleted.', { danger: true, okLabel: 'Delete' }))) return;
     setBusy(true);
     try { await downloaderDeleteSeries(mangaId); await reload(); }
     finally { setBusy(false); }

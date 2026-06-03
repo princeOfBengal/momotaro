@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { appConfirm, appPrompt } from '../dialog/dialogService';
 
 // Admin "User accounts" panel, rendered inside Client Management (admin-gated).
 // Gives the operator total control over every account (requirement #10):
@@ -57,7 +58,11 @@ export default function UserManagementBlock({ authStatus, setStatusMsg, onAuthCh
   }
 
   async function resetPassword(u) {
-    const pw = window.prompt(`New password for @${u.username} (min 8 characters):`);
+    const pw = await appPrompt(
+      `New password for @${u.username} (min 8 characters):`,
+      '',
+      { inputType: 'password', okLabel: 'Reset', autoComplete: 'new-password' },
+    );
     if (pw == null) return;
     if (pw.length < 8) { notify('error', 'Password must be at least 8 characters.'); return; }
     try {
@@ -82,7 +87,7 @@ export default function UserManagementBlock({ authStatus, setStatusMsg, onAuthCh
   }
 
   async function deleteUser(u) {
-    if (!window.confirm(`Delete @${u.username}? This permanently removes their progress, lists, and history.`)) return;
+    if (!(await appConfirm(`Delete @${u.username}? This permanently removes their progress, lists, and history.`, { danger: true, okLabel: 'Delete' }))) return;
     try { await api.adminDeleteUser(u.id); notify('success', `Deleted @${u.username}.`); refresh(); }
     catch (e) { notify('error', e.message); }
   }

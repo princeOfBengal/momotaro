@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
+import { appAlert, appConfirm } from '../dialog/dialogService';
 import './Libraries.css';
 
 // ── Shared library form ───────────────────────────────────────────────────────
@@ -102,10 +103,11 @@ export default function Libraries() {
   }
 
   async function handleDelete(lib) {
-    const confirmed = window.confirm(
+    const confirmed = await appConfirm(
       `Delete library "${lib.name}"?\n\n` +
       `This will remove all ${lib.manga_count} series from Momotaro. ` +
-      `Files on disk will not be affected.`
+      `Files on disk will not be affected.`,
+      { danger: true, okLabel: 'Delete' },
     );
     if (!confirmed) return;
     try {
@@ -113,7 +115,7 @@ export default function Libraries() {
       setLibraries(prev => prev.filter(l => l.id !== lib.id));
       if (editId === lib.id) setEditId(null);
     } catch (err) {
-      alert('Delete failed: ' + err.message);
+      appAlert('Delete failed: ' + err.message);
     }
   }
 
@@ -123,7 +125,7 @@ export default function Libraries() {
       const updated = await api.updateLibrary(lib.id, { show_in_all: newVal });
       setLibraries(prev => prev.map(l => l.id === lib.id ? updated : l));
     } catch (err) {
-      alert('Failed to update: ' + err.message);
+      appAlert('Failed to update: ' + err.message);
     }
   }
 
@@ -136,7 +138,7 @@ export default function Libraries() {
         setScanning(s => s === lib.id ? null : s);
       }, 3000);
     } catch (err) {
-      alert('Scan failed: ' + err.message);
+      appAlert('Scan failed: ' + err.message);
       setScanning(s => s === lib.id ? null : s);
     }
   }

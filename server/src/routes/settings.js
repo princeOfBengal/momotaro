@@ -226,4 +226,4 @@ router.delete('/auth/doujinshi', asyncWrapper(async (req, res) => {
   res.json({ message: 'Logged out of Doujinshi.info' });
 }));
 
-module.exports = { router, getSetting, getUserAniList };
+module.exports = { router, getUserAniList };

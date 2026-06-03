@@ -1466,6 +1466,8 @@
 .info-modal-body {
   padding: 20px;
   min-height: 80px;
+  overflow-y: auto;
+  flex: 1 1 auto;
 }
 
 .info-modal-error {
@@ -1485,6 +1487,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .info-modal-label {
@@ -1499,6 +1502,7 @@
   font-size: 14px;
   color: var(--text-primary);
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .info-modal-path {
@@ -1506,6 +1510,17 @@
   font-size: 13px;
   word-break: break-all;
   color: var(--text-secondary);
+}
+
+/* Missing-chapter/volume list — long comma-separated runs need to
+   wrap on commas without breaking individual numbers. The modal body is
+   the scroll container; we deliberately don't nest a second scroll here
+   so touch users don't get trapped in an inner scrollview. */
+.info-modal-list-value {
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 /* ── Settings dropdown (mobile consolidated menu) ── */

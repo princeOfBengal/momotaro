@@ -38,6 +38,7 @@ import {
   listOfflineChaptersForManga,
   deleteOfflineManga,
   deleteOfflineChapter,
+  clearAllJobs as _clearAllJobs,
 } from './offlineDb.js';
 import {
   isAvailable as offlineStorageAvailable,
@@ -423,6 +424,19 @@ export async function retryJob(jobId) {
   await updateJob(jobId, { status: 'queued', error: null, attempts: 0 });
   notify();
   pump();
+}
+
+// Abort every in-flight job and drop every row from the persisted queue.
+// Surfaced via the Settings UI as the "Clear queue" affordance — wipes
+// both the visible history (done/failed/cancelled) and any
+// queued/running work in one shot.
+export async function clearQueue() {
+  for (const ctrl of _inflight.values()) {
+    try { ctrl.abort(); } catch { /* ignore — already aborted */ }
+  }
+  _inflight.clear();
+  await _clearAllJobs();
+  notify();
 }
 
 export async function listDownloads() {

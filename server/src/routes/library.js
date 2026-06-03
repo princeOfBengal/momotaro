@@ -789,26 +789,98 @@ router.post('/manga/:id/scan', asyncWrapper(async (req, res) => {
   });
 }));
 
-// GET /api/manga/:id/info — file path, file count, and folder size.
-// Values come from the cached `bytes_on_disk` / `file_count` columns populated
-// during scan. This used to walk the manga folder on each request, which is
-// untenable at 8 TB scale.
+// GET /api/manga/:id/info — file path, chapter count, and folder size.
+// `file_count` is the number of chapter entries on disk: a chapter folder
+// counts as 1, a single CBZ file counts as 1. `size_mb` is the recursive
+// on-disk size of the manga's folder. Walked on demand so the modal reflects
+// the current state of the disk after a refresh, not the last scan rollup.
 router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
   const db = getDb();
   const manga = db.prepare(
-    'SELECT id, path, bytes_on_disk, file_count FROM manga WHERE id = ?'
+    'SELECT id, path, track_volumes FROM manga WHERE id = ?'
   ).get(req.params.id);
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
-  const sizeBytes = manga.bytes_on_disk || 0;
+  const fileCount = db.prepare(
+    'SELECT COUNT(*) FROM chapters WHERE manga_id = ?'
+  ).pluck().get(manga.id) || 0;
+
+  let sizeBytes = 0;
+  try {
+    sizeBytes = await computeFolderSize(manga.path);
+  } catch { /* missing folder → 0 */ }
+
+  // Gaps in the 1..max integer sequence. We bucket each chapter into the
+  // integer floor of its `number` / `volume` (so 5.5 still covers chapter 5)
+  // and report the integers in [1, max] with no chapter assigned. `track_volumes`
+  // decides which axis the client will display, but we ship both so the
+  // client can re-render without another round-trip if the toggle changes.
+  const rows = db.prepare(
+    'SELECT number, volume FROM chapters WHERE manga_id = ?'
+  ).all(manga.id);
+
+  const missingChapters = computeMissingSequence(rows.map(r => r.number));
+  const missingVolumes  = computeMissingSequence(rows.map(r => r.volume));
+
   res.json({
     data: {
-      path:       manga.path,
-      file_count: manga.file_count || 0,
-      size_mb:    Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+      path:             manga.path,
+      file_count:       fileCount,
+      size_mb:          Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+      track_volumes:    !!manga.track_volumes,
+      missing_chapters: missingChapters,
+      missing_volumes:  missingVolumes,
     },
   });
 }));
+
+const MISSING_LIST_CAP = 500;
+
+function computeMissingSequence(values) {
+  const present = new Set();
+  let max = 0;
+  for (const v of values) {
+    if (v == null || !Number.isFinite(v)) continue;
+    const n = Math.floor(v);
+    if (n >= 1) {
+      present.add(n);
+      if (n > max) max = n;
+    }
+  }
+  let count = 0;
+  const numbers = [];
+  for (let i = 1; i <= max; i++) {
+    if (!present.has(i)) {
+      count++;
+      if (numbers.length < MISSING_LIST_CAP) numbers.push(i);
+    }
+  }
+  return { count, numbers, max, truncated: count > numbers.length };
+}
+
+async function computeFolderSize(rootPath) {
+  let total = 0;
+  const stack = [rootPath];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch { continue; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile()) {
+        try {
+          const st = await fs.promises.stat(full);
+          total += st.size;
+        } catch { /* skip unreadable */ }
+      }
+    }
+  }
+  return total;
+}
 
 // ── Genres ───────────────────────────────────────────────────────────────────
 //

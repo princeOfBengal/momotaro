@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { createPacer } = require('./_pacer');
 
 // WeebCentral source adapter — the second source after MangaDex with FULL
 // support including chapter image download.
@@ -59,12 +60,10 @@ const SITE_BASE  = 'https://weebcentral.com';
 const USER_AGENT = 'Mozilla/5.0 (Momotaro/1.0; +https://github.com/momotaro)';
 const REQUEST_INTERVAL_MS = 250;
 
-let _lastRequestAt = 0;
+const _pacer = createPacer(REQUEST_INTERVAL_MS);
 
 async function pacedFetch(url, options = {}) {
-  const wait = REQUEST_INTERVAL_MS - (Date.now() - _lastRequestAt);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastRequestAt = Date.now();
+  await _pacer.wait();
 
   const resp = await fetch(url, {
     redirect:   'follow',

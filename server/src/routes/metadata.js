@@ -14,11 +14,11 @@ const {
   MU_REQUEST_INTERVAL_MS,
 } = require('../metadata/mangaupdates');
 const { getCached: getCachedMetadata } = require('../metadata/cache');
-const { getSetting, getUserAniList } = require('./settings');
+const { getUserAniList } = require('./settings');
 const { requireAdmin } = require('../middleware/auth');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { reinforceActiveCover } = require('../scanner/coverResolver');
-const { safeJsonParse } = require('../utils');
+const { safeJsonParse, getSetting } = require('../utils');
 const cbzCache = require('../scanner/cbzCache');
 const config = require('../config');
 

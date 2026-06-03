@@ -17,6 +17,7 @@ import {
 import { getJobForChapter, listJobs, getOfflineChapter, listOfflineChaptersForManga } from '../api/offlineDb';
 import { isAvailable as offlineStorageAvailable } from '../api/offlineStorage';
 import { getResume, clearResume } from '../utils/readingProgress';
+import { appAlert, appConfirm, ensureAdminAccess } from '../dialog/dialogService';
 import './MangaDetail.css';
 
 const CHAPTERS_COLLAPSED_COUNT = 5;
@@ -195,9 +196,10 @@ function SeriesDownloadButton({ mangaId, chapters, serverUpdatedAt }) {
       // NO_FOLDER is the user-actionable case from the SAF gate. Offer
       // to send them straight to Settings → Offline so they can pick.
       if (e && e.code === 'NO_FOLDER') {
-        const go = window.confirm(
+        const go = await appConfirm(
           'Pick a download folder first.\n\n'
-          + 'Open Settings → Offline Downloads now?'
+          + 'Open Settings → Offline Downloads now?',
+          { okLabel: 'Open Settings' },
         );
         if (go) navigate('/settings', { state: { section: 'offline' } });
         return;
@@ -220,7 +222,7 @@ function SeriesDownloadButton({ mangaId, chapters, serverUpdatedAt }) {
   }
 
   async function removeAll() {
-    if (!window.confirm('Remove every downloaded chapter of this series from the device?')) return;
+    if (!(await appConfirm('Remove every downloaded chapter of this series from the device?', { danger: true, okLabel: 'Remove' }))) return;
     setBusy(true);
     try { await downloaderDeleteSeries(mangaId); }
     finally { setBusy(false); }
@@ -346,7 +348,7 @@ function ChapterDownloadButton({ mangaId, chapterId }) {
     try {
       switch (state.status) {
         case 'done':
-          if (window.confirm('Remove this downloaded chapter?')) {
+          if (await appConfirm('Remove this downloaded chapter?', { danger: true, okLabel: 'Remove' })) {
             await downloaderDeleteChapter(mangaId, chapterId);
           }
           break;
@@ -365,9 +367,10 @@ function ChapterDownloadButton({ mangaId, chapterId }) {
             // a confirm + nav so the user isn't stuck reading a generic
             // error in a tooltip.
             if (err && err.code === 'NO_FOLDER') {
-              const go = window.confirm(
+              const go = await appConfirm(
                 'Pick a download folder first.\n\n'
-                + 'Open Settings → Offline Downloads now?'
+                + 'Open Settings → Offline Downloads now?',
+                { okLabel: 'Open Settings' },
               );
               if (go) navigate('/settings', { state: { section: 'offline' } });
             } else {
@@ -469,7 +472,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
       await api.setThumbnailFromFile(mangaId, filename);
       onApplied();
     } catch (err) {
-      alert('Failed: ' + err.message);
+      appAlert('Failed: ' + err.message);
       setApplying(null);
     }
   }
@@ -480,7 +483,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
       await api.setPageAsThumbnail(mangaId, pageId);
       onApplied();
     } catch (err) {
-      alert('Failed: ' + err.message);
+      appAlert('Failed: ' + err.message);
       setApplying(null);
     }
   }
@@ -701,7 +704,7 @@ function AnilistSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
       const updated = await api.applyMetadata(mangaId, result.anilist_id);
       onApplied(updated);
     } catch (err) {
-      alert('Failed to apply: ' + err.message);
+      appAlert('Failed to apply: ' + err.message);
       setApplying(null);
     }
   }
@@ -810,7 +813,7 @@ function DoujinshiSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
       const updated = await api.applyDoujinshiMetadata(mangaId, result.doujinshi_id);
       onApplied(updated);
     } catch (err) {
-      alert('Failed to apply: ' + err.message);
+      appAlert('Failed to apply: ' + err.message);
       setApplying(null);
     }
   }
@@ -918,7 +921,7 @@ function MALSearchModal({ mangaId, defaultQuery, onApplied, onClose }) {
       const updated = await api.applyMalMetadata(mangaId, result.mal_id);
       onApplied(updated);
     } catch (err) {
-      alert('Failed to apply: ' + err.message);
+      appAlert('Failed to apply: ' + err.message);
       setApplying(null);
     }
   }
@@ -1027,7 +1030,7 @@ function MangaUpdatesSearchModal({ mangaId, defaultQuery, onApplied, onClose }) 
       const updated = await api.applyMangaUpdatesMetadata(mangaId, result.mangaupdates_id);
       onApplied(updated);
     } catch (err) {
-      alert('Failed to apply: ' + err.message);
+      appAlert('Failed to apply: ' + err.message);
       setApplying(null);
     }
   }
@@ -1634,7 +1637,7 @@ function SourceUrlsModal({ manga, onClose }) {
       setPendingDelete(null);
       load();
     } catch (err) {
-      alert(err.message);
+      appAlert(err.message);
     }
   }
 
@@ -1934,6 +1937,62 @@ export default function MangaDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
+  // Keep a ref of `showInfo` so the scan-status poller below can read the
+  // latest value without re-subscribing every time the modal toggles.
+  const showInfoRef = useRef(false);
+  useEffect(() => { showInfoRef.current = showInfo; }, [showInfo]);
+
+  // Watch for library scans (started elsewhere, e.g. Settings → Libraries) and
+  // refresh the More Info stats when one completes. Polls scan status while
+  // the page is mounted. On a running → idle transition we re-fetch the manga
+  // and the info payload so file count / folder size reflect the scan result.
+  const prevScanRunningRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    async function tick() {
+      if (cancelled) return;
+      try {
+        const status = await api.getScanStatus();
+        const wasRunning = prevScanRunningRef.current;
+        const isRunning = !!status?.running;
+        prevScanRunningRef.current = isRunning;
+        if (wasRunning && !isRunning && !cancelled) {
+          try {
+            const fresh = await api.getManga(id);
+            if (cancelled) return;
+            setManga(fresh);
+          } catch { /* keep prior manga */ }
+          if (cancelled) return;
+          setInfoData(null);
+          setInfoError(null);
+          if (showInfoRef.current) {
+            setInfoLoading(true);
+            try {
+              const data = await api.getMangaInfo(id);
+              if (!cancelled) setInfoData(data);
+            } catch (err) {
+              if (!cancelled) setInfoError(err.message);
+            } finally {
+              if (!cancelled) setInfoLoading(false);
+            }
+          }
+        }
+      } catch { /* network/auth blip — try again next tick */ }
+      if (!cancelled) {
+        // Faster polling while a scan is in flight so the post-scan refresh
+        // lands quickly; slower otherwise to keep the page idle-cheap.
+        const delay = prevScanRunningRef.current ? 2000 : 5000;
+        timer = setTimeout(tick, delay);
+      }
+    }
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [id]);
+
   async function handleRefresh() {
     if (refreshing) return;
     setRefreshing(true);
@@ -1945,6 +2004,21 @@ export default function MangaDetail() {
       // full library reload that would happen if the user manually scanned.
       const fresh = await api.getManga(id);
       setManga(fresh);
+      // Invalidate the More Info cache so the next open (or the currently
+      // open modal) reflects the post-rescan file count and folder size.
+      setInfoData(null);
+      setInfoError(null);
+      if (showInfo) {
+        setInfoLoading(true);
+        try {
+          const data = await api.getMangaInfo(id);
+          setInfoData(data);
+        } catch (err) {
+          setInfoError(err.message);
+        } finally {
+          setInfoLoading(false);
+        }
+      }
       const added = result?.added | 0;
       const removed = result?.removed | 0;
       let text;
@@ -1996,21 +2070,21 @@ export default function MangaDetail() {
         setMangaListIds(prev => new Set([...prev, listId]));
       }
     } catch (err) {
-      alert('Failed to update reading list: ' + err.message);
+      appAlert('Failed to update reading list: ' + err.message);
     } finally {
       setTogglingList(null);
     }
   }
 
   async function handleResetProgress() {
-    if (!confirm('Reset all reading progress for this manga?')) return;
+    if (!(await appConfirm('Reset all reading progress for this manga?', { danger: true, okLabel: 'Reset' }))) return;
     try {
       await api.resetProgress(id);
       clearResume(id);
       const data = await api.getManga(id);
       setManga(data);
     } catch (err) {
-      alert('Failed to reset progress: ' + err.message);
+      appAlert('Failed to reset progress: ' + err.message);
     }
   }
 
@@ -2022,7 +2096,7 @@ export default function MangaDetail() {
       await api.updateManga(id, { track_volumes: newVal });
       setManga(prev => ({ ...prev, track_volumes: newVal ? 1 : 0 }));
     } catch (err) {
-      alert('Failed to save setting: ' + err.message);
+      appAlert('Failed to save setting: ' + err.message);
     } finally {
       setSavingTrackSetting(false);
     }
@@ -2098,7 +2172,7 @@ export default function MangaDetail() {
   }
 
   async function handleBreakAnilistLinkage() {
-    if (!confirm('Remove the AniList link for this manga?')) return;
+    if (!(await appConfirm('Remove the AniList link for this manga?', { okLabel: 'Remove' }))) return;
     try {
       const result = await api.resetMetadata(id, 'anilist');
       setManga(prev => ({ ...prev, ...result, chapters: prev.chapters, progress: prev.progress }));
@@ -2108,7 +2182,7 @@ export default function MangaDetail() {
         ? { logged_in: true, linked: false }
         : prev);
     } catch (err) {
-      alert('Failed to remove AniList linkage: ' + err.message);
+      appAlert('Failed to remove AniList linkage: ' + err.message);
     }
   }
 
@@ -2306,12 +2380,32 @@ export default function MangaDetail() {
     catch (_) { /* surfaced via optimizeTask.lastError */ }
   }
 
-  function openOptimizeModal() {
+  async function openOptimizeModal() {
+    // Admin-gated action — pop the password prompt if the caller doesn't
+    // already hold an admin token. On cancel we just return without
+    // opening the modal.
+    if (!(await ensureAdminAccess())) return;
     // Clear any badge from a previous completion so the modal opens in
     // the 'confirm' phase. No-op while a task is currently running, in
     // which case the modal adopts the live 'running' state instead.
     optimizeTask.reset();
     setShowOptimize(true);
+  }
+
+  // Admin-gated companions for the two other restricted entry points on
+  // this page. Wrapping at the handler keeps every call site (navbar
+  // icon, mobile settings dropdown, …) behind the same gate.
+  async function openSourceUrlsModal() {
+    if (!(await ensureAdminAccess())) return;
+    setShowSourceUrlsModal(true);
+  }
+  async function openEditPage() {
+    if (!(await ensureAdminAccess())) return;
+    navigate(`/manga/${manga.id}/edit`);
+  }
+  async function openDeletePrompt() {
+    if (!(await ensureAdminAccess())) return;
+    setShowDeleteConfirm(true);
   }
 
   function closeOptimizeModal() {
@@ -2373,7 +2467,7 @@ export default function MangaDetail() {
     } catch (err) {
       setDeleting(false);
       setShowDeleteConfirm(false);
-      alert('Delete failed: ' + err.message);
+      appAlert('Delete failed: ' + err.message);
     }
   }
 
@@ -2419,7 +2513,7 @@ export default function MangaDetail() {
         </button>
         <button
           className="detail-source-btn"
-          onClick={() => setShowSourceUrlsModal(true)}
+          onClick={openSourceUrlsModal}
           title="Search third-party sources"
           aria-label="Search third-party sources"
         >
@@ -2429,7 +2523,7 @@ export default function MangaDetail() {
         </button>
         <button
           className="detail-edit-btn"
-          onClick={() => navigate(`/manga/${manga.id}/edit`)}
+          onClick={openEditPage}
           title="Edit manga"
           aria-label="Edit manga"
         >
@@ -2440,7 +2534,7 @@ export default function MangaDetail() {
         </button>
         <button
           className="detail-delete-btn"
-          onClick={() => setShowDeleteConfirm(true)}
+          onClick={openDeletePrompt}
           title="Delete manga"
           aria-label="Delete manga"
         >
@@ -2535,13 +2629,11 @@ export default function MangaDetail() {
                 serverUpdatedAt={manga.updated_at}
               />
 
-              {/* Desktop: individual buttons. Third Party Sources lives in
-                  the navbar icon next to Optimize, so it's not duplicated here. */}
+              {/* Desktop: individual buttons. Optimize and Third Party
+                  Sources live in the navbar icon row, so they're not
+                  duplicated here. */}
               <button className="btn btn-ghost detail-desktop-only" onClick={() => setShowMetaModal(true)}>
                 Metadata
-              </button>
-              <button className="btn btn-ghost detail-desktop-only" onClick={openOptimizeModal}>
-                Optimize
               </button>
               <button className="btn btn-ghost detail-desktop-only" onClick={handleOpenInfo}>
                 More Info
@@ -2571,7 +2663,7 @@ export default function MangaDetail() {
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openOptimizeModal(); }}>
                       Optimize
                     </button>
-                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); setShowSourceUrlsModal(true); }}>
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openSourceUrlsModal(); }}>
                       Third Party Sources
                     </button>
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); handleOpenInfo(); }}>
@@ -3280,7 +3372,19 @@ export default function MangaDetail() {
             <div className="info-modal-body">
               {infoLoading && <div className="loading-center"><div className="spinner" /></div>}
               {infoError && <p className="info-modal-error">{infoError}</p>}
-              {infoData && (
+              {infoData && (() => {
+                const trackingVolumes = !!manga?.track_volumes;
+                const missing = trackingVolumes ? infoData.missing_volumes : infoData.missing_chapters;
+                const noun  = trackingVolumes ? 'Volumes' : 'Chapters';
+                const DISPLAY_CAP = 50;
+                const formatList = (m) => {
+                  const numbers = m?.numbers || [];
+                  const total = m?.count ?? numbers.length;
+                  if (total === 0) return 'None';
+                  if (total <= DISPLAY_CAP) return numbers.join(', ');
+                  return numbers.slice(0, DISPLAY_CAP).join(', ') + `, … (+${(total - DISPLAY_CAP).toLocaleString()} more)`;
+                };
+                return (
                 <dl className="info-modal-list">
                   <div className="info-modal-row">
                     <dt className="info-modal-label">File Path</dt>
@@ -3288,14 +3392,27 @@ export default function MangaDetail() {
                   </div>
                   <div className="info-modal-row">
                     <dt className="info-modal-label">Files Found</dt>
-                    <dd className="info-modal-value">{infoData.file_count.toLocaleString()}</dd>
+                    <dd className="info-modal-value">{(infoData.file_count ?? 0).toLocaleString()}</dd>
                   </div>
                   <div className="info-modal-row">
                     <dt className="info-modal-label">Folder Size</dt>
-                    <dd className="info-modal-value">{infoData.size_mb.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB</dd>
+                    <dd className="info-modal-value">{(infoData.size_mb ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB</dd>
                   </div>
+                  {missing && (
+                    <>
+                      <div className="info-modal-row">
+                        <dt className="info-modal-label">Missing {noun}</dt>
+                        <dd className="info-modal-value">{(missing.count ?? 0).toLocaleString()}</dd>
+                      </div>
+                      <div className="info-modal-row">
+                        <dt className="info-modal-label">Missing {noun} List</dt>
+                        <dd className="info-modal-value info-modal-list-value">{formatList(missing)}</dd>
+                      </div>
+                    </>
+                  )}
                 </dl>
-              )}
+                );
+              })()}
             </div>
           </div>
         </div>

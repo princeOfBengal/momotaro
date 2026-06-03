@@ -356,6 +356,14 @@ export async function clearFinishedJobs() {
   await tx.done;
 }
 
+// Wipe every row from the jobs store. The caller is responsible for
+// aborting any in-flight controllers first (see cancelJob in
+// downloader.js) — this just clears the persisted queue.
+export async function clearAllJobs() {
+  const db = await getOfflineDb();
+  await db.clear(STORES.JOBS);
+}
+
 // ── Outbox (progress sync) ───────────────────────────────────────────────────
 
 export async function enqueueProgressWrite(entry) {

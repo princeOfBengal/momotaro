@@ -6,10 +6,13 @@ import MangaDetail from './pages/MangaDetail';
 import InstallPrompt from './components/InstallPrompt';
 import UpdateBanner from './components/UpdateBanner';
 import AdminTaskBanner from './components/AdminTaskBanner';
+import RequireAdminAccess from './components/RequireAdminAccess';
 import { api, setConnectivityProbe } from './api/client';
 import { ConnectivityProvider, ConnectivityBanner, useConnectivity } from './context/ConnectivityContext';
 import { UserProvider } from './context/UserContext';
 import { PreferencesProvider } from './context/PreferencesContext';
+import DialogProvider from './dialog/DialogProvider';
+import AdminUnlockDialog from './dialog/AdminUnlockDialog';
 import { initDownloader, reconcileNativeProgress } from './api/downloader';
 import { flushOutbox } from './api/outboxSync';
 import { migrateLegacyRoot } from './api/offlineStorage';
@@ -33,8 +36,9 @@ migrateLegacyRoot();
 // most-frequent navigation.
 //
 // Lazy: Reader (heavy — paged + scroll + controls + edge hints + prefetch),
-// Settings (~2.3k LOC of admin UI), Libraries / EditManga / Genres (rarely
-// visited), AnilistCallback (only during OAuth).
+// Settings (slim router; each section is a further per-section chunk under
+// pages/settings/, prefetched on sidebar hover), Libraries / EditManga /
+// Genres (rarely visited), AnilistCallback (only during OAuth).
 const Reader          = lazy(() => import('./pages/Reader'));
 const EditManga       = lazy(() => import('./pages/EditManga'));
 const Settings        = lazy(() => import('./pages/Settings'));
@@ -216,6 +220,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <ConnectivityProvider getServerUrl={api.getServerUrl}>
+        <DialogProvider>
         <ConnectivityProbeBinder />
         <DownloaderBootstrap />
         {/* Slim offline-mode banner. Renders nothing when online; otherwise
@@ -239,10 +244,24 @@ export default function App() {
               <Route path="/" element={<Home />} />
               <Route path="/genres" element={<Genres />} />
               <Route path="/art-gallery" element={<ArtGallery />} />
-              <Route path="/third-party-sourcing" element={<ThirdPartySourcing />} />
+              <Route
+                path="/third-party-sourcing"
+                element={
+                  <RequireAdminAccess>
+                    <ThirdPartySourcing />
+                  </RequireAdminAccess>
+                }
+              />
               <Route path="/library" element={<Library />} />
               <Route path="/manga/:id" element={<MangaDetail />} />
-              <Route path="/manga/:id/edit" element={<EditManga />} />
+              <Route
+                path="/manga/:id/edit"
+                element={
+                  <RequireAdminAccess>
+                    <EditManga />
+                  </RequireAdminAccess>
+                }
+              />
               <Route path="/read/:chapterId" element={<Reader />} />
               <Route path="/libraries" element={<Libraries />} />
               <Route path="/settings" element={<Settings />} />
@@ -264,6 +283,12 @@ export default function App() {
             install banner if both fire (they normally don't: InstallPrompt
             hides itself when running standalone, which the APK always is). */}
         <UpdateBanner />
+        {/* Imperative companion to <RequireAdminAccess>. Action-level
+            callers anywhere in the app pop this via ensureAdminAccess()
+            to gate one-shot admin operations (Optimize, Edit Manga,
+            Third Party Sources, etc) without wrapping a whole route. */}
+        <AdminUnlockDialog />
+        </DialogProvider>
       </ConnectivityProvider>
     </BrowserRouter>
   );

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import { api } from '../api/client';
+import { appConfirm } from '../dialog/dialogService';
 import './Sidebar.css';
 
 export default function Sidebar() {
@@ -62,7 +63,7 @@ export default function Sidebar() {
   }
 
   async function handleLogout() {
-    if (!confirm('Log out of AniList?')) return;
+    if (!(await appConfirm('Log out of AniList?', { okLabel: 'Log out' }))) return;
     setLoggingOut(true);
     try {
       await api.anilistLogout();

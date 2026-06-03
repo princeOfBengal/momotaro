@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import AppSidebar from '../components/AppSidebar';
 import { useConnectivity } from '../context/ConnectivityContext';
+import { appAlert } from '../dialog/dialogService';
 import './Library.css';
 import './Home.css';
 import './ThirdPartySourcing.css';
@@ -336,7 +337,7 @@ function ThirdPartySourcingInner() {
       await api.cancelSourceDownload(id);
       refreshJobs();
     } catch (err) {
-      alert(err.message);
+      appAlert(err.message);
     }
   }
 
@@ -345,7 +346,7 @@ function ThirdPartySourcingInner() {
       await api.retrySourceDownload(id);
       refreshJobs();
     } catch (err) {
-      alert(err.message);
+      appAlert(err.message);
     }
   }
 
@@ -354,7 +355,7 @@ function ThirdPartySourcingInner() {
       await api.clearFinishedDownloads();
       refreshJobs();
     } catch (err) {
-      alert(err.message);
+      appAlert(err.message);
     }
   }
 

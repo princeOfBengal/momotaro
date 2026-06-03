@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
 import { api } from '../api/client';
+import { appAlert, appConfirm } from '../dialog/dialogService';
 
 // "Account" settings section: the logged-in user, a log-out button, password
 // change, data exports, and their own reading-history timeline. In single-user
@@ -40,9 +41,9 @@ export default function AccountSection() {
   }
 
   async function handleClearHistory() {
-    if (!window.confirm('Clear your reading history? This cannot be undone.')) return;
+    if (!(await appConfirm('Clear your reading history? This cannot be undone.', { danger: true, okLabel: 'Clear' }))) return;
     try { await api.clearHistory(); setHistory([]); }
-    catch (e) { window.alert('Failed to clear history: ' + e.message); }
+    catch (e) { appAlert('Failed to clear history: ' + e.message); }
   }
 
   async function handleChangePassword(e) {
@@ -74,14 +75,14 @@ export default function AccountSection() {
   async function handleExportHistory() {
     setExportingHistory(true);
     try { await api.exportReadingHistoryCsv(); }
-    catch (e) { window.alert('Export failed: ' + e.message); }
+    catch (e) { appAlert('Export failed: ' + e.message); }
     finally { setExportingHistory(false); }
   }
 
   async function handleExportLists() {
     setExportingLists(true);
     try { await api.exportReadingListsCsv(); }
-    catch (e) { window.alert('Export failed: ' + e.message); }
+    catch (e) { appAlert('Export failed: ' + e.message); }
     finally { setExportingLists(false); }
   }
 

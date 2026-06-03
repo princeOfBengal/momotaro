@@ -1101,3 +1101,63 @@
 .cm-cl-paired-badge {
   color: var(--accent);
 }
+
+/* ── Section-load skeleton ──────────────────────────────────────────────
+   Shown briefly while a per-section chunk is fetching. Shaped like the
+   section's own header + first card so the layout doesn't jump when the
+   real content swaps in. Animation is subtle on purpose — a spinner
+   inside an already-loaded Settings shell reads as "something is broken";
+   a steady shimmer reads as "still painting". */
+.sp-section-skeleton {
+  animation: sp-skeleton-fade-in 120ms ease-out both;
+}
+@keyframes sp-skeleton-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.sp-skeleton-head {
+  margin-bottom: 24px;
+}
+.sp-skeleton-title,
+.sp-skeleton-desc,
+.sp-skeleton-line {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--border) 0%,
+    var(--bg-card) 50%,
+    var(--border) 100%
+  );
+  background-size: 200% 100%;
+  animation: sp-skeleton-shimmer 1400ms linear infinite;
+}
+.sp-skeleton-title {
+  width: 200px;
+  height: 22px;
+  margin-bottom: 12px;
+}
+.sp-skeleton-desc {
+  width: 420px;
+  max-width: 80%;
+  height: 14px;
+}
+.sp-skeleton-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sp-skeleton-line {
+  height: 14px;
+}
+.sp-skeleton-line.short { width: 40%; }
+.sp-skeleton-line.med   { width: 70%; }
+.sp-skeleton-line.long  { width: 90%; }
+@keyframes sp-skeleton-shimmer {
+  from { background-position: 200% 0;   }
+  to   { background-position: -200% 0;  }
+}

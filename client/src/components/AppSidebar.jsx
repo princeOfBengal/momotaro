@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useConnectivity } from '../context/ConnectivityContext';
+import { appAlert } from '../dialog/dialogService';
 
 // Shared left-rail sidebar for Home and Library. Holds the Home shortcut,
 // the Libraries list, and the Reading Lists (with in-place create + delete).
@@ -79,7 +80,7 @@ export default function AppSidebar({
       setCreatingList(false);
       onReadingListsChanged?.();
     } catch (err) {
-      alert('Failed to create list: ' + err.message);
+      appAlert('Failed to create list: ' + err.message);
     } finally {
       setSavingList(false);
     }
@@ -94,7 +95,7 @@ export default function AppSidebar({
       if (activeList === id && onSelectAll) onSelectAll();
       onReadingListsChanged?.();
     } catch (err) {
-      alert('Failed to delete list: ' + err.message);
+      appAlert('Failed to delete list: ' + err.message);
     }
   }
 

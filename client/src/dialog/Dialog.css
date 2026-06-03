@@ -1,0 +1,154 @@
+/* In-app replacement for window.alert / window.confirm / window.prompt.
+   The .app-dialog-backdrop sits at z-index above every other surface so
+   readers, reading-list pickers, and full-screen settings panels still
+   yield to a confirm prompt. */
+
+.app-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: app-dialog-fade 0.18s ease-out;
+  /* Help iOS Safari size the backdrop against the *visible* viewport so
+     the dialog stays centered when the keyboard opens. `dvh` falls back
+     to inset:0 (default 100% of viewport) on older browsers. */
+  height: 100dvh;
+}
+
+/* Admin unlock sits ABOVE any regular alert/confirm/prompt so an
+   in-flight system message can't visually cover the auth gate it was
+   never meant to interact with. */
+.app-dialog-backdrop-elevated {
+  z-index: 2100;
+}
+
+@keyframes app-dialog-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.app-dialog {
+  background: var(--bg-elev, #1f1f1f);
+  color: var(--text-primary, #fff);
+  border: 1px solid var(--border, #2c2c2c);
+  border-radius: 12px;
+  padding: 20px;
+  width: 100%;
+  max-width: 440px;
+  /* Backdrop has 16px padding on every side. Capping max-height to the
+     viewport minus that padding keeps the dialog from overflowing the
+     screen on small phones; the inner message scrolls instead. Use
+     `dvh` so the cap shrinks with the iOS Safari keyboard — `vh` is
+     pinned to the largest viewport and would push action buttons under
+     the keyboard once it opens. */
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-sizing: border-box;
+  animation: app-dialog-pop 0.18s ease-out;
+}
+
+@keyframes app-dialog-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+.app-dialog-title {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.app-dialog-message {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary, #fff);
+  /* Preserve newlines from messages built with `\n` (mirrors the way the
+     native confirm dialog renders multi-line strings). */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* When the message is unusually long, scroll inside the bubble instead
+     of growing the dialog past the viewport (which would push the action
+     buttons off-screen on small phones). */
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.app-dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  flex-shrink: 0;
+}
+
+.app-dialog-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-secondary, #181818);
+  border: 1px solid var(--border, #2c2c2c);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+.app-dialog-input:focus {
+  outline: none;
+  border-color: var(--accent, #6aa6ff);
+}
+.app-dialog-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.app-dialog-error {
+  color: #ff6b6b;
+  font-size: 13px;
+  margin: 0;
+  word-break: break-word;
+}
+
+.app-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.app-dialog-actions .btn {
+  flex-shrink: 0;
+  min-width: 80px;
+}
+
+.app-dialog-danger .btn-danger,
+.btn-danger {
+  background: #c0392b;
+  color: #fff;
+  border: 1px solid #c0392b;
+}
+.btn-danger:hover { filter: brightness(1.1); }
+
+@media (max-width: 480px) {
+  .app-dialog { padding: 16px; }
+  .app-dialog-title { font-size: 16px; }
+  .app-dialog-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+  .app-dialog-actions .btn {
+    width: 100%;
+    min-width: 0;
+  }
+}

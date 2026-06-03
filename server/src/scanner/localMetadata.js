@@ -38,34 +38,140 @@ function findJsonInDir(dir) {
 }
 
 /**
- * Search for metadata JSON in:
- *  1. The manga directory itself (top-level sidecar or metadata.json)
- *  2. Any immediate subdirectory that is a chapter folder (first one found)
+ * Search for metadata in:
+ *  1. JSON sidecar (manga dir, then first chapter subdirectory yielding one)
+ *  2. ComicInfo.xml (same search order) as fallback
  *
  * Returns a normalised metadata object ready to write to the DB, or null.
  */
 function findLocalMetadata(mangaPath) {
-  // 1. Check the manga dir itself
-  let raw = findJsonInDir(mangaPath);
+  const subdirs = immediateSubdirs(mangaPath);
 
-  // 2. Fall back to first chapter subdirectory
+  // 1. JSON sidecar
+  let raw = findJsonInDir(mangaPath);
   if (!raw) {
-    let subdirs;
-    try {
-      subdirs = fs.readdirSync(mangaPath, { withFileTypes: true })
-        .filter(e => e.isDirectory())
-        .map(e => path.join(mangaPath, e.name));
-    } catch {
-      subdirs = [];
-    }
     for (const sub of subdirs) {
       raw = findJsonInDir(sub);
       if (raw) break;
     }
   }
+  if (raw) {
+    const meta = normalizeLocalMeta(raw);
+    if (meta) return meta;
+  }
 
-  if (!raw) return null;
-  return normalizeLocalMeta(raw);
+  // 2. ComicInfo.xml fallback
+  let tags = findComicInfoXmlInDir(mangaPath);
+  if (!tags) {
+    for (const sub of subdirs) {
+      tags = findComicInfoXmlInDir(sub);
+      if (tags) break;
+    }
+  }
+  if (tags) return normalizeComicInfo(tags);
+
+  return null;
+}
+
+function immediateSubdirs(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => path.join(dir, e.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Locate and parse a ComicInfo.xml file in `dir`. Returns a flat
+ * { localName: text } map of its child elements, or null.
+ */
+function findComicInfoXmlInDir(dir) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const found = names.find(n => n.toLowerCase() === 'comicinfo.xml');
+  if (!found) return null;
+  try {
+    return parseComicInfoXml(fs.readFileSync(path.join(dir, found), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Minimal ComicInfo.xml parser. ComicInfo elements directly under the root
+ * are leaf elements containing text — we collect each by local name
+ * (stripping any namespace prefix) so tags like <ty:PublishingStatusTachiyomi>
+ * resolve to "PublishingStatusTachiyomi". Returns null if no tags found.
+ */
+function parseComicInfoXml(text) {
+  const root = /<(?:[a-zA-Z_][\w.-]*:)?ComicInfo(?:\s[^>]*)?>([\s\S]*)<\/(?:[a-zA-Z_][\w.-]*:)?ComicInfo>/i.exec(text);
+  if (!root) return null;
+  const body = root[1];
+
+  const tags = {};
+  const re = /<(?:[a-zA-Z_][\w.-]*:)?([a-zA-Z_][\w.-]*)(?:\s[^>]*)?>([\s\S]*?)<\/(?:[a-zA-Z_][\w.-]*:)?\1>/g;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    tags[m[1]] = decodeXmlEntities(m[2]).trim();
+  }
+  return Object.keys(tags).length > 0 ? tags : null;
+}
+
+function decodeXmlEntities(s) {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Map a ComicInfo.xml tag map onto our internal metadata shape.
+ * In ComicInfo, <Series> is the work title (the manga); <Title> is the
+ * chapter/issue title — we prefer Series and fall back to Title.
+ */
+function normalizeComicInfo(tags) {
+  const title = str(tags.Series) || str(tags.Title) || null;
+  const description = str(tags.Summary) || null;
+
+  let genres = [];
+  const genreText = str(tags.Genre) || str(tags.Tags);
+  if (genreText) {
+    genres = genreText.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  let year = null;
+  if (tags.Year != null) {
+    const n = parseInt(String(tags.Year).slice(0, 4), 10);
+    if (n >= 1900 && n <= 2100) year = n;
+  }
+
+  // CommunityRating is 0–5 in the ComicInfo spec; scale to our 0–10.
+  let score = null;
+  const cr = parseFloat(tags.CommunityRating);
+  if (!isNaN(cr) && cr > 0) {
+    score = Math.min(10, cr * 2);
+  }
+
+  const author =
+    str(tags.Writer) ||
+    str(tags.Penciller) ||
+    str(tags.Inker) ||
+    str(tags.Letterer) ||
+    null;
+
+  if (!title && genres.length === 0 && !description) return null;
+
+  return { title, description, genres, year, score, author };
 }
 
 /**

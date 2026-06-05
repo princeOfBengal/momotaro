@@ -457,6 +457,15 @@
   margin-top: 4px;
 }
 
+/* Desktop: the secondary-group wrapper is invisible to layout — its
+   children participate directly in the parent's flex-row, preserving
+   the historical "all action buttons in one wrapping row" desktop
+   behaviour. The mobile media query later overrides this to make the
+   wrapper its own grid container. */
+.detail-actions-secondary {
+  display: contents;
+}
+
 .detail-action-btn {
   display: inline-flex;
   align-items: center;
@@ -1947,39 +1956,62 @@
 
   /* Action buttons on phones: icon above label, stacked. Icon-only was
      unreadable on touch — no tooltip affordance, and users couldn't tell
-     a download from a settings cog. Vertical stack keeps the row compact
-     while restoring discoverability. Long labels ("Continue Reading",
-     "Reset Progress") wrap to two 11px lines. flex-basis 80px lets the
-     row wrap to a second row on ≤360px instead of cramming five buttons
-     into one. */
-  .detail-actions { gap: 6px; }
+     a download from a settings cog.
+     ────────────────────────────────────────────────────────────────────
+     Layout splits into two logical groups under the same .detail-actions
+     parent: the primary CTA (Continue/Start Reading) takes its own row
+     full-width, and the secondaries (Reset, Download, Settings, Lists)
+     flow into a sub-grid that auto-fits to whatever count actually
+     renders. Why the sub-grid: with the previous "single grid +
+     `grid-column: 1 / -1` on primary" approach, the spanned primary
+     forced all tracks to be non-empty in row 1 — so when only 3
+     secondaries rendered in row 2 (e.g. a fresh manga without progress
+     yet, regardless of whether it's volume- or chapter-tracked), one
+     cell on the right sat visibly empty. The wrapper isolates the
+     secondaries' grid so auto-fit can collapse correctly to 3/4/5
+     tracks based on the actual child count. */
+  .detail-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .detail-actions-secondary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 8px;
+  }
   .detail-actions .btn {
-    flex: 1 1 80px;
     min-width: 0;
     justify-content: center;
     text-align: center;
+    width: 100%;
   }
   .detail-actions .detail-action-btn {
     flex-direction: column;
-    padding: 8px 6px;
-    gap: 2px;
-    min-height: 56px;
-    line-height: 1.1;
+    padding: 8px 4px;
+    gap: 4px;
+    min-height: 60px;
+    line-height: 1.15;
   }
   .detail-action-icon { display: inline-block; }
   .detail-action-label {
     display: inline-block;
     font-size: 11px;
-    line-height: 1.15;
-    word-break: break-word;
+    line-height: 1.2;
+    /* No word-break — at ≥76px cell width (worst case 4 cols on 360px)
+       every visible label ("Settings", "Lists · 2", "Reset Progress",
+       "Continue Reading") fits on one or two clean lines without
+       character splitting. */
   }
   .rl-dropdown-trigger .rl-chevron,
   .detail-settings-trigger .detail-settings-chevron { display: none; }
 
-  /* Keep dropdown wrappers stretching like the other buttons */
-  .detail-settings-wrap { flex: 1; min-width: 0; }
-  .detail-settings-trigger { width: 100%; justify-content: center; }
-  .rl-dropdown-wrap { flex: 1; min-width: 0; }
+  /* Dropdown wraps are direct grid children of .detail-actions-secondary;
+     their inner trigger button fills the cell so it looks identical to a
+     sibling .detail-action-btn. */
+  .detail-settings-wrap,
+  .rl-dropdown-wrap { min-width: 0; }
+  .detail-settings-trigger,
   .rl-dropdown-trigger { width: 100%; justify-content: center; }
 
   /* Dropdown opens upward on mobile to avoid clipping at the bottom of the action row */

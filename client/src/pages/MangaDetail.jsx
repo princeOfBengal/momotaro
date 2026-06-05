@@ -2764,6 +2764,15 @@ export default function MangaDetail() {
                   )}
                 </button>
               )}
+              {/* Secondary group — wrapped in its own container so the mobile
+                  grid's auto-fit can collapse empty tracks cleanly. On
+                  desktop the wrapper uses `display: contents` so all
+                  children flow into the parent flex-row as before
+                  (no layout change). On phones the wrapper becomes its
+                  own grid container, sized to the actual secondary count
+                  (3, 4, or 5 items) — no empty cells regardless of which
+                  conditionals fire. */}
+              <div className="detail-actions-secondary">
               {progress && (
                 <button
                   className="btn btn-ghost detail-action-btn"
@@ -2885,6 +2894,7 @@ export default function MangaDetail() {
                   )}
                 </div>
               )}
+              </div>{/* /.detail-actions-secondary */}
             </div>
           </div>
         </div>

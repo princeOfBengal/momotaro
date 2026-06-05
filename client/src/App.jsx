@@ -6,6 +6,7 @@ import MangaDetail from './pages/MangaDetail';
 import InstallPrompt from './components/InstallPrompt';
 import UpdateBanner from './components/UpdateBanner';
 import AdminTaskBanner from './components/AdminTaskBanner';
+import BottomNav from './components/BottomNav';
 import RequireAdminAccess from './components/RequireAdminAccess';
 import { api, setConnectivityProbe } from './api/client';
 import { ConnectivityProvider, ConnectivityBanner, useConnectivity } from './context/ConnectivityContext';
@@ -288,6 +289,11 @@ export default function App() {
             to gate one-shot admin operations (Optimize, Edit Manga,
             Third Party Sources, etc) without wrapping a whole route. */}
         <AdminUnlockDialog />
+        {/* Phone-only persistent navigation rail. Self-gates on viewport
+            width (CSS) and pathname (component returns null on reader /
+            pairing / login / auth callback). Sits outside <Routes> so it
+            persists across route changes without re-mounting. */}
+        <BottomNav />
         </DialogProvider>
       </ConnectivityProvider>
     </BrowserRouter>

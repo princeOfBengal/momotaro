@@ -86,6 +86,7 @@
 .sp-content {
   flex: 1;
   padding: 32px 40px;
+  padding-bottom: calc(32px + var(--bottom-nav-h, 0px));
   min-width: 0;
   max-width: 1400px;
   overflow-y: auto;
@@ -614,6 +615,23 @@
     /* Hide scrollbar while still scrollable */
     scrollbar-width: none;
     gap: 0;
+    /* Soft fade at the right edge tells users there's more to scroll.
+       28px is wide enough to read as intent, narrow enough not to obscure
+       half a tab. The left edge stays solid because the active tab is
+       auto-scrolled into the centre (see Settings.jsx useLayoutEffect),
+       so the more-content indicator is almost always on the right. */
+    -webkit-mask-image: linear-gradient(
+      to right,
+      #000 0,
+      #000 calc(100% - 28px),
+      transparent 100%
+    );
+            mask-image: linear-gradient(
+      to right,
+      #000 0,
+      #000 calc(100% - 28px),
+      transparent 100%
+    );
   }
   .sp-sidebar::-webkit-scrollbar { display: none; }
   .sp-sidebar-heading { display: none; }
@@ -635,13 +653,31 @@
   }
   .sp-nav-item:hover { background: var(--bg-hover); }
 
-  .sp-content { padding: 20px 16px; }
+  .sp-content {
+    padding: 20px 16px;
+    padding-bottom: calc(20px + var(--bottom-nav-h, 0px));
+  }
   .sp-section-head { flex-direction: column; }
   .sp-section-desc { max-width: none; }
 
   /* Statistics grid: stack on mobile */
   .stat-grid { grid-template-columns: 1fr; }
   .stat-tile { min-width: 80px; padding: 12px 8px 10px; }
+}
+
+/* iOS auto-zoom prevention: text/number inputs render at 16px on phones
+   so Safari doesn't zoom-and-pan on focus. The desktop sizing stays
+   smaller. .pf-port-input is a fixed-width numeric input; widen the box
+   so the larger font doesn't crop the value. */
+@media (max-width: 700px) {
+  .settings-input,
+  .pf-port-input,
+  .cm-cl-input {
+    font-size: 16px;
+  }
+  .pf-port-input {
+    width: 120px;
+  }
 }
 
 /* ── Client Management ───────────────────────────────────────────────────── */

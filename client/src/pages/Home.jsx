@@ -458,9 +458,9 @@ export default function Home() {
     setSearchLoading(true);
     const t = setTimeout(async () => {
       try {
-        const data = await api.getLibrary({ search: q });
+        const results = await api.getLibrary({ search: q });
         if (cancelled) return;
-        setSearchResults(data);
+        setSearchResults(results);
         setSearchError(null);
       } catch (err) {
         if (cancelled) return;

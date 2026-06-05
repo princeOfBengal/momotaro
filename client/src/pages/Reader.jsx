@@ -758,11 +758,11 @@ export default function Reader() {
         saveProgress(pages.length - 1, true);
         return;
       }
-      const next = mangaSpreads[spreadIdx + 1][0];
+      const nextStart = mangaSpreads[spreadIdx + 1][0];
       setAnimDir('next');
       setAnimKey(k => k + 1);
-      setCurrentPage(next);
-      saveProgress(next);
+      setCurrentPage(nextStart);
+      saveProgress(nextStart);
       return;
     }
     const step = isPaged && pageLayout === 'double' ? 2 : 1;
@@ -778,11 +778,11 @@ export default function Reader() {
     if (mangaSpreads) {
       const spreadIdx = mangaSpreads.findIndex(s => s.includes(currentPage));
       if (spreadIdx <= 0) return;
-      const prev = mangaSpreads[spreadIdx - 1][0];
+      const prevStart = mangaSpreads[spreadIdx - 1][0];
       setAnimDir('prev');
       setAnimKey(k => k + 1);
-      setCurrentPage(prev);
-      saveProgress(prev);
+      setCurrentPage(prevStart);
+      saveProgress(prevStart);
       return;
     }
     const step = isPaged && pageLayout === 'double' ? 2 : 1;

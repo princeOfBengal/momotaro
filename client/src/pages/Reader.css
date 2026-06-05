@@ -1,11 +1,23 @@
 .reader-page {
+  /* `100dvh` tracks the dynamic viewport — shrinks when the URL bar appears
+     on mobile so the bottom of the page doesn't sit under the address bar
+     / home indicator. `100vh` is the fallback for browsers without
+     dynamic-viewport support. Matches the same pattern used by
+     .library-page. */
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
   overflow: hidden;
   background: #000;
   position: relative;
   transition: padding 0.25s ease;
   outline: none;
+  /* The reader owns the entire viewport on phones too — BottomNav
+     returns null on /read/* — but force the cascade to 0 so any reader-
+     local scroll math doesn't reserve space for a nav that isn't
+     painted. Defensive: prevents a one-frame layout glitch during the
+     route transition from Library → Reader. */
+  --bottom-nav-h: 0px;
 }
 
 /* Background color variants */
@@ -26,16 +38,19 @@
 }
 
 /* When bars are visible, inset the content so it sits between the bars.
-   Account for the device safe-area (notch / home indicator). */
+   Account for the device safe-area (notch / home indicator). Top and
+   bottom tokens differ on phones — the bottom bar grows to stack page-info
+   above the icon row. Defined in global.css; overridden per-breakpoint
+   in ReaderControls.css. */
 .reader-page.bars-visible {
-  padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(52px + env(safe-area-inset-bottom, 0px));
+  padding-top: calc(var(--reader-bar-top-h) + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(var(--reader-bar-bottom-h) + env(safe-area-inset-bottom, 0px));
 }
 
 /* Floating "Restore Zoom" pill — only mounted when zoom != 100%.
    Sits above the brightness overlay (z-index 150) and below the control
    bars (z-index 200). When the bottom bar is visible, lift it above the
-   52px bar so the two never overlap. */
+   bar (height = --reader-bar-h) so the two never overlap. */
 .reader-restore-zoom {
   position: fixed;
   right: calc(16px + env(safe-area-inset-right, 0px));
@@ -66,7 +81,7 @@
 }
 
 .reader-page.bars-visible .reader-restore-zoom {
-  bottom: calc(52px + 16px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--reader-bar-bottom-h) + 16px + env(safe-area-inset-bottom, 0px));
 }
 
 @keyframes reader-restore-zoom-in {
@@ -76,6 +91,7 @@
 
 .reader-loading {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;

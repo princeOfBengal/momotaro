@@ -5,9 +5,12 @@
 
 .install-banner {
   position: fixed;
-  /* Honour iOS safe-area inset so the banner clears the home bar / notch
-     bottom inset on iPhone. The fallback 12px is the minimum on Android. */
-  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  /* Stack above the bottom navigation rail. On phones --bottom-nav-h is
+     `56px + safe-area-inset-bottom` (see global.css), so this already
+     clears the iOS home-indicator strip; on desktop it's 0 and a small
+     12px fallback bottom margin is enough. Adding env() again here would
+     double-count the inset and float the banner too high on iOS PWA. */
+  bottom: calc(12px + var(--bottom-nav-h, 0px));
   left: 12px;
   right: 12px;
   z-index: 1100;

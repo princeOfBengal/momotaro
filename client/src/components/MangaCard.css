@@ -80,3 +80,10 @@
   color: var(--text-muted);
   margin-top: 2px;
 }
+
+/* Tighter typography on the smallest phones so titles in a ~110px tile stay
+   readable without aggressive truncation. */
+@media (max-width: 420px) {
+  .manga-card-title { font-size: 12px; }
+  .manga-card-year  { font-size: 11px; }
+}

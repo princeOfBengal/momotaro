@@ -250,6 +250,11 @@
 .library-main {
   flex: 1;
   padding: 24px;
+  /* Reserve room above the BottomNav on phones. The virtualizer reads
+     scroll offsets from this element; the extra bottom padding becomes
+     overscroll past the last row so the final cards don't sit under the
+     nav. */
+  padding-bottom: calc(24px + var(--bottom-nav-h, 0px));
   min-width: 0;
   overflow-y: auto;
   /* Single source of truth for the manga grid's column sizing. The
@@ -485,9 +490,21 @@
     padding: 8px 10px;
   }
 
+  /* Drawer close + sidebar add button — touch hit target */
+  .lib-drawer-close,
+  .library-sidebar-add-btn {
+    min-width: var(--hit-comfort);
+    min-height: var(--hit-comfort);
+  }
+
+  /* iOS auto-zoom prevention: 16px on text inputs at phone widths.
+     The desktop 13px rendering stays. */
+  .library-sidebar-new-list-input { font-size: 16px; }
+
   /* Grid and main adjustments */
   .library-main {
     padding: 16px;
+    padding-bottom: calc(16px + var(--bottom-nav-h, 0px));
     --col-min: 130px;
     --col-gap: 12px;
   }
@@ -498,7 +515,13 @@
 @media (max-width: 420px) {
   .library-main {
     padding: 12px;
-    --col-min: 100px;
+    padding-bottom: calc(12px + var(--bottom-nav-h, 0px));
+    /* 110px keeps 3 columns on 360px-wide phones (3 × 110 + 2 × 10 = 350)
+       with one-pixel slack, and yields readable card titles. Bumping from
+       100 → 110 sacrifices the possibility of 3 columns at 340px to gain
+       legibility everywhere else. Cards fall back to 2 columns under 340px,
+       which is the right tradeoff for vanishingly few real devices. */
+    --col-min: 110px;
     --col-gap: 10px;
   }
   /* Compact the navbar on tiny screens */

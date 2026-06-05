@@ -55,8 +55,9 @@
   font-size: 12px;
 }
 
-/* Mobile: drop the secondary detail so the line stays one row tall. */
-@media (max-width: 640px) {
+/* Mobile: drop the secondary detail so the line stays one row tall.
+   Aligned to the canonical --bp-phone (700px) anchor — see global.css. */
+@media (max-width: 700px) {
   .admin-task-banner-detail {
     display: none;
   }

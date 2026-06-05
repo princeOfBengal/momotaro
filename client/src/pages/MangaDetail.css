@@ -7,6 +7,8 @@
   max-width: 1100px;
   margin: 0 auto;
   padding: 32px 24px;
+  /* Reserve space above BottomNav on phones (0 on desktop). */
+  padding-bottom: calc(32px + var(--bottom-nav-h, 0px));
 }
 
 .detail-hero {
@@ -56,6 +58,32 @@
   opacity: 1;
 }
 
+/* Corner edit badge — visible only on touch (no-hover) devices, where the
+   full-overlay "Change" hint never appears. Same handler as the parent
+   (the whole cover stays tappable); the badge is purely a discoverability
+   cue. Hidden by default; .detail-cover-change-hint is hidden in touch
+   mode and vice versa so users never see both. */
+.detail-cover-edit-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+@media (hover: none) {
+  .detail-cover-clickable:hover .detail-cover-change-hint { opacity: 0; }
+  .detail-cover-edit-badge { display: inline-flex; }
+}
+
 .detail-cover-placeholder {
   width: 100%;
   height: 100%;
@@ -99,11 +127,16 @@
   font-weight: 600;
   text-transform: uppercase;
 }
-.status-releasing { background: rgba(76,175,80,0.2); color: #4caf50; }
-.status-finished { background: rgba(150,150,150,0.2); color: #999; }
-.status-hiatus { background: rgba(255,152,0,0.2); color: #ff9800; }
-.status-cancelled { background: rgba(244,67,54,0.2); color: #f44336; }
-.status-unknown { background: rgba(100,100,100,0.2); color: #666; }
+/* Status chip colours — lifted text luminance so 12px chip text meets
+   WCAG AA against the rgba(*, 0.2) chip background plus the page bg.
+   Old values: 4caf50 / 999 / ff9800 / f44336 / 666 (the last two were
+   under-spec at small sizes). Saturation slightly reduced to compensate
+   for the brighter base. */
+.status-releasing { background: rgba(76,175,80,0.2);  color: #66c46c; }
+.status-finished  { background: rgba(180,180,180,0.2); color: #bdbdbd; }
+.status-hiatus    { background: rgba(255,152,0,0.2);  color: #ffae40; }
+.status-cancelled { background: rgba(244,67,54,0.2);  color: #ff7a72; }
+.status-unknown   { background: rgba(150,150,150,0.2); color: #9e9e9e; }
 
 .detail-year, .detail-source {
   font-size: 13px;
@@ -191,8 +224,29 @@
   from { opacity: 0; transform: translateY(-2px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+/* On phones the navbar gets crowded; lift the flash out of the navbar
+   row entirely and float it as a top toast just below the navbar. Still
+   visible, still auto-dismisses on the same timer. Centered horizontally
+   so it doesn't collide with the cluster of buttons on the right side
+   of the navbar above. */
 @media (max-width: 700px) {
-  .detail-refresh-flash { display: none; }
+  .detail-refresh-flash {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    top: calc(60px + env(safe-area-inset-top, 0px) + 8px);
+    z-index: 90;
+    font-size: 13px;
+    padding: 6px 14px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    /* Keyframe override — slide down from above the navbar instead of the
+       desktop nudge-down-by-2px. */
+    animation: detail-refresh-flash-mobile-in 0.22s ease-out;
+  }
+  @keyframes detail-refresh-flash-mobile-in {
+    from { opacity: 0; transform: translate(-50%, -10px); }
+    to   { opacity: 1; transform: translate(-50%, 0); }
+  }
 }
 
 .detail-source-btn {
@@ -283,6 +337,21 @@
   background: var(--bg-hover);
   border: 1px solid var(--border);
   color: var(--text-secondary);
+  /* Was a <span>; now a <Link>. Strip default link styling and provide
+     a tappable affordance. */
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.genre-tag:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.genre-tag:active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .detail-description {
@@ -295,11 +364,90 @@
   overflow: hidden;
 }
 
+/* When the user taps "Show more" on phones, the clamp lifts. Desktop is
+   unchanged — the More Info modal already serves as the long-description
+   surface there. */
+.detail-description-wrap.is-expanded .detail-description {
+  -webkit-line-clamp: unset;
+  display: block;
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+
+/* Subtle bottom fade on the clamped description so users see there's
+   hidden text. Only when the toggle is present (long description), and
+   only on phones — desktop relies on More Info. */
+@media (max-width: 700px) {
+  .detail-description-wrap:not(.is-expanded) .detail-description {
+    -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+            mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  }
+}
+
+.detail-description-toggle {
+  margin-top: 6px;
+  padding: 4px 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.detail-description-toggle:active {
+  opacity: 0.7;
+}
+
 .detail-stats {
   display: flex;
   gap: 16px;
   font-size: 13px;
   color: var(--text-muted);
+}
+
+/* Gallery teaser — inline with the stats line, taps scroll the gallery
+   section into view. Pure discoverability cue; the section still lives
+   where it was so users who don't tap aren't penalised. */
+.detail-gallery-teaser {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.detail-gallery-teaser:hover { text-decoration: underline; }
+.detail-gallery-teaser:active { opacity: 0.7; }
+
+/* Reading-progress bar — matches .home-hero-progress / .ribbon-tile-progress
+   so the design pattern reads as one across surfaces. */
+.detail-progress-bar {
+  height: 4px;
+  background: var(--bg-hover);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 6px 0 0;
+}
+.detail-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+/* Resume context — rendered inside the Continue Reading button on phones,
+   below the existing label. Reduces ambiguity ("Continue to where?") on a
+   return visit. Desktop has the chapter list visible at the same time so
+   doesn't need this. */
+.detail-resume-sub {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  margin-top: 2px;
 }
 
 .detail-actions {
@@ -325,12 +473,63 @@
 }
 
 /* Chapters */
+.chapter-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .chapter-section-title {
   font-size: 18px;
   font-weight: 600;
-  margin-bottom: 12px;
   color: var(--text-primary);
+  /* Margin-bottom now lives on .chapter-section-head; this rule still
+     covers cases where the title renders without a head wrapper. */
+  margin: 0;
 }
+
+/* Jump-to-current — small pill button that smooth-scrolls the current
+   chapter row into the centre of the viewport. Renders only when the
+   chapter list is long enough that scrolling is real friction. */
+.chapter-jump-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.chapter-jump-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.chapter-jump-btn:active {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+/* Chapter filter — appears above the list when the chapter count crosses
+   the threshold. 16px font so iOS doesn't auto-zoom on focus. */
+.chapter-filter-input {
+  width: 100%;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 16px;
+  outline: none;
+}
+.chapter-filter-input:focus { border-color: var(--accent); }
+.chapter-filter-input::placeholder { color: var(--text-muted); }
 
 .chapter-empty {
   color: var(--text-muted);
@@ -738,6 +937,47 @@
   font-size: 12px;
   color: var(--text-muted);
   max-width: 480px;
+}
+
+/* Mobile: replace the inline description with a tappable "?" disclosure
+   so the toggle row stays one line tall. The disclosure expands the same
+   copy in place when opened, so the explanation is still one tap away —
+   it just isn't permanent visual noise. Uses native <details> so there
+   are no listeners or extra state to manage. */
+.tracking-help-mobile {
+  display: none;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.tracking-help-mobile > summary {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  text-align: center;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+.tracking-help-mobile > summary::-webkit-details-marker { display: none; }
+.tracking-help-mobile > summary::marker { content: ''; }
+.tracking-help-mobile > summary:hover { color: var(--text-primary); border-color: var(--accent); }
+.tracking-help-mobile[open] > summary { color: var(--accent); border-color: var(--accent); }
+.tracking-help-mobile > p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 700px) {
+  .tracking-panel-desc { display: none; }
+  .tracking-help-mobile { display: inline-block; }
 }
 
 /* Toggle switch (same pattern as reader settings) */
@@ -1554,7 +1794,11 @@
   border-radius: var(--radius);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   z-index: 200;
-  overflow: hidden;
+  /* Cap so a longer item list (Metadata + Optimize + Sources + Edit +
+     More Info + Delete) doesn't overflow the viewport. Internal scroll
+     activates only when items overflow. */
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 .detail-settings-item {
@@ -1578,9 +1822,101 @@
   color: var(--text-primary);
 }
 
+/* Destructive action — Delete sits at the bottom of the mobile Settings
+   dropdown under a divider, with a red tint so an accidental tap reads
+   as deliberate. The actual deletion is still gated by a confirmation
+   modal regardless of where it's invoked from. */
+.detail-settings-item-danger {
+  color: #f44336;
+}
+.detail-settings-item-danger:hover,
+.detail-settings-item-danger:active {
+  background: rgba(244, 67, 54, 0.1);
+  color: #f44336;
+}
+
+.detail-settings-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
 /* Show/hide helpers — toggled at the 640px breakpoint */
 .detail-mobile-only { display: none; }
 .detail-desktop-only { display: inline-flex; }
+
+/* iOS auto-zoom prevention: 16px on text inputs at phone widths.
+   .al-edit-input is a narrow inline number editor in the AniList panel;
+   widen so the larger font fits up to 4 digits. */
+@media (max-width: 700px) {
+  .modal-search-input,
+  .al-edit-input {
+    font-size: 16px;
+  }
+  .al-edit-input { width: 80px; }
+}
+
+/* AniList panel rows stack on the smallest phones — label above value
+   instead of side by side. Without this, the 90px-min label + 16px-font
+   edit input + status badge runs out of horizontal room around 320px and
+   wraps awkwardly. Same column pattern as .info-modal-row in More Info. */
+@media (max-width: 420px) {
+  .al-status-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .al-status-field { min-width: 0; font-size: 11px; }
+  .al-status-value { font-size: 14px; }
+  /* Prevent the status badge (rendered as a select) from stretching the
+     full row width — it should hug its content like on desktop. */
+  .al-status-select { width: auto; align-self: flex-start; }
+
+  /* Title scales down on the smallest phones to avoid awkward 2- and
+     3-line wraps on long romanised titles. */
+  .detail-title { font-size: 19px; }
+
+  /* Chapter row: drop page-count visibility cost. Keep the text but
+     shrink so it doesn't compete with the Reading badge + two icon
+     buttons for the right-side strip. */
+  .chapter-pages { font-size: 10px; }
+  .chapter-row-right { gap: 4px; }
+  .chapter-num { font-size: 13px; }
+
+  /* Reading-lists dropdown — anchor to the right edge so the menu doesn't
+     overflow the viewport when the trigger is near it. Cap width so it
+     never extends past the safe area. */
+  .rl-dropdown {
+    left: auto;
+    right: 0;
+    max-width: calc(100vw - 24px);
+  }
+}
+
+/* Icon-row buttons on the detail hero — touch hit target. Wrapped in
+   `hover: none` so trackpad users at the same viewport width keep the
+   compact 32px density. */
+@media (max-width: 700px) and (hover: none) {
+  .detail-optimize-btn,
+  .detail-source-btn,
+  .detail-edit-btn,
+  .detail-refresh-btn,
+  .detail-delete-btn {
+    width: var(--hit-comfort);
+    height: var(--hit-comfort);
+  }
+  .chapter-mark-btn,
+  .chapter-download-btn {
+    min-width: var(--hit-comfort);
+    min-height: var(--hit-comfort);
+  }
+  .modal-close,
+  .detail-nav-drawer-close,
+  .detail-nav-hamburger {
+    min-width: var(--hit-comfort);
+    min-height: var(--hit-comfort);
+  }
+}
 
 @media (max-width: 640px) {
   .detail-mobile-only  { display: block; }
@@ -1595,7 +1931,10 @@
   .optimize-results { grid-template-columns: repeat(2, 1fr); }
 
   /* Reduce page padding on phones */
-  .detail-main { padding: 20px 14px; }
+  .detail-main {
+    padding: 20px 14px;
+    padding-bottom: calc(20px + var(--bottom-nav-h, 0px));
+  }
 
   /* Chapter rows: ensure a comfortable tap height */
   .chapter-row { min-height: 52px; }
@@ -1606,15 +1945,34 @@
   /* AniList panel: shrink the fixed-width label so rows don't overflow */
   .al-status-field { min-width: 90px; font-size: 11px; }
 
-  /* Action buttons become compact icon buttons on narrow screens */
-  .detail-actions { gap: 8px; }
-  .detail-actions .btn { flex: 1; min-width: 0; justify-content: center; text-align: center; }
+  /* Action buttons on phones: icon above label, stacked. Icon-only was
+     unreadable on touch — no tooltip affordance, and users couldn't tell
+     a download from a settings cog. Vertical stack keeps the row compact
+     while restoring discoverability. Long labels ("Continue Reading",
+     "Reset Progress") wrap to two 11px lines. flex-basis 80px lets the
+     row wrap to a second row on ≤360px instead of cramming five buttons
+     into one. */
+  .detail-actions { gap: 6px; }
+  .detail-actions .btn {
+    flex: 1 1 80px;
+    min-width: 0;
+    justify-content: center;
+    text-align: center;
+  }
   .detail-actions .detail-action-btn {
-    padding: 10px 12px;
-    gap: 4px;
+    flex-direction: column;
+    padding: 8px 6px;
+    gap: 2px;
+    min-height: 56px;
+    line-height: 1.1;
   }
   .detail-action-icon { display: inline-block; }
-  .detail-action-label { display: none; }
+  .detail-action-label {
+    display: inline-block;
+    font-size: 11px;
+    line-height: 1.15;
+    word-break: break-word;
+  }
   .rl-dropdown-trigger .rl-chevron,
   .detail-settings-trigger .detail-settings-chevron { display: none; }
 

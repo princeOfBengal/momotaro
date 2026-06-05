@@ -49,26 +49,42 @@ function unsupported(name) {
 function mangaRowToApiShape(row) {
   if (!row) return null;
   return {
-    id:             row.id,
-    title:          row.title,
-    original_title: row.original_title || null,
-    author:         row.author || null,
-    artist:         row.artist || null,
-    description:    row.description || null,
-    year:           row.year || null,
-    rating:         row.rating || null,
-    status:         row.status || null,
-    genres:         row.genres || [],
-    tags:           row.tags || [],
-    alt_titles:     row.alt_titles || [],
-    folder_path:    row.folder_path || null,
-    library_id:     row.library_id || null,
-    chapter_count:  row.chapter_count || 0,
+    id:               row.id,
+    title:            row.title,
+    original_title:   row.original_title || null,
+    author:           row.author || null,
+    artist:           row.artist || null,
+    description:      row.description || null,
+    year:             row.year || null,
+    rating:           row.rating || null,
+    status:           row.status || null,
+    genres:           row.genres || [],
+    tags:             row.tags || [],
+    alt_titles:       row.alt_titles || [],
+    folder_path:      row.folder_path || null,
+    library_id:       row.library_id || null,
+    chapter_count:    row.chapter_count || 0,
+    // `track_volumes` toggles the chapter-list copy between Chapter / Volume
+    // throughout MangaDetail (section title, stats line, filter placeholder,
+    // formatChapterLabel). Without it the offline view of a volume-tracked
+    // series wrongly renders as chapters. The downloader spreads the full
+    // server payload into IDB so this field is already on the row; just
+    // need to surface it here. Same story for the metadata link fields
+    // (anilist_id / metadata_source / etc.) — they drive the "AniList /
+    // Local / MAL" source badge under the title and the external link.
+    track_volumes:    row.track_volumes ?? 0,
+    metadata_source:  row.metadata_source || null,
+    anilist_id:       row.anilist_id     ?? null,
+    mal_id:           row.mal_id         ?? null,
+    myanimelist_id:   row.myanimelist_id ?? null,
+    mangaupdates_id:  row.mangaupdates_id ?? null,
+    doujinshi_id:     row.doujinshi_id   ?? null,
+    score:            row.score          ?? null,
     // The cover thumbnail is stored locally; the UI uses this verbatim in
     // `<img src>`, so it must already be a renderable URL by the time we
     // hand it back.
-    cover_url:      row.cover_url || null,
-    is_offline:     true,
+    cover_url:        row.cover_url || null,
+    is_offline:       true,
   };
 }
 

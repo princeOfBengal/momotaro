@@ -6,13 +6,63 @@
   --border: #2e2e2e;
   --text-primary: #e8e8e8;
   --text-secondary: #999;
-  --text-muted: #666;
+  /* Lifted from #666 → #7a7a7a so 11–12px captions meet WCAG AA (≥4.5:1)
+     on --bg-primary. --text-dim is the previous value kept for places that
+     intentionally subordinate text below the primary muted tone (timestamps,
+     count badges next to a primary label). */
+  --text-muted: #7a7a7a;
+  --text-dim: #666;
   --accent: #e85d04;
   --accent-hover: #f48c06;
   --accent-dim: rgba(232, 93, 4, 0.15);
   --green: #4caf50;
   --radius: 8px;
   --radius-sm: 4px;
+
+  /* ── Responsive breakpoint anchors ─────────────────────────────────────
+     CSS media queries can't read custom properties, so these are documented
+     canonical widths to migrate `@media` rules toward. Three buckets only;
+     pick the closest when adding new rules.
+       --bp-phone-sm: 420px  — single-column, tightest density
+       --bp-phone:    700px  — drawer sidebar, mobile toolbar, bottom nav
+       --bp-tablet:   1024px — desktop affordances allowed (hover, narrow cols)
+     ──────────────────────────────────────────────────────────────────── */
+  --bp-phone-sm: 420px;
+  --bp-phone:    700px;
+  --bp-tablet:   1024px;
+
+  /* Touch hit-target sizing. --hit is the Apple/Material 44px guideline;
+     --hit-comfort is 40px, used for dense icon clusters where a 44px box
+     would force visible reflow. Both should be paired with `min-width`
+     equal to `min-height` and adequate hit padding. */
+  --hit: 44px;
+  --hit-comfort: 40px;
+
+  /* Reader top/bottom bar heights. The bottom bar grows on phones (see
+     ReaderControls.css) to give the scrubber + page-info their own row
+     above the icon row; the top bar stays compact because it only carries
+     a title and a few action buttons. `--reader-bar-h` is kept as a
+     symmetric alias for the legacy 52px callsites in Reader.css that
+     don't distinguish top vs bottom. */
+  --reader-bar-top-h:    52px;
+  --reader-bar-bottom-h: 52px;
+  --reader-bar-h:        52px;
+
+  /* Bottom-nav cascade. 0 on desktop (nav hidden); overridden to 56px
+     under the phone breakpoint. Scroll containers add this value to their
+     padding-bottom so the last item isn't occluded by the nav. The Reader
+     forces this back to 0 (it owns the full viewport on phones too). */
+  --bottom-nav-h: 0px;
+}
+
+/* On phones the nav is visible — cascade the FULL height so every scroll
+   container picks it up. We include safe-area-inset-bottom in the token so
+   consumers don't have to add it themselves; the BottomNav element itself
+   already reserves the same area via its own height calc. Skipping the
+   inset would leave the last item under the home indicator strip on iOS
+   PWA (~34px on iPhone X+). */
+@media (max-width: 700px) {
+  :root { --bottom-nav-h: calc(56px + env(safe-area-inset-bottom, 0px)); }
 }
 
 *, *::before, *::after {
@@ -183,7 +233,7 @@ img {
 /* ── Mobile touch improvements ── */
 @media (max-width: 700px) {
   /* Ensure all standard buttons meet the 44 px tap-target guideline */
-  .btn { min-height: 44px; }
+  .btn { min-height: var(--hit); }
 
   /* Prevent tap-highlight flash on interactive elements */
   button, a { -webkit-tap-highlight-color: transparent; }
@@ -197,5 +247,18 @@ img {
      (e.g. the settings tab bar) — they're still scrollable, just visually cleaner */
   [style*="overflow-x: auto"], .overflow-x-auto {
     scrollbar-width: none;
+  }
+}
+
+/* ── Touch hit-target expansion ──
+   Touch-only devices (no hover signal) get 40px square minimums on icon-
+   sized buttons. Guarded by `hover: none` so laptop/desktop pointers keep
+   their 32–36px density. Visible icons inside these controls stay the
+   same; only the bounding box grows via min-width/height. */
+@media (max-width: 700px) and (hover: none) {
+  .btn-settings,
+  .btn-icon {
+    min-width: var(--hit-comfort);
+    min-height: var(--hit-comfort);
   }
 }

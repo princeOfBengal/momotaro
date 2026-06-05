@@ -1,0 +1,73 @@
+/* Phone-only persistent navigation rail. Mounted in App.jsx so it persists
+   across route changes; hidden by display:none above the phone breakpoint
+   to keep the desktop layout untouched. The Reader, Pairing, Login, and
+   AniList OAuth callback routes return null from the component so the nav
+   never paints there at all.
+
+   Bottom safe-area handling: iOS PWA standalone leaves a home-indicator
+   strip we must clear; Android gesture-nav reserves the bottom 6–8px for
+   swipe-up. `env(safe-area-inset-bottom)` is honoured directly, plus the
+   --bottom-nav-h token cascade gives scroll containers the right padding
+   without each page needing to know whether the nav is showing. */
+
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  /* Visible band is 56px; total height (incl. safe-area inset) shows up in
+     the --bottom-nav-h token via global.css. */
+  height: calc(56px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  display: none;
+  align-items: stretch;
+  justify-content: space-around;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  /* Subtle elevation so the bar reads as floating, not painted onto content. */
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 700px) {
+  .bottom-nav { display: flex; }
+}
+
+.bottom-nav-item {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  /* Reserve a small top buffer so the icon clears the border-top line and
+     a bottom buffer so the row of icons doesn't sit on the Android
+     gesture-nav swipe-up strip. */
+  padding: 6px 4px 4px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 11px;
+  line-height: 1.1;
+  transition: color 0.12s, background 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bottom-nav-item:active {
+  background: var(--bg-hover);
+}
+
+.bottom-nav-item.active {
+  color: var(--accent);
+}
+
+.bottom-nav-icon {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.bottom-nav-label {
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}

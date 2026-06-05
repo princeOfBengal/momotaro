@@ -3,7 +3,8 @@
    sidebar and navbar match the rest of the app. */
 
 .tps-main {
-  padding-bottom: 80px;
+  /* Reserve space above the BottomNav on phones (0 on desktop). */
+  padding-bottom: calc(80px + var(--bottom-nav-h, 0px));
 }
 
 /* Search row */

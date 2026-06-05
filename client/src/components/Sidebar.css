@@ -20,6 +20,7 @@
   width: 360px;
   max-width: 100vw;
   height: 100vh;
+  height: 100dvh;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   z-index: 201;
@@ -289,4 +290,19 @@
 
 @media (max-width: 480px) {
   .sidebar { width: 100vw; }
+}
+
+/* Touch devices: comfortable hit target on the close button. Padding
+   expands the bounding box; the visible × stays the same size. */
+@media (max-width: 700px) and (hover: none) {
+  .sidebar-close {
+    min-width: var(--hit-comfort);
+    min-height: var(--hit-comfort);
+  }
+}
+
+/* Force 16px on text inputs at phone widths so iOS Safari doesn't
+   auto-zoom the page on focus. The desktop rendering stays 13px. */
+@media (max-width: 700px) {
+  .sidebar-input { font-size: 16px; }
 }

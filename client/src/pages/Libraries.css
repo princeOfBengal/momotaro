@@ -10,6 +10,8 @@
   width: 100%;
   margin: 0 auto;
   padding: 36px 24px 60px;
+  /* Reserve space above the BottomNav on phones. */
+  padding-bottom: calc(60px + var(--bottom-nav-h, 0px));
 }
 
 /* ── Page header ── */
@@ -451,5 +453,8 @@
   }
   .lp-card-actions .btn { flex: 1; min-width: 0; text-align: center; }
   /* Reduce main padding on tiny screens */
-  .lp-main { padding: 20px 16px 40px; }
+  .lp-main {
+    padding: 20px 16px 40px;
+    padding-bottom: calc(40px + var(--bottom-nav-h, 0px));
+  }
 }

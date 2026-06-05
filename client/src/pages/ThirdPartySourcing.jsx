@@ -162,10 +162,10 @@ function ThirdPartySourcingInner() {
         setSearchError(null);
         return api.searchSource(source, m.title || '');
       })
-      .then(results => {
-        if (cancelled || !results) return;
-        setResults(results);
-        if (results.length === 0) setSearchError('No results found.');
+      .then(hits => {
+        if (cancelled || !hits) return;
+        setResults(hits);
+        if (hits.length === 0) setSearchError('No results found.');
       })
       .catch(err => {
         if (cancelled) return;

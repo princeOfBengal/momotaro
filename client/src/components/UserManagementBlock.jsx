@@ -53,7 +53,7 @@ export default function UserManagementBlock({ authStatus, setStatusMsg, onAuthCh
       setNewU(''); setNewP(''); setNewAdmin(false);
       notify('success', 'Account created.');
       refresh();
-    } catch (e) { notify('error', e.message); }
+    } catch (err) { notify('error', err.message); }
     finally { setBusy(false); }
   }
 

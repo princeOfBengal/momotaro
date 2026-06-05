@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import { useConnectivity } from '../context/ConnectivityContext';
@@ -374,6 +374,18 @@ export default function Settings() {
   const location = useLocation();
   const { online } = useConnectivity();
   const [section, setSection] = useState(location.state?.section || 'anilist');
+  const sidebarRef = useRef(null);
+
+  // On phones the sidebar becomes a horizontal tab strip. When the active
+  // section changes (deep link, click, programmatic), scroll the active
+  // pill into the centre of the strip so it's visible. `inline: 'center'`
+  // is a no-op on the desktop vertical layout because the pill is already
+  // in view, so this is safe to run unconditionally.
+  useLayoutEffect(() => {
+    const el = sidebarRef.current?.querySelector('.sp-nav-item.active');
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }, [section]);
 
   function isLocked(id) {
     return !online && OFFLINE_LOCKED_SECTIONS.has(id);
@@ -395,7 +407,7 @@ export default function Settings() {
       </nav>
 
       <div className="sp-layout">
-        <aside className="sp-sidebar">
+        <aside className="sp-sidebar" ref={sidebarRef}>
           <p className="sp-sidebar-heading">Settings</p>
           {SECTIONS.map(s => {
             const locked = isLocked(s.id);

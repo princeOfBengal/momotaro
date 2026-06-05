@@ -7,7 +7,6 @@
   align-items: center;
   gap: 8px;
   padding: 0 12px;
-  height: 52px;
   background: rgba(0, 0, 0, 0.85);
   backdrop-filter: blur(8px);
   transition: opacity 0.25s, transform 0.25s;
@@ -26,7 +25,7 @@
   border-bottom: 1px solid rgba(255,255,255,0.08);
   /* Extend into the status-bar / notch area */
   padding-top: env(safe-area-inset-top, 0px);
-  height: calc(52px + env(safe-area-inset-top, 0px));
+  height: calc(var(--reader-bar-top-h) + env(safe-area-inset-top, 0px));
   padding-left: max(12px, env(safe-area-inset-left, 12px));
   padding-right: max(12px, env(safe-area-inset-right, 12px));
 }
@@ -37,7 +36,7 @@
   border-top: 1px solid rgba(255,255,255,0.08);
   /* Extend below the home indicator */
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  height: calc(52px + env(safe-area-inset-bottom, 0px));
+  height: calc(var(--reader-bar-bottom-h) + env(safe-area-inset-bottom, 0px));
   padding-left: max(12px, env(safe-area-inset-left, 12px));
   padding-right: max(12px, env(safe-area-inset-right, 12px));
 }
@@ -146,10 +145,14 @@
 /* Settings panel */
 .reader-settings {
   position: fixed;
-  top: calc(52px + env(safe-area-inset-top, 0px));
+  top: calc(var(--reader-bar-top-h) + env(safe-area-inset-top, 0px));
   right: 0;
   width: 300px;
-  max-height: calc(100vh - 52px - env(safe-area-inset-top, 0px) - 52px - env(safe-area-inset-bottom, 0px));
+  /* dvh tracks the visible viewport; vh fallback for older browsers.
+     Subtracts both bars + safe areas so the panel can scroll without being
+     clipped by the bottom bar or the iOS home indicator. */
+  max-height: calc(100vh - var(--reader-bar-top-h) - env(safe-area-inset-top, 0px) - var(--reader-bar-bottom-h) - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - var(--reader-bar-top-h) - env(safe-area-inset-top, 0px) - var(--reader-bar-bottom-h) - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
   background: rgba(18, 18, 18, 0.98);
   border-left: 1px solid var(--border);
@@ -335,6 +338,54 @@
 .setting-select:focus { outline: none; border-color: var(--accent); }
 
 @media (max-width: 600px) {
+  /* Bottom bar reflow: the flat 5-element flex row was too cramped on
+     360px phones. The fix is a 2-row CSS grid that lifts the page-info
+     (text + scrubber) onto its own row above the prev / zoom / next icon
+     cluster, giving the scrubber the full width and the icons enough
+     air to hit the 40px tap target.
+
+         row 1: │ ─── page text + scrubber ───────────────────────────── │
+         row 2: │ [< Prev]      [ − ][ + ]      [ Next > ] │
+
+     `--reader-bar-bottom-h` is bumped to 96px to fit the two rows + the
+     8px padding band. Top bar height is unchanged. */
+  :root {
+    --reader-bar-bottom-h: 96px;
+  }
+  .reader-bar-bottom {
+    display: grid;
+    grid-template-areas:
+      "info info info"
+      "prev zoom next";
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: auto 1fr;
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 4px;
+    padding: 8px 12px;
+  }
+  /* The bottom bar children render in source order: prev, page-info,
+     zoom-bar, next. Map each to its grid cell. */
+  .reader-bar-bottom > .reader-btn:first-of-type { grid-area: prev; }
+  .reader-bar-bottom > .reader-page-info        { grid-area: info; }
+  .reader-bar-bottom > .reader-zoom-bar         { grid-area: zoom; justify-self: center; }
+  .reader-bar-bottom > .reader-btn:last-of-type { grid-area: next; }
+  /* Scrubber spans the row; max-width default constrained it on desktop.
+     `flex: 1` is critical — without it the <input type="range"> falls back
+     to its ~150px default and leaves dead space on the right of the info
+     row, since grid sizes the info cell to span all three columns. */
+  .reader-bar-bottom .reader-scrubber {
+    flex: 1;
+    max-width: none;
+  }
+  /* Page info reads horizontally on phones (text left of scrubber) so the
+     two rows have similar visual weight. */
+  .reader-page-info {
+    flex-direction: row;
+    gap: 10px;
+  }
+  .reader-page-info span { white-space: nowrap; }
+
   /* Bottom bar: hide the zoom slider and label — too cramped on small screens.
      +/− buttons remain so the user can still nudge zoom level.
      Pinch-to-zoom is the primary mobile zoom gesture. */
@@ -351,5 +402,19 @@
   .reader-settings {
     width: 100vw;
     border-left: none;
+  }
+}
+
+/* Touch hit-target expansion for the reader bar icons and the reader-
+   settings tabs. Bottom bar grows to two rows on ≤600px so 40px icons sit
+   comfortably; top bar stays compact at 52px and the icons still fit. */
+@media (max-width: 700px) and (hover: none) {
+  .reader-btn-icon {
+    width: var(--hit-comfort);
+    height: var(--hit-comfort);
+  }
+  .settings-tab {
+    min-height: var(--hit-comfort);
+    padding: 12px 4px;
   }
 }

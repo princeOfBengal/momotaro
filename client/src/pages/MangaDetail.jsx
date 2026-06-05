@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useDeferredValue, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAdminTask } from '../hooks/useAdminTask';
@@ -21,6 +21,30 @@ import { appAlert, appConfirm, ensureAdminAccess } from '../dialog/dialogService
 import './MangaDetail.css';
 
 const CHAPTERS_COLLAPSED_COUNT = 5;
+
+// Threshold above which we render the chapter-filter input. Below this,
+// scrolling the list is fast enough that an input would just be clutter.
+const CHAPTER_FILTER_THRESHOLD = 50;
+// Threshold above which we render the Jump-to-current button. Lower than
+// the filter threshold because users want a fast resume mechanism even
+// before lists get hard to scroll.
+const CHAPTER_JUMP_THRESHOLD = 30;
+
+// Single source of truth for chapter-label formatting. Used by both the
+// chapter row and the resume subtitle below the Continue Reading button
+// so the labels never diverge. Falls back to folder_name when both
+// volume and number are unknown (manga ripped without metadata).
+function formatChapterLabel(ch, trackVolumes) {
+  if (!ch) return '—';
+  if (ch.volume != null && ch.number != null) {
+    return `Vol. ${ch.volume} Ch. ${ch.number}`;
+  }
+  if (ch.volume != null) return `Volume ${ch.volume}`;
+  if (ch.number != null) {
+    return `${trackVolumes ? 'Volume' : 'Chapter'} ${ch.number}`;
+  }
+  return ch.folder_name || '—';
+}
 
 // ── Offline-download status hooks ───────────────────────────────────────────
 // Tiny IDB-backed selectors used by the chapter/series download UI. They
@@ -232,18 +256,18 @@ function SeriesDownloadButton({ mangaId, chapters, serverUpdatedAt }) {
     setBusy(true);
     setErrMsg(null);
     try {
-      const summary = await refreshOfflineSnapshot(mangaId);
+      const result = await refreshOfflineSnapshot(mangaId);
       setStale(false);
       const parts = [];
-      if (summary.newly_queued > 0) {
-        parts.push(`${summary.newly_queued} new`);
+      if (result.newly_queued > 0) {
+        parts.push(`${result.newly_queued} new`);
       }
-      if (summary.restaged > 0) {
-        parts.push(`${summary.restaged} updated`);
+      if (result.restaged > 0) {
+        parts.push(`${result.restaged} updated`);
       }
       if (parts.length > 0) {
         // Toast-style — reuse the title attribute as a lightweight signal.
-        setErrMsg(`Queued ${parts.join(', ')} chapter${(summary.newly_queued + summary.restaged) === 1 ? '' : 's'}.`);
+        setErrMsg(`Queued ${parts.join(', ')} chapter${(result.newly_queued + result.restaged) === 1 ? '' : 's'}.`);
       }
     } catch (e) {
       setErrMsg(String(e?.message || e));
@@ -1837,6 +1861,23 @@ export default function MangaDetail() {
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [markingChapters, setMarkingChapters] = useState(new Set());
   const [showAllChapters, setShowAllChapters] = useState(false);
+  // Description expand state — only meaningful on phones where the 5-line
+  // clamp is too aggressive for typical AniList descriptions. Per-mount
+  // (resets on back navigation). 280 chars ≈ 5 lines at 14px on a 360px
+  // viewport; below that the toggle isn't rendered.
+  const [descExpanded, setDescExpanded] = useState(false);
+  // Chapter filter state — only rendered when chapters.length > 50.
+  // Deferred so list re-renders don't block keystrokes.
+  const [chapterFilter, setChapterFilter] = useState('');
+  const deferredChapterFilter = useDeferredValue(chapterFilter);
+  // Container ref for the chapter list. Jump-to-current queries the current
+  // row inside this container at click time, which avoids a stale-ref race
+  // when the active row changes (progress moves A → B) but A stays mounted,
+  // or when the active row is filtered out and remounted later. Scoped to
+  // the container so a stray .chapter-current outside this section can't
+  // be hit by mistake.
+  const chapterListRef = useRef(null);
+  const gallerySectionRef = useRef(null);
   const [gallery, setGallery] = useState([]);
   const [galleryLoading, setGalleryLoading] = useState(true);
   const [removingGalleryIds, setRemovingGalleryIds] = useState(new Set());
@@ -2049,12 +2090,18 @@ export default function MangaDetail() {
     }
   }
 
-  function formatChapterLabel(item) {
+  // Art Gallery items reference a chapter via `chapter_*` prefixed fields
+  // (different shape from a raw chapter object). Renamed away from the
+  // generic `formatChapterLabel` so it can't shadow the module-level
+  // helper of the same name used by chapter rows and the resume
+  // subtitle — that shadow was the cause of "Vol. undefined Ch.
+  // undefined" labels on the chapter list in 1.12.1.
+  function formatGalleryItemLabel(item) {
     const vol = item.chapter_volume;
     const num = item.chapter_number;
-    if (vol !== null && num !== null) return `Vol. ${vol} Ch. ${num}`;
-    if (vol !== null)                  return `Volume ${vol}`;
-    if (num !== null)                  return (manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`);
+    if (vol != null && num != null) return `Vol. ${vol} Ch. ${num}`;
+    if (vol != null)                return `Volume ${vol}`;
+    if (num != null)                return (manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`);
     return item.chapter_folder_name || '';
   }
 
@@ -2324,8 +2371,51 @@ export default function MangaDetail() {
   });
   // Display order (descending) — highest chapter/volume on top
   const displayChapters = [...readingOrderChapters].reverse();
-  const visibleChapters = showAllChapters ? displayChapters : displayChapters.slice(0, CHAPTERS_COLLAPSED_COUNT);
-  const hasMoreChapters = displayChapters.length > CHAPTERS_COLLAPSED_COUNT;
+
+  // Active filter (deferred so keystrokes don't block). When a filter is
+  // typed, we apply it to the FULL chapter list — not the truncated 5-row
+  // preview — and skip the truncation entirely so matches outside the
+  // preview window still show. The Show-more button is hidden whenever
+  // a filter is active.
+  //
+  // Plain consts (not useMemo) on purpose: this whole block lives AFTER
+  // the `if (loading) return …` early returns at the top of the
+  // component, so any hook here would be conditionally called between
+  // renders — Rules of Hooks violation that crashes the component to a
+  // blank page on first paint. The filter is O(n) on ≤500 string ops,
+  // cheap enough to run every render.
+  const filterActive = deferredChapterFilter.trim().length > 0;
+  const filteredChapters = (() => {
+    if (!filterActive) return displayChapters;
+    const q = deferredChapterFilter.trim().toLowerCase();
+    return displayChapters.filter(ch => {
+      // Match on number, volume, title, or folder_name — the same fields
+      // formatChapterLabel inspects, plus the title for free-form names.
+      const num    = ch.number != null ? String(ch.number) : '';
+      const vol    = ch.volume != null ? String(ch.volume) : '';
+      const title  = (ch.title || '').toLowerCase();
+      const folder = (ch.folder_name || '').toLowerCase();
+      return num.includes(q) || vol.includes(q) || title.includes(q) || folder.includes(q);
+    });
+  })();
+
+  const visibleChapters = (filterActive || showAllChapters)
+    ? filteredChapters
+    : filteredChapters.slice(0, CHAPTERS_COLLAPSED_COUNT);
+  // Hide Show-more during a filter — every match should be visible.
+  const hasMoreChapters = !filterActive && displayChapters.length > CHAPTERS_COLLAPSED_COUNT;
+
+  // Current chapter for the resume subtitle. Plain .find for the same
+  // Rules-of-Hooks reason as above; the call is also gated by progress
+  // existing at all so it's a no-op for fresh manga.
+  const currentChapter = progress?.current_chapter_id
+    ? chapters.find(c => c.id === progress.current_chapter_id) || null
+    : null;
+  // Reading-progress percentage for the visualisation bar. Same formula
+  // Home's resume-hero card uses, so the two surfaces never disagree.
+  const readPct = chapters.length > 0
+    ? Math.min(100, Math.round((completedIds.size / chapters.length) * 100))
+    : 0;
 
   function continueReading() {
     // Prefer this device's saved resume position (per-device, intra-chapter)
@@ -2479,7 +2569,7 @@ export default function MangaDetail() {
             <path fillRule="evenodd" d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z" clipRule="evenodd" />
           </svg>
         </button>
-        <Link to="/library" className="btn btn-ghost">← Library</Link>
+        <Link to="/library" className="btn btn-ghost detail-desktop-only">← Library</Link>
         <Link to="/" className="navbar-brand"><img src="/logo.png" alt="Momotaro" className="navbar-logo" /></Link>
         <div className="navbar-spacer" />
         {refreshFlash && (
@@ -2502,7 +2592,7 @@ export default function MangaDetail() {
           </svg>
         </button>
         <button
-          className="detail-optimize-btn"
+          className="detail-optimize-btn detail-desktop-only"
           onClick={openOptimizeModal}
           title="Optimize chapters"
           aria-label="Optimize chapters"
@@ -2512,7 +2602,7 @@ export default function MangaDetail() {
           </svg>
         </button>
         <button
-          className="detail-source-btn"
+          className="detail-source-btn detail-desktop-only"
           onClick={openSourceUrlsModal}
           title="Search third-party sources"
           aria-label="Search third-party sources"
@@ -2522,7 +2612,7 @@ export default function MangaDetail() {
           </svg>
         </button>
         <button
-          className="detail-edit-btn"
+          className="detail-edit-btn detail-desktop-only"
           onClick={openEditPage}
           title="Edit manga"
           aria-label="Edit manga"
@@ -2533,13 +2623,13 @@ export default function MangaDetail() {
           </svg>
         </button>
         <button
-          className="detail-delete-btn"
+          className="detail-delete-btn detail-desktop-only"
           onClick={openDeletePrompt}
           title="Delete manga"
           aria-label="Delete manga"
         >
           <svg viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+            <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
           </svg>
         </button>
         <button className="btn-settings" onClick={() => navigate('/settings')} aria-label="Open settings" title="Settings">⚙</button>
@@ -2552,7 +2642,16 @@ export default function MangaDetail() {
               ? <img src={coverUrl} alt={manga.title} />
               : <div className="detail-cover-placeholder">📖</div>
             }
+            {/* Hover overlay (desktop) and corner badge (touch) are mutually
+                exclusive — see CSS. Together they cover both pointer modes
+                without users having to discover the cover is tappable. */}
             <div className="detail-cover-change-hint">Change</div>
+            <span className="detail-cover-edit-badge" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14">
+                <path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" />
+                <path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" />
+              </svg>
+            </span>
           </div>
 
           <div className="detail-info">
@@ -2580,18 +2679,62 @@ export default function MangaDetail() {
 
             {genres.length > 0 && (
               <div className="detail-genres">
-                {genres.map(g => <span key={g} className="genre-tag">{g}</span>)}
+                {/* Each genre links to Library with the genre pre-filled as
+                    a search term. Library reads `location.state.search`
+                    and binds it to its search input. Tapping a genre is the
+                    primary "find more like this" path on mobile. */}
+                {genres.map(g => (
+                  <Link
+                    key={g}
+                    to="/library"
+                    state={{ search: g }}
+                    className="genre-tag"
+                  >{g}</Link>
+                ))}
               </div>
             )}
 
             {manga.description && (
-              <p className="detail-description">{manga.description}</p>
+              // Wrap so the toggle can be a sibling of the clamped <p>.
+              // `is-expanded` removes the 5-line clamp and the bottom mask.
+              // `hasLongDesc` heuristic: 280 chars ≈ 5 lines at 14px on a
+              // 360px viewport. Below that, the toggle is not rendered.
+              <div className={`detail-description-wrap${descExpanded ? ' is-expanded' : ''}`}>
+                <p className="detail-description">{manga.description}</p>
+                {manga.description.length > 280 && (
+                  <button
+                    className="detail-description-toggle detail-mobile-only"
+                    onClick={() => setDescExpanded(v => !v)}
+                  >
+                    {descExpanded ? 'Show less' : 'Show more'}
+                  </button>
+                )}
+              </div>
             )}
 
             <div className="detail-stats">
               <span>{chapters.length} {manga.track_volumes ? `volume${chapters.length !== 1 ? 's' : ''}` : `chapter${chapters.length !== 1 ? 's' : ''}`}</span>
               {progress && <span>{completedIds.size} {manga.track_volumes ? (completedIds.size !== 1 ? 'volumes' : 'volume') : (completedIds.size !== 1 ? 'chapters' : 'chapter')} read</span>}
+              {/* Tiny inline teaser that the gallery section exists below;
+                  cheap discoverability without reordering content. */}
+              {gallery.length > 0 && (
+                <button
+                  type="button"
+                  className="detail-gallery-teaser"
+                  onClick={() => gallerySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                >🎨 {gallery.length} saved {gallery.length === 1 ? 'page' : 'pages'} →</button>
+              )}
             </div>
+
+            {chapters.length > 0 && (
+              // Reading-progress visualisation. Same shape and tokens as
+              // Home's hero progress bar so the two surfaces feel like
+              // one design. Hidden when there are no chapters to avoid
+              // a 0% rail that's just visual noise.
+              <div className="detail-progress-bar" aria-label={`${readPct}% read`} role="progressbar" aria-valuenow={readPct} aria-valuemin={0} aria-valuemax={100}>
+                <span style={{ width: `${readPct}%` }} />
+              </div>
+            )}
 
             <div className="detail-actions">
               {chapters.length > 0 && (
@@ -2607,6 +2750,18 @@ export default function MangaDetail() {
                   <span className="detail-action-label">
                     {progress?.current_chapter_id ? 'Continue Reading' : 'Start Reading'}
                   </span>
+                  {/* Resume context — phone-only. Tells the user what they're
+                      about to resume into so they don't second-guess the tap.
+                      `currentChapter` is null until chapters load; until then
+                      the subtitle is omitted instead of showing a stale "—". */}
+                  {progress?.current_chapter_id && currentChapter && (
+                    <span className="detail-resume-sub detail-mobile-only">
+                      {formatChapterLabel(currentChapter, manga.track_volumes)}
+                      {currentChapter.page_count > 0 && (
+                        <> · page {(progress.current_page || 0) + 1}/{currentChapter.page_count}</>
+                      )}
+                    </span>
+                  )}
                 </button>
               )}
               {progress && (
@@ -2666,8 +2821,21 @@ export default function MangaDetail() {
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openSourceUrlsModal(); }}>
                       Third Party Sources
                     </button>
+                    <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); openEditPage(); }}>
+                      Edit
+                    </button>
                     <button className="detail-settings-item" onClick={() => { setShowSettingsDropdown(false); handleOpenInfo(); }}>
                       More Info
+                    </button>
+                    {/* Divider + destructive action separated from the rest so an
+                        accidental tap on Delete reads as deliberate. The
+                        confirmation modal still gates the actual deletion. */}
+                    <div className="detail-settings-divider" />
+                    <button
+                      className="detail-settings-item detail-settings-item-danger"
+                      onClick={() => { setShowSettingsDropdown(false); openDeletePrompt(); }}
+                    >
+                      Delete
                     </button>
                   </div>
                 )}
@@ -2733,7 +2901,19 @@ export default function MangaDetail() {
         <div className="tracking-panel">
           <div className="tracking-panel-row">
             <div className="tracking-panel-info">
-              <span className="tracking-panel-label">Track as Volumes</span>
+              <span className="tracking-panel-label">
+                Track as Volumes
+                {/* Phone-only — collapse the long description behind a tiny
+                    "?" so the toggle row stays one line tall. Native
+                    <details> means no extra component, no a11y wiring. */}
+                <details className="tracking-help-mobile">
+                  <summary aria-label="What does this do?">?</summary>
+                  <p>
+                    Reports volume progress to AniList instead of chapter progress.
+                    Use this when your folders represent volumes rather than individual chapters.
+                  </p>
+                </details>
+              </span>
               <span className="tracking-panel-desc">
                 Reports volume progress to AniList instead of chapter progress.
                 Use this when your folders represent volumes rather than individual chapters.
@@ -2753,11 +2933,46 @@ export default function MangaDetail() {
 
         {/* Chapters */}
         <div className="chapter-section">
-          <h2 className="chapter-section-title">{manga.track_volumes ? 'Volumes' : 'Chapters'}</h2>
+          <div className="chapter-section-head">
+            <h2 className="chapter-section-title">{manga.track_volumes ? 'Volumes' : 'Chapters'}</h2>
+            {/* Jump-to-current — surfaces only when the list is long enough
+                that scrolling to the current row is friction. Smooth scroll
+                centres the row in the page-level scroll container. */}
+            {progress?.current_chapter_id && displayChapters.length > CHAPTER_JUMP_THRESHOLD && (
+              <button
+                type="button"
+                className="chapter-jump-btn"
+                onClick={() => {
+                  // Query at click time, not via per-row refs. The chapter-
+                  // list is keyed on the current chapter id (via the
+                  // `chapter-current` class), so this stays correct as
+                  // progress moves and as the filter mounts/unmounts rows.
+                  const el = chapterListRef.current?.querySelector('.chapter-current');
+                  el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+              >Jump to current</button>
+            )}
+          </div>
+          {displayChapters.length > CHAPTER_FILTER_THRESHOLD && (
+            <input
+              type="search"
+              className="chapter-filter-input"
+              placeholder={`Filter ${displayChapters.length} ${manga.track_volumes ? 'volumes' : 'chapters'}…`}
+              value={chapterFilter}
+              onChange={e => setChapterFilter(e.target.value)}
+              enterKeyHint="search"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+          )}
           {displayChapters.length === 0 ? (
             <p className="chapter-empty">No {manga.track_volumes ? 'volumes' : 'chapters'} found. Make sure your manga folders contain images or CBZ files.</p>
+          ) : filterActive && filteredChapters.length === 0 ? (
+            <p className="chapter-empty">No {manga.track_volumes ? 'volumes' : 'chapters'} match "{deferredChapterFilter.trim()}".</p>
           ) : (
-            <div className="chapter-list">
+            <div className="chapter-list" ref={chapterListRef}>
               {visibleChapters.map(ch => {
                 const isRead = completedIds.has(ch.id);
                 const isCurrent = progress?.current_chapter_id === ch.id;
@@ -2770,13 +2985,7 @@ export default function MangaDetail() {
                   >
                     <div className="chapter-row-left">
                       <span className="chapter-num">
-                        {ch.volume !== null && ch.number !== null
-                          ? `Vol. ${ch.volume} Ch. ${ch.number}`
-                          : ch.volume !== null
-                            ? `Volume ${ch.volume}`
-                            : ch.number !== null
-                              ? `${manga.track_volumes ? 'Volume' : 'Chapter'} ${ch.number}`
-                              : ch.folder_name}
+                        {formatChapterLabel(ch, manga.track_volumes)}
                       </span>
                       {ch.title && <span className="chapter-title">{ch.title}</span>}
                     </div>
@@ -2824,7 +3033,7 @@ export default function MangaDetail() {
         </div>
 
         {/* Art Gallery */}
-        <div className="gallery-section">
+        <div className="gallery-section" ref={gallerySectionRef}>
           <h2 className="chapter-section-title">Art Gallery</h2>
           {galleryLoading ? (
             <p className="chapter-empty">Loading gallery…</p>
@@ -2842,16 +3051,16 @@ export default function MangaDetail() {
                     <Link
                       to={`/read/${item.chapter_id}?page=${item.page_index}&mangaId=${id}`}
                       className="gallery-item-link"
-                      title={`${formatChapterLabel(item)} · Page ${item.page_index + 1}`}
+                      title={`${formatGalleryItemLabel(item)} · Page ${item.page_index + 1}`}
                     >
                       <img
                         src={api.pageImageUrl(item.page_id)}
-                        alt={`${formatChapterLabel(item)} page ${item.page_index + 1}`}
+                        alt={`${formatGalleryItemLabel(item)} page ${item.page_index + 1}`}
                         loading="lazy"
                         className="gallery-item-img"
                       />
                       <div className="gallery-item-label">
-                        <span className="gallery-item-chapter">{formatChapterLabel(item)}</span>
+                        <span className="gallery-item-chapter">{formatGalleryItemLabel(item)}</span>
                         <span className="gallery-item-page">Page {item.page_index + 1}</span>
                       </div>
                     </Link>

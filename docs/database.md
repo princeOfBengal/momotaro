@@ -59,6 +59,7 @@ One row per manga folder.
 | `mangataro_id` | TEXT | MangaTaro slug |
 | `mangadotnet_id` | TEXT | MangaDotNet numeric series id |
 | `comikuro_id` | TEXT | ComiKuro slug |
+| `natomanga_id` | TEXT | Natomanga / Manganato slug |
 | `score` | REAL | Average score from metadata source (0–10 scale) |
 | `metadata_source` | TEXT | `none`, `anilist`, `myanimelist`, `mangaupdates`, `doujinshi`, `local` — controls which source's text fields the UI displays |
 | `track_volumes` | INTEGER | 0 = track by chapter, 1 = track by volume |
@@ -468,7 +469,7 @@ Both are idempotent (`INSERT OR IGNORE`, and the FTS backfill is gated on emptin
 
 ```sql
 idx_manga_library_id      ON manga(library_id)
-idx_manga_title           ON manga(title)                    -- speeds up ORDER BY title (default sort) + title keyset cursor
+idx_manga_title           ON manga(title)                    -- speeds up ORDER BY title (default sort) + title keyset cursor + the A–Z ?seek= letter anchor
 idx_manga_updated_at      ON manga(updated_at DESC)          -- speeds up ORDER BY updated_at + updated keyset cursor
 idx_manga_year            ON manga(year DESC, id ASC)        -- backs sort=year keyset cursor (year DESC NULLS LAST, id)
 idx_manga_score           ON manga(score DESC, title ASC, id ASC) -- backs sort=rating keyset cursor (score DESC NULLS LAST, title, id)
@@ -509,6 +510,7 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `manga` | `mangataro_id` | Third Party Sourcing — MangaTaro linkage |
 | `manga` | `mangadotnet_id` | Third Party Sourcing — MangaDotNet linkage |
 | `manga` | `comikuro_id` | Third Party Sourcing — ComiKuro linkage |
+| `manga` | `natomanga_id` | Third Party Sourcing — Natomanga / Manganato linkage |
 | `manga` | `anilist_cover` | AniList thumbnail filename |
 | `manga` | `mal_cover` | MyAnimeList thumbnail filename |
 | `manga` | `mangaupdates_cover` | MangaUpdates thumbnail filename |

@@ -525,6 +525,16 @@ function buildKeysetWhere(keys, values) {
   return { clause: `(${terms.join(' OR ')})`, params };
 }
 
+// Normalise an A–Z quick-jump `?seek=` value to the letter its block starts at,
+// or `null` when the value is '#' / non-alphabetic. A null result means "no
+// lower bound" — non-alpha titles already sort first, so the '#' bucket is just
+// the top of the listing. Only the first character is considered.
+function normalizeSeekLetter(seek) {
+  if (!seek) return null;
+  const ch = String(seek).trim().charAt(0).toUpperCase();
+  return ch >= 'A' && ch <= 'Z' ? ch : null;
+}
+
 // GET /api/library
 // Optional pagination: pass ?limit=N (default 200 when cursor is present, max 500).
 // When `limit` is supplied the response includes `next_cursor` (null when the
@@ -534,7 +544,7 @@ function buildKeysetWhere(keys, values) {
 // idx_manga_year / idx_manga_score.
 router.get('/library', asyncWrapper(async (req, res) => {
   const db = getDb();
-  const { search, status, sort = 'title', library_id, cursor } = req.query;
+  const { search, status, sort = 'title', library_id, cursor, seek } = req.query;
 
   let limit = null;
   if (req.query.limit !== undefined || cursor) {
@@ -576,6 +586,7 @@ router.get('/library', asyncWrapper(async (req, res) => {
     `o:${sort}`,
     `lib:${library_id || ''}`,
     `lim:${limit == null ? '' : limit}`,
+    `sk:${seek || ''}`,
   ].join('|');
   if (cacheable) {
     const cached = getListingCache(_libraryCache, cacheKey);
@@ -615,6 +626,21 @@ router.get('/library', asyncWrapper(async (req, res) => {
     const { clause, params: keysetParams } = buildKeysetWhere(keysetSort, decoded);
     query += ` AND ${clause}`;
     params.push(...keysetParams);
+  } else if (seek && sort === 'title') {
+    // A–Z quick-jump: anchor the first page at the chosen letter. Mutually
+    // exclusive with `cursor` — page 2+ resumes from the cursor, which already
+    // encodes the title boundary. COLLATE NOCASE matches the rail's
+    // case-insensitive letters while ORDER BY stays on the binary
+    // idx_manga_title: the smallest binary title that is NOCASE-≥ the letter is
+    // exactly that letter's block start, so no earlier-lettered row can lead the
+    // page. The filter scans the index from the top until the letter's block
+    // (cheap, index-only comparisons); only this anchor page pays that — every
+    // subsequent page is a direct keyset seek via the returned cursor.
+    const bound = normalizeSeekLetter(seek);
+    if (bound) {
+      query += ' AND m.title >= ? COLLATE NOCASE';
+      params.push(bound);
+    }
   }
 
   if (keysetSort) {
@@ -658,6 +684,44 @@ router.get('/library', asyncWrapper(async (req, res) => {
   }
 
   if (cacheable) setListingCache(_libraryCache, cacheKey, payload);
+  res.json(payload);
+}));
+
+// GET /api/library/letters — which first-letter buckets actually have titles,
+// so the A–Z quick-jump rail can disable empty letters (no jumps to nowhere).
+// Mirrors the /library scope rules: a single library when ?library_id= is
+// given, otherwise the All-Libraries set (show_in_all = 1 plus orphan rows).
+// Cheap one-char-per-row scan; cached for the listing TTL like the listings.
+router.get('/library/letters', asyncWrapper(async (req, res) => {
+  const db = getDb();
+  const { library_id } = req.query;
+
+  res.set('Cache-Control', 'private, max-age=15, stale-while-revalidate=60');
+  const cacheKey = `letters:lib:${library_id || ''}`;
+  const cached = getListingCache(_libraryCache, cacheKey);
+  if (cached) return res.json(cached);
+
+  // Non-ASCII first characters (CJK, etc.) aren't BETWEEN 'A' AND 'Z', so they
+  // fall into the '#' bucket alongside digits/punctuation — same grouping the
+  // client rail uses.
+  let query = `
+    SELECT DISTINCT CASE
+      WHEN upper(substr(m.title, 1, 1)) BETWEEN 'A' AND 'Z'
+        THEN upper(substr(m.title, 1, 1))
+      ELSE '#'
+    END AS bucket
+    FROM manga m LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE 1=1`;
+  const params = [];
+  if (library_id) {
+    query += ' AND m.library_id = ?';
+    params.push(parseInt(library_id, 10));
+  } else {
+    query += ' AND (m.library_id IS NULL OR l.show_in_all = 1)';
+  }
+
+  const payload = { data: db.prepare(query).all(...params).map(r => r.bucket) };
+  setListingCache(_libraryCache, cacheKey, payload);
   res.json(payload);
 }));
 

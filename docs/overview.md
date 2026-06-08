@@ -45,7 +45,7 @@ momotaro/
 │       ├── routes/               # API route handlers (library, chapters, pages, progress, settings, metadata, optimize, admin, adminAuth, gallery, config, sources, pairing, network, users, userPreferences, appVersion)
 │       ├── scanner/              # Library scanning, CBZ extract cache + scheduler, thumbnails, cover priority
 │       ├── metadata/             # AniList / MAL / MangaUpdates / Doujinshi.info + per-source JSON cache
-│       ├── sources/              # Third Party Sourcing adapters (mangadex, weebcentral, mangaball, mangataro, mangadotnet, comikuro, comix.to, mangakakalot, mangafire) + URL parser
+│       ├── sources/              # Third Party Sourcing adapters (mangadex, weebcentral, mangaball, mangataro, mangadotnet, comikuro, comix.to, mangakakalot, natomanga, mangafire; _mangabox shared base) + URL parser
 │       ├── downloader/queue.js   # Persistent FIFO download queue for the Third Party Sourcing flow
 │       ├── scheduler/            # Per-manga `manga_schedules` poll loop and run-now worker
 │       ├── auth/                 # Sessions + auth primitives — `adminSession`, `userSession`, `loginLockout` / `pinLockout`, `rateLimit`, `connectionLog`, `crypto` (scrypt password hash + token gen), `ipEnrichment`, `userAgent`
@@ -61,7 +61,7 @@ momotaro/
 │       ├── version.js         # APP_VERSION constant — kept in sync with `versionName` in `android/app/build.gradle`
 │       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback, Pairing, Login, Downloads)
 │       │   └── settings/      # Per-tab Settings section components (Anilist, MyAnimeList, Doujinshi, Libraries, Homepage, Reading, Database, Scheduling, ThirdPartySourcing, SystemLogs, Statistics, ClientManagement, PortForwarding, Android, Linux, OfflineDownloads, …) + AdminAuthForms + nativeShell helper — Settings.jsx is now a slim tab router over these
-│       ├── components/        # Shared UI components (AppSidebar, Sidebar, BottomNav, MangaCard, Ribbon, ArtGalleryRibbon, RibbonOrderEditor, GenreChipPicker, ToggleRow, InstallPrompt, UpdateBanner, AdminTaskBanner, RequireAdminAccess, AccountSection, UserManagementBlock, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
+│       ├── components/        # Shared UI components (AppSidebar, Sidebar, BottomNav, MangaCard, Ribbon, ArtGalleryRibbon, RibbonOrderEditor, GenreChipPicker, ToggleRow, InstallPrompt, UpdateBanner, AdminTaskBanner, RequireAdminAccess, AccountSection, UserManagementBlock, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid, LetterJumpRail)
 │       ├── dialog/            # In-app modal subsystem replacing window.alert/confirm/prompt — `DialogProvider`, `dialogService` (`appAlert`/`appConfirm`/`appPrompt` + `ensureAdminAccess`), `AdminUnlockDialog`, `scrollLock`
 │       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`, `useAdminTask`, `useAdminTaskButton`
 │       ├── utils/             # Dependency-free helpers — `format.js` (elapsed / next-run formatters), `readingProgress.js` (per-user resume keys)

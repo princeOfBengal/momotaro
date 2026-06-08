@@ -113,6 +113,27 @@ const PARSERS = [
     build: (slug) => `https://www.mangakakalot.gg/manga/${slug}`,
   },
   {
+    source: 'natomanga',
+    // Natomanga / Manganato family URLs are slug-based and share one slug
+    // namespace across every mirror:
+    //   - title page:   https://www.natomanga.com/manga/{slug}
+    //   - chapter page: https://www.manganato.gg/manga/{slug}/chapter-N
+    // Recognised mirrors: natomanga.com, manganato.gg, nelomanga.com,
+    // nelomanga.net. Whatever the user pastes, we canonicalise to the
+    // natomanga.com title form. The trailing /chapter-… segment (if any) is
+    // dropped so only the series slug is captured.
+    match: (u) =>
+      /^https?:\/\/(www\.)?(natomanga\.com|manganato\.gg|nelomanga\.(com|net))\/manga\/[a-z0-9_-]+/i.test(u),
+    extract: (u) => {
+      const m = u.match(/\/manga\/([a-z0-9_-]+)/i);
+      if (!m) return null;
+      const slug = m[1];
+      if (slug.length < 1 || slug.length > 200) return null;
+      return { source: 'natomanga', source_id: slug };
+    },
+    build: (slug) => `https://www.natomanga.com/manga/${slug}`,
+  },
+  {
     source: 'comikuro',
     // comikuro.to URLs are slug-based:
     //   - title page:   https://comikuro.to/manga/{slug}

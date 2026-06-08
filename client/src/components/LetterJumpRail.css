@@ -1,0 +1,77 @@
+/* Vertical A–Z quick-jump rail. Floats fixed against the right edge, vertically
+   centred, over the library grid's right gutter. Fixed (not sticky) so it stays
+   put while .library-main scrolls underneath it. The translucent backdrop keeps
+   the pips legible where a card edge sits behind them. */
+.letter-rail {
+  position: fixed;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  max-height: 92vh;
+  padding: 5px 3px;
+  border-radius: 11px;
+  background: rgba(20, 20, 20, 0.72);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  /* The rail itself doesn't scroll; the page does. */
+  user-select: none;
+}
+
+.letter-rail-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 4px;
+  min-width: 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.letter-rail-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.letter-rail-btn.is-active {
+  color: #fff;
+  background: var(--accent);
+}
+
+.letter-rail-btn:disabled {
+  color: var(--text-dim);
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Touch devices: bigger hit area, slightly larger pips. Hover feedback is
+   replaced by :active since hover doesn't persist after a tap. */
+@media (hover: none) {
+  .letter-rail-btn {
+    font-size: 11px;
+    padding: 3px 5px;
+  }
+  .letter-rail-btn:active:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+}
+
+/* Too short to fit 27 legible pips — hide the rail rather than overflow it.
+   Search + sort remain the navigation fallback on tiny landscape viewports. */
+@media (max-height: 460px) {
+  .letter-rail {
+    display: none;
+  }
+}

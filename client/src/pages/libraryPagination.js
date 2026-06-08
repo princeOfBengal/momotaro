@@ -15,8 +15,8 @@
 // The sessionStorage key identifying one browse view: a history entry + the
 // library/list/sort filter tuple. Mirrors the browse `scrollKey` suffix so the
 // persisted depth and the restored scroll position always agree on "this view".
-export function browseCountKey(locationKey, activeLibrary, activeList, sort) {
-  return `library-count:${locationKey || 'default'}|lib:${activeLibrary ?? ''}|list:${activeList ?? ''}|sort:${sort}`;
+export function browseCountKey(locationKey, activeLibrary, activeList, sort, seek = '') {
+  return `library-count:${locationKey || 'default'}|lib:${activeLibrary ?? ''}|list:${activeList ?? ''}|sort:${sort}|seek:${seek || ''}`;
 }
 
 // Append a page of rows, dropping any whose id is already present (H2).

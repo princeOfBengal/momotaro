@@ -201,6 +201,7 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'mangataro_id',      'TEXT');
   addColumnIfMissing(db, 'manga',     'mangadotnet_id',    'TEXT');
   addColumnIfMissing(db, 'manga',     'comikuro_id',       'TEXT');
+  addColumnIfMissing(db, 'manga',     'natomanga_id',      'TEXT');
   addColumnIfMissing(db, 'manga',     'anilist_cover',     'TEXT');
   addColumnIfMissing(db, 'manga',     'original_cover',    'TEXT');
   addColumnIfMissing(db, 'manga',     'mal_cover',         'TEXT');

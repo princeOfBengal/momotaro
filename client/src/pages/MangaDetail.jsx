@@ -1799,7 +1799,8 @@ function SourceUrlsModal({ manga, onClose }) {
             <code>https://mangaball.net/title-detail/&#123;slug&#125;-&#123;ObjectId&#125;/</code> ·{' '}
             <code>https://mangataro.org/manga/&#123;slug&#125;</code> ·{' '}
             <code>https://mangadot.net/manga/&#123;id&#125;</code> ·{' '}
-            <code>https://comikuro.to/manga/&#123;slug&#125;</code>.
+            <code>https://comikuro.to/manga/&#123;slug&#125;</code> ·{' '}
+            <code>https://www.natomanga.com/manga/&#123;slug&#125;</code>.
           </p>
 
           <div style={{

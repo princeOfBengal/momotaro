@@ -22,6 +22,7 @@ const LINKAGE_COLUMNS = {
   mangataro:    'mangataro_id',
   mangadotnet:  'mangadotnet_id',
   comikuro:     'comikuro_id',
+  natomanga:    'natomanga_id',
 };
 
 /**

@@ -133,9 +133,9 @@ function extFromContentType(ct, fallbackUrl) {
   return '.jpg';
 }
 
-async function fetchImage(url, { signal, userAgent }) {
+async function fetchImage(url, { signal, userAgent, extraHeaders }) {
   const resp = await fetch(url, {
-    headers: { 'User-Agent': userAgent, 'Accept': 'image/*' },
+    headers: { 'User-Agent': userAgent, 'Accept': 'image/*', ...(extraHeaders || {}) },
     signal,
   });
   if (!resp.ok) {
@@ -246,6 +246,7 @@ function sourceColumn(source) {
     case 'mangataro':    return 'mangataro_id';
     case 'mangadotnet':  return 'mangadotnet_id';
     case 'comikuro':     return 'comikuro_id';
+    case 'natomanga':    return 'natomanga_id';
     default:             return null;
   }
 }
@@ -320,8 +321,11 @@ async function runJob(job) {
       }
 
       const { buffer, ext } = await fetchImage(urls[i], {
-        signal:    controller.signal,
-        userAgent: source.USER_AGENT,
+        signal:       controller.signal,
+        userAgent:    source.USER_AGENT,
+        // Some source CDNs validate the Referer (e.g. the MangaBox family's
+        // 2xstorage.com host) — the adapter advertises what to send.
+        extraHeaders: source.IMAGE_HEADERS,
       });
       const entryName = String(i + 1).padStart(padWidth, '0') + ext;
       zip.addFile(entryName, buffer);

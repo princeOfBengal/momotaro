@@ -18,15 +18,21 @@ schedules dispatch missing chapters through the same download queue.
 - **MangaDotNet** — full support (clean `/api/*` REST surface from a React Router v7 SSR app; no auth, no token).
 - **ComiKuro** — full support via the site's allowlisted CORS proxy. ComiKuro is itself a metadata aggregator; chapter pages are pinned to the kaliscan upstream through `https://api.comikuro.to/api/_proxy/proxy`.
 - **comix.to** — partial support (search, series detail, URL recording, cross-source linkage). Chapter listing and image fetching are gated by an obfuscated JS-VM security token; see [comix.to limitations](#comixto-limitations) below.
-- **MangaKakalot** — partial support (search, series detail synthesised from the search response, URL recording). Chapter listing and image pages are blocked by Cloudflare's interactive JS challenge; see [MangaKakalot limitations](#mangakakalot-limitations) below.
-- **MangaFire** — partial support (URL-paste search, series detail and **full chapter list** scraped from the openly-served series page, scheduler diff works). Image fetch is blocked by Cloudflare Turnstile on the reader AJAX; see [MangaFire limitations](#mangafire-limitations) below.
+- **MangaKakalot** — full support (search, series detail, chapter listing, image download) via the `mangakakalove.com` mirror, built on the shared [MangaBox base](#mangabox-family-mangakakalot--natomanga). See [MangaBox notes](#mangabox-family-mangakakalot--natomanga) below.
+- **Natomanga** — full support (search, series detail, chapter listing, image download); the Manganato/Natomanga family, built on the same shared MangaBox base (search via `natomanga.com`, content via `manganato.gg`). See [MangaBox notes](#mangabox-family-mangakakalot--natomanga) below.
+- **MangaFire** — partial support (URL-paste search, series detail, and **full per-language chapter list** via the open `/ajax/manga/{hid}/chapter/{lang}` JSON endpoint, scheduler diff works). Keyword search and image fetch need a browser-generated `vrf` token; see [MangaFire limitations](#mangafire-limitations) below.
 
 The reference projects called out in the spec —
 [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source)
 (Tachiyomi/Mihon extensions) and
 [manga-download/hakuneko](https://github.com/manga-download/hakuneko) — were
 used as parser/UX reference for the MangaDex adapter and the chapter-naming
-convention.
+convention. The MangaBox-family adapters (MangaKakalot, Natomanga) are a
+direct port of keiyoushi's `MangaBox` multisrc theme — see
+[MangaBox notes](#mangabox-family-mangakakalot--natomanga). The general
+lesson taken from Mihon: these "blocked" sites expose a clean JSON chapter
+API and run un-gated mirrors; the right move is to follow the extension's
+endpoint map rather than scrape the Cloudflare-gated public host.
 
 ## UI entry point
 
@@ -39,8 +45,8 @@ The page has four panes:
 
 1. **Source picker + search** — source dropdown populated from
    `GET /api/sources` (MangaDex, WeebCentral, MangaBall, MangaTaro,
-   MangaDotNet, ComiKuro, comix.to, MangaKakalot, MangaFire) and a title
-   query box. When the page is opened from a per-manga *Find more sources*
+   MangaDotNet, ComiKuro, comix.to, MangaKakalot, Natomanga, MangaFire) and
+   a title query box. When the page is opened from a per-manga *Find more sources*
    link (`/third-party-sourcing?manga_id=N`), the search box is pre-filled
    with the manga's title and the target is locked to mode='existing' for
    that manga.
@@ -66,6 +72,7 @@ The page has four panes:
 |---|---|
 | [server/src/sources/index.js](../server/src/sources/index.js) | Registry of source adapters keyed by id |
 | [server/src/sources/_pacer.js](../server/src/sources/_pacer.js) | Shared per-adapter rate-limit pacer — `createPacer(intervalMs)` returns `{ wait() }` enforcing a minimum gap between calls. Each adapter creates its own instance so upstreams are paced independently. |
+| [server/src/sources/_mangabox.js](../server/src/sources/_mangabox.js) | Shared base for the MangaBox-family sites (MangaKakalot, Natomanga). `createMangaBoxAdapter(cfg)` returns a full adapter from a host config — ported from Mihon/keiyoushi's `MangaBox` multisrc theme. |
 | [server/src/sources/urlParser.js](../server/src/sources/urlParser.js) | URL ↔ `(source, source_id)` translation for every adapter |
 | [server/src/sources/mangadex.js](../server/src/sources/mangadex.js) | MangaDex API client — search, series, chapters, MangaDex@Home image URLs |
 | [server/src/sources/weebcentral.js](../server/src/sources/weebcentral.js) | WeebCentral HTML/HTMX scraper |
@@ -74,7 +81,8 @@ The page has four panes:
 | [server/src/sources/mangadotnet.js](../server/src/sources/mangadotnet.js) | MangaDotNet `/api/*` REST client |
 | [server/src/sources/comikuro.js](../server/src/sources/comikuro.js) | ComiKuro proxy-routed adapter, kaliscan-pinned for pages |
 | [server/src/sources/comixto.js](../server/src/sources/comixto.js) | comix.to search + series detail; chapters/pages gated |
-| [server/src/sources/mangakakalot.js](../server/src/sources/mangakakalot.js) | MangaKakalot autocomplete search; chapters/pages gated |
+| [server/src/sources/mangakakalot.js](../server/src/sources/mangakakalot.js) | MangaKakalot — thin MangaBox config (full support via `mangakakalove.com` mirror) |
+| [server/src/sources/natomanga.js](../server/src/sources/natomanga.js) | Natomanga / Manganato — thin MangaBox config (full support; search via `natomanga.com`, content via `manganato.gg`) |
 | [server/src/sources/mangafire.js](../server/src/sources/mangafire.js) | MangaFire URL-paste search + series-page chapter scrape |
 | [server/src/downloader/queue.js](../server/src/downloader/queue.js) | Persistent FIFO download queue with configurable concurrency + per-page delay |
 | [server/src/scheduler/index.js](../server/src/scheduler/index.js) | Per-manga `manga_schedules` polling loop and `checkOneManga` worker |
@@ -94,8 +102,15 @@ module.exports = {
   getChapters(id, { languages }) -> Promise<Chapter[]>,
   getChapterImages(chapterId)    -> Promise<{ files: string[], ... }>,
   USER_AGENT: 'Momotaro/1.0 (...)', // sent on image fetches too
+  IMAGE_HEADERS: { Referer: '…' }, // optional — merged onto image fetches
 };
 ```
+
+`IMAGE_HEADERS` is optional. When present, the downloader merges it onto every
+image request (on top of `User-Agent` + `Accept`). It exists for source CDNs
+that validate the `Referer` — e.g. the MangaBox family's `*.2xstorage.com`
+host returns 403 for any fetch whose Referer isn't one of the family's
+domains. Adapters that don't set it (MangaDex, WeebCentral, …) are unaffected.
 
 `Series` shape: `{ id, title, author, year, status, content_rating, genres,
 cover_url, description, last_chapter, available_languages }`.
@@ -297,47 +312,57 @@ whatever headers the proxy adds.
 ### MangaFire limitations
 
 The MangaFire adapter ([server/src/sources/mangafire.js](../server/src/sources/mangafire.js))
-is the **richest** of the three Cloudflare-affected sources. The series
-detail page is openly served and contains the FULL chapter list inline —
-so unlike comix.to and MangaKakalot, the scheduler can actually compute the
-local-vs-remote diff against MangaFire and identify missing chapters.
-Only the actual image-fetch step is gated.
+has full **series detail + chapter listing** support — the scheduler can
+compute the local-vs-remote diff against MangaFire and identify missing
+chapters just like MangaDex. Only keyword search and the actual image-fetch
+step are gated, both by the same browser-generated `vrf` token.
+
+**The `vrf` token (lesson from Mihon):** MangaFire signs its protected AJAX
+calls with a `vrf` query parameter generated by its obfuscated `scripts.js`
+(the literal `vrf` / `ajax/read` strings aren't even present in the bundle —
+they're assembled from encoded fragments). Mihon/keiyoushi's MangaFire
+extension does **not** reproduce the algorithm: it loads the page in a real
+**WebView**, lets the site's own JS mint the token, and intercepts the
+resulting request URL to read `?vrf=`. Reproducing that server-side needs a
+headless browser (Puppeteer ~200 MB) or an external resolver — deliberately
+out of scope for momotaro's dependency footprint — so search and image
+download stay gated. (Images are additionally **scrambled**: the read AJAX
+returns `[url, _, offset]` triples and a non-zero `offset` means the page
+must be de-scrambled client-side.)
 
 **Endpoints:**
 
-- `GET /manga/{slug}.{hid}` — open. Returns server-rendered HTML with
-  every chapter row (`<li class="item" data-number="N">`), per-language
-  counts, cover image (`<img itemprop="image">`), title, author, and
-  status. Verified end-to-end against `https://mangafire.to/manga/horimiyaa.6nm0`.
-- `GET /filter?keyword=…` — HTTP 403 (server-side blocked against this
-  client). Direct keyword search isn't usable.
-- `GET /ajax/read/chapter/{mangaId}` — HTTP 403 "Request is invalid".
-  The reader page exposes a Cloudflare Turnstile site key
-  (`var captchaKey = '0x4AAAAAAA...'`) and the AJAX call requires a valid
-  Turnstile token, which only a real browser engine can produce.
+- `GET /manga/{slug}.{hid}` — open. Server-rendered HTML: title, author,
+  status, cover (`<img itemprop="image">`), per-language list.
+- `GET /ajax/manga/{hid}/chapter/{lang}` — **open** JSON
+  (`{status:200, result:"<li data-number=…>…"}`). The endpoint Mihon uses
+  for the chapter list; works per-language without re-fetching the series
+  page. A sibling `/ajax/manga/{hid}/volume/{lang}` returns volumes.
+- `GET /filter?keyword=…` — `{status:403, "Request is invalid."}` without a
+  `vrf` token. Keyword search isn't usable.
+- `GET /ajax/read/chapter/{itemId}?vrf=…` — page list. Same `403 "Request is
+  invalid."` without the token.
 
 **What works:**
 
 - Pasting `https://mangafire.to/manga/{slug}.{hid}` into the search box on
   the **Third Party Sourcing** page (or into the per-manga URL manager).
   `searchSeries` detects URL-shaped queries, fetches the series page, and
-  returns a single rich result. Verified for the user-supplied test case
-  `https://mangafire.to/manga/horimiyaa.6nm0` — returns title `Horimiya`,
-  author `Daisuke Hagiwara`, status `Completed`, cover URL, and 6
-  available languages.
-- `getSeries(id)` returns the same record by direct id lookup
-- `getChapters(id, { languages })` scrapes the full chapter list (254 EN
-  chapters for Horimiya), with per-row `number`, `volume` (Vol 0
-  normalised to null), title (subtitle stripped of the "Chapter N:" prefix),
-  language, published-date label, and a stable `id` of the form
-  `/read/{slug.hid}/{lang}/chapter-N`. Multi-language is opt-in via the
-  `languages` option; default is `['en']`.
-- **Scheduler diff works against MangaFire** — at runtime, the scheduler
-  walks the recorded MangaFire URL, calls `getChapters`, diffs against
-  the local folder by chapter number, and identifies the missing set just
-  like it does for MangaDex. Only the subsequent image-download step
-  fails — the missing chapters surface in `download_jobs` as `failed`
-  with the gated-error string.
+  returns a single rich result. Verified against
+  `https://mangafire.to/manga/horimiyaa.6nm0` — title `Horimiya`, author
+  `Daisuke Hagiwara`, status `Completed`, cover, 6 available languages.
+- `getSeries(id)` returns the same record by direct id lookup.
+- `getChapters(id, { languages })` lists chapters via the open chapter AJAX
+  (254 EN chapters for Horimiya; EN+FR = 309), with per-row `number`,
+  `volume` (Vol 0 normalised to null), title (subtitle stripped of the
+  "Chapter N:" prefix), language, published-date label, and a stable `id`
+  of the form `/read/{slug.hid}/{lang}/chapter-N`. Multi-language is opt-in
+  via the `languages` option; default `['en']`.
+- **Scheduler diff works against MangaFire** — the scheduler walks the
+  recorded MangaFire URL, calls `getChapters`, diffs against the local
+  folder by chapter number, and identifies the missing set. Only the
+  subsequent image-download step fails — those chapters surface in
+  `download_jobs` as `failed` with the gated-error string.
 - URL parser recognises both `/manga/…` and `/read/…` paths and
   canonicalises to `/manga/{slug}.{hid}`. Linkage stored in
   `manga.mangafire_id`, kept in sync by `syncDenormalizedLinkage`.
@@ -345,70 +370,82 @@ Only the actual image-fetch step is gated.
 **What returns a clear error:**
 
 - Direct keyword search (non-URL query): explainer telling the user to
-  paste a URL instead
-- Any download attempt: `MangaFire chapter images are loaded behind a
-  Cloudflare Turnstile challenge — chapter download is not supported
-  from this source.` lands in `download_jobs.error` and (for scheduled
-  runs) `manga_schedules.last_result`
+  paste a URL instead (the `/filter` endpoint needs a vrf token).
+- Any download attempt: the gated-error string (vrf token + scrambling)
+  lands in `download_jobs.error` and (for scheduled runs)
+  `manga_schedules.last_result`.
 
-**Practical workflow:** the same as comix.to / MangaKakalot — pair the
-MangaFire URL (which gives the scheduler a working chapter list it can
-diff against) with a MangaDex URL (which actually downloads the missing
-images) on the same manga. The URL store allows multiple URLs per manga;
-the scheduler dedupes by `(source, source_id)` and the diff dedupes by
-chapter number, so chapters identified as missing through the MangaFire
-URL get downloaded through the MangaDex URL when both are present.
+**Practical workflow:** the same as comix.to — pair the MangaFire URL
+(which gives the scheduler a working chapter list it can diff against) with
+a MangaDex URL (which actually downloads the missing images) on the same
+manga. The URL store allows multiple URLs per manga; the scheduler dedupes
+by `(source, source_id)` and the diff dedupes by chapter number, so
+chapters identified as missing through the MangaFire URL get downloaded
+through the MangaDex URL when both are present.
 
-### MangaKakalot limitations
+### MangaBox family (MangaKakalot & Natomanga)
 
-The MangaKakalot adapter ([server/src/sources/mangakakalot.js](../server/src/sources/mangakakalot.js))
-talks to the site's own autocomplete endpoint for search, which slips
-through Cloudflare:
+MangaKakalot and Natomanga/Manganato are the same codebase operated by the
+same group, so both are now **full-support** adapters sharing one base:
+[server/src/sources/_mangabox.js](../server/src/sources/_mangabox.js). The
+base — `createMangaBoxAdapter(cfg)` — is a direct port of Mihon/keiyoushi's
+`MangaBox` multisrc theme (`lib-multisrc/mangabox`), where one Kotlin base
+class backs thin per-site subclasses that only supply the domain(s). The two
+momotaro adapters are likewise one-line host configs:
 
-- `GET https://www.mangakakalot.gg/home/search/json?searchword={normalized}`
+- [mangakakalot.js](../server/src/sources/mangakakalot.js) — `searchBase`/`contentBase`
+  both `https://www.mangakakalove.com`.
+- [natomanga.js](../server/src/sources/natomanga.js) — `searchBase`
+  `https://www.natomanga.com`, `contentBase` `https://www.manganato.gg`.
 
-The search payload is rich enough to drive the Third Party Sourcing UI
-without a separate series-detail fetch: title, slug, author, latest chapter
-label, thumbnail URL, and canonical series URL all come back inline. The
-adapter mirrors the site's `change_alias()` normalisation (lowercase,
-Unicode NFD-fold, replace non-alphanumeric runs with `_`, collapse, trim)
-so what we send matches what the browser autocomplete sends.
+**Why this works (the Cloudflare story):** the public-facing hosts
+(`mangakakalot.gg`, `natomanga.com`) put an interactive *"Just a moment…"*
+JS challenge in front of their HTML pages, which is why the old adapter was
+search-only. The challenge is **per-host**, though, and the operator runs
+several mirrors of the same database (same slugs, same image CDN). Mihon's
+extension lists those mirrors; probing them showed that for every surface
+there is at least one mirror that serves it with no challenge:
 
-**Cloudflare gate:** every HTML page that would carry the chapter list or
-image URLs (`/manga/{slug}`, `/manga/{slug}/chapter-N`, `/manga-list/all`,
-known mirrors) returns the *"Just a moment..."* interactive challenge.
-Cookies, full browser headers (`Sec-Fetch-*`, `Accept-Language`,
-`Referer`), and same-origin hops were all probed; none get past the JS
-challenge without a real browser engine. Bundling Puppeteer (~200 MB) or
-running an external FlareSolverr proxy would work but are off-spec for a
-self-hosted manga server's dependency footprint.
+| Surface | Endpoint | Open host(s) |
+|---|---|---|
+| Search | `GET /home/search/json?searchword={alias}` | `mangakakalove.com`, `natomanga.com` |
+| Series detail | `GET /manga/{slug}` (HTML) | `mangakakalove.com`, `manganato.gg` |
+| Chapter list | `GET /api/manga/{slug}/chapters?limit=-1` (JSON) | `mangakakalove.com`, `manganato.gg` |
+| Reader / images | `GET /manga/{slug}/{chapterSlug}` (HTML) | `mangakakalove.com`, `manganato.gg` |
 
-**What works:**
+The chapter list is a clean JSON API (`{success, data:{chapters:[{chapter_name,
+chapter_num, chapter_slug, updated_at}]}}`) — this is the key endpoint Mihon's
+`Mangakakalot.kt` hits, and it is **never** Cloudflare-gated. The reader page
+embeds image data inline as `cdns = [...]`, `backupImage = [...]`, and
+`chapterImages = ["{slug}/{ch}/{n}.webp", …]` script arrays; the adapter
+joins `cdns[0]` + each `chapterImages` path (ported from `MangaBox.kt`'s
+`pageListParse` / `extractArray`), with a `div.container-chapter-reader > img`
+fallback.
 
-- Title search via the **Third Party Sourcing** page (source dropdown now
-  lists MangaKakalot alongside MangaDex and Comix.to)
-- Series detail synthesised from the search response — round-trips through
-  the search endpoint with the slug as query and requires an exact slug
-  match in the result, so typo'd slugs surface a clear error rather than
-  silently returning a different series
-- Recording `https://www.mangakakalot.gg/manga/{slug}` URLs against a
-  manga in the per-manga URL manager
-- Linkage to `manga.mangakakalot_id`, kept in sync by
-  `syncDenormalizedLinkage` the same way `mangadex_id` is
+**Search normalisation:** both mirror the site's `change_alias()` JS
+(lowercase, Unicode NFD diacritic fold, `đ`→`d`, replace non-alphanumeric runs
+with `_`, collapse, trim) so the query matches what the browser autocomplete
+sends. Exposed as `_changeAlias` for tests.
 
-**What returns a clear error:**
+**Image CDN:** pages are served from `imgs-N.2xstorage.com`, which validates
+the `Referer` against the family's domains (any other Referer → 403). Each
+adapter therefore exports `IMAGE_HEADERS = { Referer: … }`, which the
+downloader merges onto image fetches (see [Source adapter contract](#source-adapter-contract)).
 
-- Any download attempt against a MangaKakalot URL — the worker writes
-  `MangaKakalot chapter access is blocked by the site's Cloudflare
-  challenge — chapter download is not supported from this source.` to
-  `download_jobs.error`
-- Scheduler runs against MangaKakalot-only series — same string lands in
-  `manga_schedules.last_result` and shows in **Settings → Scheduling**
+**Chapter id contract:** `getChapters` returns chapter `id` as
+`"{slug}/{chapterSlug}"` (e.g. `horimiya/chapter-1`) so the worker can rebuild
+the reader URL from the chapter id alone in `getChapterImages`.
 
-**Practical workflow:** the same pattern as comix.to — record both the
-MangaKakalot URL (as a visual reference) and the MangaDex URL (for actual
-downloads) against the same manga. The URL store allows multiple URLs per
-manga; the scheduler dedupes by `(source, source_id)` and walks each.
+**Linkage:** stored in `manga.mangakakalot_id` / `manga.natomanga_id` as the
+slug, kept in sync by `syncDenormalizedLinkage` the same way `mangadex_id` is.
+The scheduler diff works against both like it does for MangaDex.
+
+**Verified end-to-end** (Horimiya, June 2026): search → series (title/author/
+status/genres/cover/description) → 272 chapters via the API → 81 image URLs
+for Ch.1 → a real 538 KB `.webp` page download from `imgs-2.2xstorage.com`
+(403 without the Referer, confirming the `IMAGE_HEADERS` wiring is required).
+Both adapters resolve the same data because the mirrors share one slug
+namespace.
 
 ### comix.to limitations
 
@@ -548,6 +585,7 @@ There are two layers, and they're kept in sync:
 | `mangataro_id` | MangaTaro (slug) | Most recent `manga_source_urls` row with `source='mangataro'` |
 | `mangadotnet_id` | MangaDotNet (numeric id) | Most recent `manga_source_urls` row with `source='mangadotnet'` |
 | `comikuro_id` | ComiKuro (slug) | Most recent `manga_source_urls` row with `source='comikuro'` |
+| `natomanga_id` | Natomanga (slug) | Most recent `manga_source_urls` row with `source='natomanga'` |
 
 ### Auto-recording
 
@@ -586,6 +624,7 @@ paste. Recognised today:
 - `https://mangataro.org/manga/{slug}` (also `/read/{slug}`)
 - `https://mangadot.net/manga/{id}`
 - `https://comikuro.to/manga/{slug}`
+- `https://www.natomanga.com/manga/{slug}` (also `manganato.gg`, `nelomanga.com`, `nelomanga.net` mirrors)
 
 ### Legacy direct-linkage routes
 

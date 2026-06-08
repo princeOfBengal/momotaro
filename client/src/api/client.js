@@ -339,6 +339,12 @@ const _rawApi = {
     const q = new URLSearchParams(params).toString();
     return apiFetch(`/api/library${q ? '?' + q : ''}`, options);
   },
+  // First-letter buckets ('#','A'..'Z') that have titles in scope — feeds the
+  // Library A–Z quick-jump rail so empty letters render disabled.
+  getLibraryLetters: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return apiFetch(`/api/library/letters${q ? '?' + q : ''}`);
+  },
   getManga: (id) => apiFetch(`/api/manga/${id}`),
   // Single batched payload for the offline-download bootstrap: manga +
   // cover URL + full chapter list, plus a `server_updated_at` field the

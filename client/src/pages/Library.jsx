@@ -3,6 +3,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import AppSidebar from '../components/AppSidebar';
 import VirtualizedMangaGrid from '../components/VirtualizedMangaGrid';
+import LetterJumpRail from '../components/LetterJumpRail';
 import { useScrollPosition } from '../hooks/useScrollPosition';
 import { useConnectivity } from '../context/ConnectivityContext';
 import { useUserPref } from '../context/PreferencesContext';
@@ -117,6 +118,21 @@ export default function Library() {
   });
   const [scanning, setScanning] = useState(false);
 
+  // ── A–Z quick-jump rail ──────────────────────────────────────────────────
+  // `seekLetter` anchors the browse grid at a letter's block via the server's
+  // ?seek= param (title sort only). It's persisted in sessionStorage keyed by
+  // location.key so back-from-detail — a component remount, which resets
+  // useState — restores the same anchored view the snapshot/scroll machinery
+  // is keyed against (location.key is stable across that round-trip; a fresh
+  // forward navigation mints a new key and starts at the top).
+  const seekStorageKey = `library-seek:${location.key || 'default'}`;
+  const [seekLetter, setSeekLetter] = useState(() => {
+    try { return sessionStorage.getItem(seekStorageKey) || null; } catch { return null; }
+  });
+  // First-letter buckets present in the current scope, so the rail can disable
+  // empty letters. null = not loaded / unavailable → rail enables every letter.
+  const [availableLetters, setAvailableLetters] = useState(null);
+
   // Libraries / reading lists / drawer
   const [libraries, setLibraries] = useState([]);
   const [activeLibrary, setActiveLibrary] = useState(location.state?.library ?? null);
@@ -164,7 +180,7 @@ export default function Library() {
   // were loaded for this exact filter+history-entry, so `load` can rehydrate
   // that depth on back-navigation (H1). Mirrors the browse `scrollKey` suffix
   // below so the two always agree on what "this view" means.
-  const browseCountKey = makeBrowseCountKey(location.key, activeLibrary, activeList, sort);
+  const browseCountKey = makeBrowseCountKey(location.key, activeLibrary, activeList, sort, seekLetter);
 
   // Tracks which browseCountKey the current `manga` array actually belongs to.
   // `load` stamps it once a fetch settles. The persist effect below only writes
@@ -174,7 +190,16 @@ export default function Library() {
   // then rehydrate the new view to that bogus depth.
   const loadedKeyRef = useRef(null);
 
+  // Monotonic load token. Each load() bumps it and re-checks after every await;
+  // if a newer load() has started since (rapid A–Z taps, fast sort/library
+  // switches), the older one bails before committing — preventing an
+  // out-of-order response from clobbering the current view with stale rows.
+  // Latest-wins by call order, which matches "last click wins".
+  const loadSeqRef = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
+    const superseded = () => seq !== loadSeqRef.current;
     try {
       setLoading(true);
       // Disarm infinite-scroll for the duration of the refetch. The grid is
@@ -189,6 +214,7 @@ export default function Library() {
 
       if (activeList !== null) {
         const data = await api.getReadingListManga(activeList, { sort });
+        if (superseded()) return;
         setManga(data);
         setNextCursor(null);
         setHasMore(false);
@@ -210,7 +236,12 @@ export default function Library() {
 
         const params = { sort, limit: PAGE_SIZE };
         if (activeLibrary !== null) params.library_id = activeLibrary;
+        // Anchor page 1 at the rail's letter (title sort only — supportsCursor
+        // already restricts this branch, and the rail only sets a letter under
+        // title sort). Page 2+ resumes from the returned cursor, not the seek.
+        if (seekLetter && sort === 'title') params.seek = seekLetter;
         const resp = await api.getLibrary(params, { raw: true });
+        if (superseded()) return;
         let rows = resp.data || [];
         let cur  = resp.next_cursor ?? null;
         let more = !!resp.has_more;
@@ -229,6 +260,7 @@ export default function Library() {
           const p = { sort, limit: PAGE_SIZE, cursor: cur };
           if (activeLibrary !== null) p.library_id = activeLibrary;
           const next = await api.getLibrary(p, { raw: true });
+          if (superseded()) return;
           rows = appendUnique(rows, next.data || []);
           cur  = next.next_cursor ?? null;
           more = !!next.has_more;
@@ -242,6 +274,7 @@ export default function Library() {
         const params = { sort };
         if (activeLibrary !== null) params.library_id = activeLibrary;
         const data = await api.getLibrary(params);
+        if (superseded()) return;
         setManga(data);
         setNextCursor(null);
         setHasMore(false);
@@ -251,13 +284,41 @@ export default function Library() {
       loadedKeyRef.current = browseCountKey;
       setError(null);
     } catch (err) {
+      if (superseded()) return;
       setError(err.message);
     } finally {
-      setLoading(false);
+      // Only the still-current load owns the loading flag — a superseded one
+      // must leave it set so the newer load's spinner stays up until it settles.
+      if (!superseded()) setLoading(false);
     }
-  }, [sort, activeLibrary, activeList, browseCountKey]);
+  }, [sort, activeLibrary, activeList, seekLetter, browseCountKey]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Persist the anchored letter so back-from-detail (a remount) restores it.
+  // Keyed by location.key, so it's scoped to this exact history entry.
+  useEffect(() => {
+    try {
+      if (seekLetter) sessionStorage.setItem(seekStorageKey, seekLetter);
+      else sessionStorage.removeItem(seekStorageKey);
+    } catch {}
+  }, [seekLetter, seekStorageKey]);
+
+  // Load the first-letter buckets for the rail. Only relevant in the cursor-
+  // browse title-sort path (the only path the rail renders in). A failure
+  // leaves `availableLetters` null, which the rail reads as "enable everything".
+  useEffect(() => {
+    if (sort !== 'title' || activeList !== null) { setAvailableLetters(null); return; }
+    let cancelled = false;
+    const params = activeLibrary !== null ? { library_id: activeLibrary } : {};
+    api.getLibraryLetters(params)
+      // Guard the shape: a non-array response must fall back to null
+      // ("enable everything"), never an empty Set, which would disable the
+      // entire rail.
+      .then(list => { if (!cancelled) setAvailableLetters(Array.isArray(list) ? new Set(list) : null); })
+      .catch(() => { if (!cancelled) setAvailableLetters(null); });
+    return () => { cancelled = true; };
+  }, [sort, activeLibrary, activeList]);
 
   // Persist the browse grid for H1 restore. `load` reads this back on the next
   // mount of the same view. Two layers: the in-session snapshot (rows + cursor
@@ -434,14 +495,27 @@ export default function Library() {
   const isSearching = deferredSearch.trim().length > 0;
   const scrollKey = isSearching
     ? `${location.key || 'default'}|mode:search`
-    : `${location.key || 'default'}|mode:browse|lib:${activeLibrary ?? ''}|list:${activeList ?? ''}|sort:${sort}`;
+    : `${location.key || 'default'}|mode:browse|lib:${activeLibrary ?? ''}|list:${activeList ?? ''}|sort:${sort}|seek:${seekLetter ?? ''}`;
   const browseReady = !loading && manga.length > 0;
   const searchReady = searchResults !== null && searchResults.length > 0;
   useScrollPosition(libraryMainRef, scrollKey, browseReady || searchReady);
 
-  function selectAll()        { setActiveLibrary(null); setActiveList(null);  setDrawerOpen(false); }
-  function selectLibrary(id)  { setActiveLibrary(id);   setActiveList(null);  setDrawerOpen(false); }
-  function selectList(id)     { setActiveList(id);       setActiveLibrary(null); setDrawerOpen(false); }
+  // Switching scope or sort drops any A–Z anchor — the letter only has meaning
+  // within one library + the title sort, so carrying it across would seek into
+  // an unrelated view (or a sort the server ignores `seek` for).
+  function selectAll()        { setActiveLibrary(null); setActiveList(null);  setSeekLetter(null); setDrawerOpen(false); }
+  function selectLibrary(id)  { setActiveLibrary(id);   setActiveList(null);  setSeekLetter(null); setDrawerOpen(false); }
+  function selectList(id)     { setActiveList(id);       setActiveLibrary(null); setSeekLetter(null); setDrawerOpen(false); }
+  function changeSort(value)  { setSort(value); setSeekLetter(null); }
+
+  // Anchor (or un-anchor) the browse grid at a letter, landing at the top of
+  // the freshly-seeked page. Re-clicking the active letter clears the anchor.
+  // The refetch fires automatically: seekLetter flows into browseCountKey →
+  // load() is recreated → its effect re-runs.
+  const handleSeek = useCallback((ch) => {
+    setSeekLetter(prev => (prev === ch ? null : ch));
+    if (libraryMainRef.current) libraryMainRef.current.scrollTop = 0;
+  }, []);
 
   async function handleScan() {
     setScanning(true);
@@ -492,7 +566,7 @@ export default function Library() {
         <select
           className="library-sort lib-desktop-only"
           value={sort}
-          onChange={e => setSort(e.target.value)}
+          onChange={e => changeSort(e.target.value)}
         >
           <option value="title">A–Z</option>
           <option value="updated">Recently Updated</option>
@@ -532,7 +606,7 @@ export default function Library() {
 
       {/* Mobile-only: sort + scan toolbar */}
       <div className="lib-mobile-bar">
-        <select className="library-sort" value={sort} onChange={e => setSort(e.target.value)}>
+        <select className="library-sort" value={sort} onChange={e => changeSort(e.target.value)}>
           <option value="title">A–Z</option>
           <option value="updated">Recently Updated</option>
           <option value="year">Year</option>
@@ -656,6 +730,24 @@ export default function Library() {
                         Go to Library Management
                       </button>
                     </>
+                  ) : seekLetter ? (
+                    // Empty because of the A–Z anchor (e.g. an empty letter
+                    // tapped during the brief window before the bucket list
+                    // loads, or after a bucket fetch failure). Distinct copy +
+                    // a one-tap way back rather than the misleading
+                    // "drop manga folders" message for a non-empty library.
+                    <>
+                      <div className="library-empty-icon">🔤</div>
+                      <h2>No titles starting with “{seekLetter}”</h2>
+                      <p>Pick another letter, or jump back to the top of the list.</p>
+                      <button
+                        className="btn btn-primary"
+                        style={{ marginTop: 16 }}
+                        onClick={() => setSeekLetter(null)}
+                      >
+                        Back to top
+                      </button>
+                    </>
                   ) : (
                     <>
                       <div className="library-empty-icon">📚</div>
@@ -698,6 +790,19 @@ export default function Library() {
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* A–Z quick-jump rail — only under the title sort (the only sort
+                  an alphabetical anchor maps to) and the cursor-browse path
+                  (no reading-list filter). Stays visible when an anchor is set
+                  even if it yields no rows, so an empty letter is never a
+                  dead-end (the user can pick another letter or clear). */}
+              {sort === 'title' && activeList === null && (manga.length > 0 || seekLetter) && (
+                <LetterJumpRail
+                  active={seekLetter}
+                  available={availableLetters}
+                  onSelect={handleSeek}
+                />
               )}
             </>
           )}

@@ -3,35 +3,53 @@ const { createPacer } = require('./_pacer');
 
 // MangaFire source adapter.
 //
-// Reverse-engineering notes (verified against the live site at mangafire.to):
+// Reverse-engineering notes (verified live against mangafire.to, and
+// cross-checked against Mihon/keiyoushi's MangaFire extension):
 //
-//   OPEN — straight HTML, no auth or token needed:
-//     GET /manga/{slug}.{hid}                — series detail page; the FULL
-//                                              chapter list (per language) is
-//                                              embedded inline as static HTML.
+//   OPEN — no auth or token needed:
+//     GET /manga/{slug}.{hid}                — series detail page (HTML).
+//     GET /ajax/manga/{hid}/chapter/{lang}   — chapter list (JSON; the
+//                                              `result` field is an HTML
+//                                              fragment of <li data-number>
+//                                              rows). This is the endpoint
+//                                              Mihon hits, and it is NOT
+//                                              gated — cleaner and more
+//                                              complete than scraping the
+//                                              series page (covers every
+//                                              language, not just the one
+//                                              the series page defaults to).
+//     GET /ajax/manga/{hid}/volume/{lang}    — volume list (same shape).
 //
-//   GATED — return HTTP 403 "Request is invalid":
-//     GET /filter?keyword=…                  — title search
-//     GET /ajax/read/chapter/{mangaId}       — page-list AJAX (Cloudflare
-//                                              Turnstile token required;
-//                                              site key is embedded in the
-//                                              reader page as
-//                                              `var captchaKey = '0x4AAAAAAA…'`)
+//   GATED — return {status:403, "Request is invalid."} without a `vrf` token:
+//     GET /filter?keyword=…                  — title (keyword) search
+//     GET /ajax/read/chapter/{itemId}?vrf=…  — page-list AJAX. Image entries
+//                                              come back as [url, _, offset];
+//                                              a non-zero offset means the
+//                                              image is SCRAMBLED and needs
+//                                              client-side de-scrambling.
 //
-// What this adapter therefore supports today:
+//   The `vrf` token is produced by MangaFire's obfuscated `scripts.js`
+//   (the literal "vrf"/"ajax/read" strings aren't even present in the
+//   bundle — they're built from encoded fragments). Mihon does NOT
+//   reproduce the algorithm; it executes the site's own JS in a real
+//   WebView and intercepts the resulting request URL to read `?vrf=`.
+//   Reproducing it server-side would need a headless browser (Puppeteer
+//   ~200 MB) or an external resolver — both deliberately out of scope for
+//   momotaro's dependency footprint. So search and image download stay
+//   gated and surface a clear, actionable error.
+//
+// What this adapter supports:
 //   searchSeries        ⚠️  accepts a mangafire URL pasted as the query;
-//                          returns [seriesFromUrl]. Direct keyword search
-//                          throws an explainer because /filter is gated.
+//                          returns [seriesFromUrl]. Keyword search throws an
+//                          explainer (the /filter endpoint needs a vrf token).
 //   getSeries           ✅ scrapes the series HTML page
-//   getChapters         ✅ scrapes the chapter list embedded in the series
-//                          HTML — supports per-language filtering by
-//                          re-fetching with `?language=XX` if needed,
-//                          though the default page already includes EN.
-//   getChapterImages    ❌ throws GATED_ERROR (Turnstile gate)
+//   getChapters         ✅ via the open /ajax/manga/{hid}/chapter/{lang}
+//                          JSON endpoint — full chapter list per language
+//   getChapterImages    ❌ throws GATED_ERROR (vrf token required)
 //   seriesUrl           ✅
 //
-// Same partial-support pattern as comixto.js / mangakakalot.js: any download
-// attempt surfaces the gated-error string in `download_jobs.error` and
+// Same partial-support pattern as comixto.js: any download attempt surfaces
+// the gated-error string in `download_jobs.error` and
 // `manga_schedules.last_result`. The crucial scheduler use-case still works
 // because we CAN list chapters and diff against local — only the actual
 // image download is unavailable. Pair the mangafire URL with a MangaDex URL
@@ -192,28 +210,39 @@ function parseSeriesHtml(html, id) {
 // ── Chapter list ───────────────────────────────────────────────────────────
 
 /**
- * Scrape the chapter list embedded on the series page. Returns one entry per
- * chapter row in the requested language(s).
+ * List chapters via the open `/ajax/manga/{hid}/chapter/{lang}` JSON endpoint
+ * (the same one Mihon uses). Returns one entry per chapter row in the
+ * requested language(s).
  *
- * Each `<li class="item" data-number="N"><a href="/read/{slug}/{lang}/chapter-N"
- * title="Vol X - Chap N"><span>Chapter N: title</span><span>date</span></a></li>`
- * — only the EN list is rendered when no `?language=` is on the request URL,
- * so we re-fetch per language when the caller asks for non-EN.
+ * The endpoint responds with `{status:200, result:"<ul>…<li data-number=N>
+ * <a href='/read/{slug}.{hid}/{lang}/chapter-N' title='Vol X - Chap N'>
+ * <span>Chapter N: title</span><span>date</span></a></li>…</ul>"}`. `result`
+ * is a normal HTML fragment once JSON-decoded, so it feeds straight into the
+ * same row parser the series page used.
  *
- * @param {string} id
+ * @param {string} id  the {slug}.{hid} composite
  * @param {object} [opts]
  * @param {string[]} [opts.languages=['en']]
  */
 async function getChapters(id, { languages = ['en'] } = {}) {
   if (!id) throw new Error('id is required');
+  // The AJAX endpoint keys on the bare hid (the part after the last dot).
+  const hid = id.substring(id.lastIndexOf('.') + 1);
+  if (!hid) throw new Error(`MangaFire: can't derive series id from "${id}"`);
+
   const out = [];
   const seen = new Set();
   for (const lang of languages) {
-    const url = lang === 'en'
-      ? `${SITE_BASE}/manga/${id}`
-      : `${SITE_BASE}/manga/${id}?language=${encodeURIComponent(lang)}`;
-    const html = await pacedFetch(url);
-    const chapters = parseChapterList(html, id, lang);
+    const json = await pacedFetch(
+      `${SITE_BASE}/ajax/manga/${encodeURIComponent(hid)}/chapter/${encodeURIComponent(lang)}`,
+      { json: true, headers: { 'X-Requested-With': 'XMLHttpRequest', 'Referer': `${SITE_BASE}/manga/${id}` } },
+    );
+    if (!json || json.status !== 200 || typeof json.result !== 'string') {
+      // A non-200 status here means the language has no chapters (or the id is
+      // wrong) — skip it rather than failing the whole multi-language call.
+      continue;
+    }
+    const chapters = parseChapterList(json.result, id, lang);
     for (const c of chapters) {
       const key = `${c.id}|${c.language}`;
       if (seen.has(key)) continue;
@@ -237,9 +266,11 @@ async function getChapters(id, { languages = ['en'] } = {}) {
 
 function parseChapterList(html, id, language) {
   const out = [];
-  // Match each <li class="item" data-number="…"> ... </li>. Dates are in the
-  // second <span>; titles in the first; volume in the anchor's title attr.
-  const liRe = /<li\s+class="item"\s+data-number="([^"]+)">([\s\S]*?)<\/li>/g;
+  // Match each <li … data-number="…"> ... </li> (the chapter-list AJAX writes
+  // <li class="item" data-number="N">, but stay tolerant of attribute order).
+  // Dates are in the second <span>; titles in the first; volume in the
+  // anchor's title attr.
+  const liRe = /<li[^>]*\bdata-number="([^"]+)"[^>]*>([\s\S]*?)<\/li>/g;
   let m;
   while ((m = liRe.exec(html)) !== null) {
     const number = parseFloat(m[1]);
@@ -314,8 +345,9 @@ async function searchSeries(query, /* { limit } */) {
     }
   }
   throw new Error(
-    'MangaFire keyword search is blocked at the source (HTTP 403 on /filter). ' +
-    'Paste a https://mangafire.to/manga/{slug}.{hid} URL into the search box instead — ' +
+    'MangaFire keyword search is blocked at the source (HTTP 403 on /filter — ' +
+    'it requires a browser-generated vrf token). Paste a ' +
+    'https://mangafire.to/manga/{slug}.{hid} URL into the search box instead — ' +
     'the rest of the flow (chapter list, scheduling, URL recording) works.'
   );
 }
@@ -324,8 +356,10 @@ async function searchSeries(query, /* { limit } */) {
 // download_jobs.error and the scheduler to last_result, so the UI surfaces
 // it inline.
 const GATED_ERR =
-  'MangaFire chapter images are loaded behind a Cloudflare Turnstile ' +
-  'challenge — chapter download is not supported from this source.';
+  'MangaFire chapter images require a browser-generated vrf token on the ' +
+  '/ajax/read endpoint (and are scrambled) — chapter download is not ' +
+  'supported from this source. Pair the MangaFire URL with a MangaDex URL ' +
+  'on the same manga for actual downloads.';
 
 async function getChapterImages(/* readUrlPath */) {
   throw new Error(GATED_ERR);

@@ -193,7 +193,8 @@ Response shape:
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`) |
+| GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`, `?seek=`) |
+| GET | `/api/library/letters` | First-letter buckets (`#`, `A`..`Z`) that have titles in scope, for the A–Z quick-jump rail. Honours `?library_id=` (else All-Libraries `show_in_all`). See [Quick-jump letters](#quick-jump-letters-seek--apilibraryletters) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info computed on demand: path, chapter count, folder size in MB, `track_volumes`, and missing-chapter / missing-volume gap lists |
 | GET | `/api/manga/:id/offline-package` | Batched payload for the offline downloader — `{ manga, chapters, server_updated_at, fetched_at }`. Used by `queueSeries` (one round-trip per series instead of two) and `refreshOfflineSnapshot` (stale-copy detection). The chapter rows alias `file_mtime AS updated_at` because `chapters` has no literal `updated_at` column. See [offline.md § Server endpoint](./offline.md#server-endpoint). |
@@ -247,6 +248,20 @@ Paginated response shape:
 Under the hood, the server fetches `limit + 1` rows and applies a keyset `WHERE` against the index matching the sort: `idx_manga_title` / `idx_manga_updated_at` for the single-key sorts, and `idx_manga_year (year DESC, id)` / `idx_manga_score (score DESC, title, id)` for `year` / `rating`. The keyset predicate is **NULLS-LAST aware** for the nullable `year` / `score` columns — a row with a NULL key sorts after every non-NULL row and the cursor steps into that trailing block without skipping or duplicating rows. `EXPLAIN QUERY PLAN` confirms each sort scans its index in order with no temp b-tree, so the cost of fetching page N is independent of N — unlike `OFFSET`, which scans every skipped row.
 
 Deep cursor pages (`?cursor=` present) bypass the in-process listing cache, since they are cheap to recompute via the index and caching them would let one client's deep scroll evict the shared hot first-page / per-library entries.
+
+### Quick-jump letters (`?seek=` + `/api/library/letters`)
+
+The Library page's A–Z quick-jump rail anchors the keyset-paginated browse grid at a chosen letter without loading the intervening pages.
+
+- **`?seek=<char>` on `GET /api/library`** — honoured **only for `sort=title`** and **only when `?cursor=` is absent** (the two are mutually exclusive: `seek` anchors page 1, the returned `next_cursor` drives page 2+). The server normalises the value to its uppercase first character; `A`..`Z` add `AND m.title >= ? COLLATE NOCASE`, anchoring the first page at that letter's block. Anything else — `#`, a digit, punctuation, a non-ASCII character — resolves to **no lower bound**, i.e. the top of the listing (where non-alphabetic titles already sort). `COLLATE NOCASE` on the predicate is intentional while the `ORDER BY` stays on the binary `idx_manga_title`: the smallest binary title that is NOCASE-≥ the letter is exactly that letter's block start, so no earlier-lettered row can lead the anchored page. `seek` is part of the in-process cache key, so each anchored page-1 caches independently. Ignored (no effect) for other sorts and for `GET /api/reading-lists/:id/manga`.
+
+  This is a **forward anchor**, not a scroll-to: the response begins at the letter and pages forward from there. A true scroll-to would require loading every page up to the letter (up to ~50 fetches in a 10 k-series library), which the keyset design exists to avoid. Only this anchor page pays a from-the-top index scan to reach the letter's block; every subsequent page is a direct keyset seek via the cursor.
+
+- **`GET /api/library/letters`** — returns the distinct first-letter buckets present in scope so the rail can disable letters with no titles. Each bucket is `#` (digits, punctuation, and non-ASCII / CJK first characters) or an uppercase `A`..`Z`. Scope mirrors the listing exactly: `?library_id=N` for one library, otherwise the All-Libraries set (`show_in_all = 1` plus orphan rows). Cached on the same 30 s listing TTL.
+
+  ```json
+  { "data": ["#", "A", "B", "T", "Z"] }
+  ```
 
 ### Listing row shape
 

@@ -21,9 +21,10 @@ const router = express.Router();
 // every Library / reading-list fetch was wasted bandwidth and JSON-parse cost.
 // Restrict to the columns the grid + keyset cursor actually need.
 //
-// `m.title` is needed for sort=title cursors; `m.updated_at` for sort=updated
-// cursors. Both are read by encodeCursor() via valueColumn lookup further
-// below.
+// Every keyset cursor key column must be in this SELECT so encodeCursor() can
+// read its value off the last row: `m.title` (title + rating cursors),
+// `m.updated_at` (updated cursor), `m.year` (year cursor), `m.score` (rating
+// cursor). See KEYSET_SORTS / buildKeysetWhere below.
 
 const LIBRARY_LIST_COLUMNS = [
   'm.id',
@@ -55,7 +56,12 @@ function toListingRow(m) {
 // principle (free-form search queries), so cap at MAX_LISTING_CACHE entries
 // and evict oldest-inserted on overflow. TTL matches /api/home (30 s).
 const LISTING_CACHE_TTL_MS  = 30 * 1000;
-const MAX_LISTING_CACHE     = 50;
+// Bumped from 50: with keyset pagination every entry is now bounded to a
+// single page (≤ MAX_LIMIT rows) instead of an entire library, so the cache
+// is cheap to grow. The extra headroom keeps hot page-1 / per-library entries
+// resident even while another client pages deep. (Deep cursor pages are not
+// cached at all — see the `?cursor=` guard in GET /api/library.)
+const MAX_LISTING_CACHE     = 200;
 const _libraryCache           = new Map(); // key -> { value, ts }
 const _readingListMangaCache  = new Map(); // key -> { value, ts }
 
@@ -414,35 +420,118 @@ router.get('/manga/:id/reading-lists', asyncWrapper(async (req, res) => {
 
 // ── Manga / Library endpoints ────────────────────────────────────────────────
 
-// Opaque cursor helpers — encode the row's sort-key + id so the next page
-// can resume past the last row without using OFFSET.
-function encodeCursor(value, id) {
-  return Buffer.from(JSON.stringify([value, id])).toString('base64url');
+// Opaque cursor helpers — encode every ordering-key value of the last row
+// (plus its id) so the next page can resume past it without using OFFSET.
+// The payload is a flat array `[...keyValues, id]`. Single-key sorts
+// (title / updated) therefore stay `[value, id]`, so cursors minted by the
+// pre-composite-cursor server still decode unchanged.
+function encodeCursor(values) {
+  return Buffer.from(JSON.stringify(values)).toString('base64url');
 }
-function decodeCursor(token) {
+function decodeCursor(token, expectedLength) {
   try {
     const arr = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
-    if (!Array.isArray(arr) || arr.length !== 2) return null;
-    return { value: arr[0], id: arr[1] };
+    if (!Array.isArray(arr) || arr.length < 2) return null;
+    // Reject a cursor whose width doesn't match the requested sort — a
+    // title cursor replayed under sort=rating (or vice-versa) must 400
+    // rather than silently mis-paginate.
+    if (expectedLength != null && arr.length !== expectedLength) return null;
+    return arr;
   } catch { return null; }
 }
 
 const MAX_LIMIT     = 500;
 const DEFAULT_LIMIT = 200;
 
-// Sort modes that support keyset pagination. Each entry describes the SQL
-// sort column, ORDER direction, and the corresponding WHERE comparison.
+// Sort modes that support keyset pagination. Each entry is the ordered list
+// of key columns that defines the row order, terminated by the `m.id`
+// tiebreaker. `dir` is the per-column ORDER direction; `nullable: true`
+// marks columns whose values can be NULL and that sort NULLs LAST (year,
+// score) — the predicate + ORDER builders below special-case those so the
+// keyset never silently drops the trailing NULL block.
+//
+// Each list reproduces the exact pre-pagination ORDER BY for its sort, so
+// first-page output is unchanged:
+//   title   → m.title ASC, m.id ASC
+//   updated → m.updated_at DESC, m.id DESC
+//   year    → m.year DESC NULLS LAST, m.id ASC
+//   rating  → m.score DESC NULLS LAST, m.title ASC, m.id ASC
 const KEYSET_SORTS = {
-  title:   { column: 'm.title',      direction: 'ASC',  cmp: '>' },
-  updated: { column: 'm.updated_at', direction: 'DESC', cmp: '<' },
+  title:   [{ col: 'm.title',      dir: 'ASC',  nullable: false }, { col: 'm.id', dir: 'ASC' }],
+  updated: [{ col: 'm.updated_at', dir: 'DESC', nullable: false }, { col: 'm.id', dir: 'DESC' }],
+  year:    [{ col: 'm.year',       dir: 'DESC', nullable: true  }, { col: 'm.id', dir: 'ASC' }],
+  rating:  [{ col: 'm.score',      dir: 'DESC', nullable: true  },
+            { col: 'm.title',      dir: 'ASC',  nullable: false },
+            { col: 'm.id',         dir: 'ASC' }],
 };
+
+// Build the `ORDER BY` body (without the leading keyword) for a keyset sort.
+// Nullable DESC columns get an explicit `NULLS LAST` — SQLite already places
+// NULLs last for `DESC`, but stating it keeps the SQL self-documenting and
+// matches the legacy clause byte-for-byte.
+function buildKeysetOrderBy(keys) {
+  return keys
+    .map(k => `${k.col} ${k.dir}${k.nullable && k.dir === 'DESC' ? ' NULLS LAST' : ''}`)
+    .join(', ');
+}
+
+// Build the "row strictly after the cursor row" WHERE predicate for a keyset
+// sort, given the decoded cursor values (aligned 1:1 with `keys`). This is the
+// standard lexicographic keyset comparison — an OR of "all earlier keys equal
+// AND this key strictly past the cursor" terms — extended to honour NULLS LAST
+// on nullable columns.
+//
+// Returns `{ clause, params }`. `clause` is wrapped in parentheses and safe to
+// AND into the surrounding query.
+function buildKeysetWhere(keys, values) {
+  const terms = [];
+  const params = [];
+
+  for (let i = 0; i < keys.length; i++) {
+    const parts = [];
+    // Equality on every key before the pivot.
+    for (let j = 0; j < i; j++) {
+      const v = values[j];
+      if (v === null || v === undefined) {
+        parts.push(`${keys[j].col} IS NULL`);
+      } else {
+        parts.push(`${keys[j].col} = ?`);
+        params.push(v);
+      }
+    }
+    // Strict comparison on the pivot key.
+    const k = keys[i];
+    const v = values[i];
+    if (k.nullable) {
+      // Nullable columns always sort DESC NULLS LAST here.
+      if (v === null || v === undefined) {
+        // Cursor sits in the trailing NULL block: no row is "after" purely on
+        // this column (all remaining are also NULL here), so this term adds
+        // nothing — deeper keys disambiguate via their own terms.
+        continue;
+      }
+      // A non-NULL cursor value: rows with a smaller value, OR any NULL-valued
+      // row (NULLs come after every non-NULL in DESC NULLS LAST).
+      parts.push(`(${k.col} < ? OR ${k.col} IS NULL)`);
+      params.push(v);
+    } else {
+      const cmp = k.dir === 'DESC' ? '<' : '>';
+      parts.push(`${k.col} ${cmp} ?`);
+      params.push(v);
+    }
+    if (parts.length) terms.push(`(${parts.join(' AND ')})`);
+  }
+
+  return { clause: `(${terms.join(' OR ')})`, params };
+}
 
 // GET /api/library
 // Optional pagination: pass ?limit=N (default 200 when cursor is present, max 500).
 // When `limit` is supplied the response includes `next_cursor` (null when the
 // listing is exhausted) and `has_more`. Resume with ?cursor=<opaque>.
-// Cursors are supported for sort=title (default) and sort=updated; year sort
-// falls back to LIMIT-only (no cursor).
+// Cursors are supported for all four sorts (title, updated, year, rating).
+// year / rating use NULLS-LAST-aware multi-column keyset cursors backed by
+// idx_manga_year / idx_manga_score.
 router.get('/library', asyncWrapper(async (req, res) => {
   const db = getDb();
   const { search, status, sort = 'title', library_id, cursor } = req.query;
@@ -475,16 +564,23 @@ router.get('/library', asyncWrapper(async (req, res) => {
 
   // In-process cache: keyed by every parameter that affects the result. 30 s
   // TTL matches /api/home / /api/stats — scans surface within that window.
+  // Deep cursor pages bypass the in-process cache entirely: they are keyset
+  // (O(log n) to recompute once the year/score indexes are in place) and
+  // caching them lets one client's deep scroll evict the hot first-page /
+  // per-library entries that every visitor shares. Page 1 (no cursor) and
+  // search bursts still cache normally.
+  const cacheable = !cursor;
   const cacheKey = [
     `s:${search || ''}`,
     `st:${status || ''}`,
     `o:${sort}`,
     `lib:${library_id || ''}`,
-    `c:${cursor || ''}`,
     `lim:${limit == null ? '' : limit}`,
   ].join('|');
-  const cached = getListingCache(_libraryCache, cacheKey);
-  if (cached) return res.json(cached);
+  if (cacheable) {
+    const cached = getListingCache(_libraryCache, cacheKey);
+    if (cached) return res.json(cached);
+  }
 
   let query = `SELECT ${LIBRARY_LIST_COLUMNS} FROM manga m LEFT JOIN libraries l ON l.id = m.library_id WHERE 1=1`;
   const params = [];
@@ -512,24 +608,22 @@ router.get('/library', asyncWrapper(async (req, res) => {
     if (!keysetSort) {
       return res.status(400).json({ error: `Cursor pagination is not supported for sort=${sort}` });
     }
-    const decoded = decodeCursor(cursor);
+    const decoded = decodeCursor(cursor, keysetSort.length);
     if (!decoded) return res.status(400).json({ error: 'Invalid cursor' });
-    query += ` AND (${keysetSort.column} ${keysetSort.cmp} ?
-                    OR (${keysetSort.column} = ? AND m.id ${keysetSort.cmp} ?))`;
-    params.push(decoded.value, decoded.value, decoded.id);
+    // decoded is [...keyValues, id]; align it to the keys list (whose last
+    // entry is the m.id tiebreaker).
+    const { clause, params: keysetParams } = buildKeysetWhere(keysetSort, decoded);
+    query += ` AND ${clause}`;
+    params.push(...keysetParams);
   }
 
   if (keysetSort) {
-    // Include m.id as a tiebreaker so the cursor is deterministic across ties
-    query += ` ORDER BY ${keysetSort.column} ${keysetSort.direction}, m.id ${keysetSort.direction}`;
+    query += ` ORDER BY ${buildKeysetOrderBy(keysetSort)}`;
   } else {
-    const orderMap = {
-      year:   'm.year DESC',
-      // Rating: highest score first, with unrated manga (no AniList/MAL match)
-      // falling to the bottom via NULLS LAST.
-      rating: 'm.score DESC NULLS LAST, m.title ASC',
-    };
-    query += ` ORDER BY ${orderMap[sort] || 'm.title ASC'}, m.id ASC`;
+    // Sorts without keyset support (none today — all four are keyset). Kept as
+    // a defensive fallback so an unrecognised ?sort= still returns deterministic
+    // rows rather than DB-native order.
+    query += ' ORDER BY m.title ASC, m.id ASC';
   }
 
   if (limit !== null) {
@@ -548,8 +642,10 @@ router.get('/library', asyncWrapper(async (req, res) => {
     manga = rows.slice(0, limit);
     if (keysetSort) {
       const last = manga[manga.length - 1];
-      const valueColumn = keysetSort.column.replace(/^m\./, '');
-      nextCursor = encodeCursor(last[valueColumn], last.id);
+      // Emit every ordering-key value of the last row, in key order. The keys
+      // list ends with m.id, so this naturally produces [...keyValues, id].
+      const values = keysetSort.map(k => last[k.col.replace(/^m\./, '')]);
+      nextCursor = encodeCursor(values);
     }
   }
 
@@ -561,7 +657,7 @@ router.get('/library', asyncWrapper(async (req, res) => {
     payload.has_more    = hasMore;
   }
 
-  setListingCache(_libraryCache, cacheKey, payload);
+  if (cacheable) setListingCache(_libraryCache, cacheKey, payload);
   res.json(payload);
 }));
 

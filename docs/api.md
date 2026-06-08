@@ -195,7 +195,7 @@ Response shape:
 |---|---|---|
 | GET | `/api/library` | List manga (supports `?search=`, `?sort=`, `?library_id=`, `?status=`, `?limit=`, `?cursor=`) |
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
-| GET | `/api/manga/:id/info` | Get filesystem info: path, file count, folder size in MB |
+| GET | `/api/manga/:id/info` | Get filesystem info computed on demand: path, chapter count, folder size in MB, `track_volumes`, and missing-chapter / missing-volume gap lists |
 | GET | `/api/manga/:id/offline-package` | Batched payload for the offline downloader — `{ manga, chapters, server_updated_at, fetched_at }`. Used by `queueSeries` (one round-trip per series instead of two) and `refreshOfflineSnapshot` (stale-copy detection). The chapter rows alias `file_mtime AS updated_at` because `chapters` has no literal `updated_at` column. See [offline.md § Server endpoint](./offline.md#server-endpoint). |
 | PATCH | `/api/manga/:id` | Update user-editable manga fields. Body accepts any subset of `{ track_volumes?, title?, author?, genres? }`. `track_volumes` is coerced to 0/1; an empty `title` returns 400; `author = ""` clears the field; `genres` must be an array of strings (non-strings/empties are dropped). The triggers on `manga` keep `manga_fts` and `manga_genres` in sync automatically when `title`/`author`/`genres` change. |
 | GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages (each annotated with its pre-generated cover when available) |
@@ -219,7 +219,7 @@ The same logic applies to the reading-list manga endpoint (`GET /api/reading-lis
 `GET /api/library` is opt-in paginated. Omitting both parameters returns the full result set (unchanged legacy behavior). Supplying either parameter switches the response to the paginated shape.
 
 - `?limit=N` — max rows per page. Bounded to `[1, 500]`. Default 200 when only `cursor` is set.
-- `?cursor=<opaque>` — resume token from a previous response's `next_cursor`. Supported for `sort=title` (default) and `sort=updated` only. `sort=year` and `sort=rating` return `400` when a cursor is supplied.
+- `?cursor=<opaque>` — resume token from a previous response's `next_cursor`. Supported for **all four sorts** (`title`, `updated`, `year`, `rating`). A cursor minted under one sort is rejected with `400` if replayed under a different sort (the encoded key width won't match that sort's key list).
 
 ### Sort modes (`?sort=`)
 
@@ -242,9 +242,11 @@ Paginated response shape:
 }
 ```
 
-`next_cursor` is `null` when `has_more` is `false` — i.e. the final page has been returned. Cursors are opaque base64url tokens containing the last row's sort-key plus its `id` as a tiebreaker; do not parse or construct them on the client.
+`next_cursor` is `null` when `has_more` is `false` — i.e. the final page has been returned. Cursors are opaque base64url tokens containing **all of the last row's ordering-key values** plus its `id` tiebreaker (`[...keyValues, id]`); single-key sorts (`title`, `updated`) encode `[value, id]`, `rating` encodes `[score, title, id]`. Do not parse or construct them on the client.
 
-Under the hood, the server fetches `limit + 1` rows and uses `WHERE (title, id) > (?, ?)` (or `<` for DESC sorts) against the `idx_manga_title` / `idx_manga_updated_at` indexes, so the cost of fetching page N is independent of N — unlike `OFFSET`, which scans every skipped row.
+Under the hood, the server fetches `limit + 1` rows and applies a keyset `WHERE` against the index matching the sort: `idx_manga_title` / `idx_manga_updated_at` for the single-key sorts, and `idx_manga_year (year DESC, id)` / `idx_manga_score (score DESC, title, id)` for `year` / `rating`. The keyset predicate is **NULLS-LAST aware** for the nullable `year` / `score` columns — a row with a NULL key sorts after every non-NULL row and the cursor steps into that trailing block without skipping or duplicating rows. `EXPLAIN QUERY PLAN` confirms each sort scans its index in order with no temp b-tree, so the cost of fetching page N is independent of N — unlike `OFFSET`, which scans every skipped row.
+
+Deep cursor pages (`?cursor=` present) bypass the in-process listing cache, since they are cheap to recompute via the index and caching them would let one client's deep scroll evict the shared hot first-page / per-library entries.
 
 ### Listing row shape
 
@@ -269,7 +271,7 @@ Under the hood, the server fetches `limit + 1` rows and uses `WHERE (title, id) 
 
 Both `/api/library` and `/api/reading-lists/:id/manga` are cached at two layers:
 
-- **In-process LRU cache** — keyed by every parameter that affects the result (`search`, `status`, `sort`, `library_id`, `cursor`, `limit` for the library endpoint; `list_id`, `search`, `sort` for the reading-list endpoint). 30 s TTL, capped at 50 entries per endpoint with oldest-insertion eviction. New manga from a scan, metadata refresh, or `PATCH /api/manga/:id` become visible within the TTL window — same staleness contract as `/api/home` and `/api/stats`.
+- **In-process LRU cache** — keyed by every parameter that affects the result (`search`, `status`, `sort`, `library_id`, `limit` for the library endpoint; `list_id`, `search`, `sort` for the reading-list endpoint). 30 s TTL, capped at 200 entries per endpoint with oldest-insertion eviction. Cursor-bearing (deep) pages are **not** cached — only page 1 (no cursor) and search bursts are. New manga from a scan, metadata refresh, or `PATCH /api/manga/:id` become visible within the TTL window — same staleness contract as `/api/home` and `/api/stats`.
 - **HTTP cache header** — every response carries `Cache-Control: private, max-age=15, stale-while-revalidate=60` so non-PWA tabs (incognito, fresh installs) get a fast browser cache to back up the service worker's StaleWhileRevalidate rule. Different query strings get different SW / browser cache entries.
 
 ### `GET /api/manga/:id/info` response
@@ -279,12 +281,20 @@ Both `/api/library` and `/api/reading-lists/:id/manga` are cached at two layers:
   "data": {
     "path": "/library/My Manga",
     "file_count": 842,
-    "size_mb": 312.47
+    "size_mb": 312.47,
+    "track_volumes": false,
+    "missing_chapters": { "count": 2, "numbers": [37, 58], "max": 120, "truncated": false },
+    "missing_volumes":  { "count": 0, "numbers": [], "max": 0, "truncated": false }
   }
 }
 ```
 
-`file_count` and `size_mb` are read from the cached `manga.file_count` / `manga.bytes_on_disk` columns populated by the scanner — no disk walk happens at request time. Values are accurate as of the most recent scan of the manga. See [scanner.md](./scanner.md#cached-disk-usage-columns).
+This endpoint is computed **on demand** (not from the cached scan-time columns) so the modal reflects the disk's current state after a refresh:
+
+- `file_count` — number of chapter rows for the manga (a chapter folder counts as 1, a single CBZ counts as 1), via `COUNT(*)` on `chapters`.
+- `size_mb` — recursive on-disk size of `manga.path`, computed by an iterative `readdir`/`stat` walk at request time (returns 0 if the folder is missing).
+- `track_volumes` — the manga's flag, so the client knows which axis to display.
+- `missing_chapters` / `missing_volumes` — **gap detection**. Each chapter is bucketed into the integer floor of its `number` / `volume` (so `5.5` still covers chapter 5); the response lists the integers in `[1, max]` with no chapter assigned. Shape: `{ count, numbers, max, truncated }`, where `numbers` is capped at 500 entries and `truncated` is true when `count` exceeds the cap. Both axes are always returned so the client can re-render if the `track_volumes` toggle changes without another round-trip.
 
 ### `GET /api/manga/:id/thumbnail-options` response
 

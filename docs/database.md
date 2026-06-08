@@ -468,8 +468,11 @@ Both are idempotent (`INSERT OR IGNORE`, and the FTS backfill is gated on emptin
 
 ```sql
 idx_manga_library_id      ON manga(library_id)
-idx_manga_title           ON manga(title)                    -- speeds up ORDER BY title (default sort)
-idx_manga_updated_at      ON manga(updated_at DESC)          -- speeds up ORDER BY updated_at
+idx_manga_title           ON manga(title)                    -- speeds up ORDER BY title (default sort) + title keyset cursor
+idx_manga_updated_at      ON manga(updated_at DESC)          -- speeds up ORDER BY updated_at + updated keyset cursor
+idx_manga_year            ON manga(year DESC, id ASC)        -- backs sort=year keyset cursor (year DESC NULLS LAST, id)
+idx_manga_score           ON manga(score DESC, title ASC, id ASC) -- backs sort=rating keyset cursor (score DESC NULLS LAST, title, id)
+idx_manga_created_at      ON manga(created_at DESC, id DESC)  -- backs the Home "Recently Added" ribbon (ORDER BY created_at DESC, id DESC) + recent-window filter; no temp b-tree
 idx_manga_lib_status      ON manga(library_id, status)       -- speeds up library filter by status
 idx_manga_lib_metadata_src ON manga(library_id, metadata_source) -- speeds up bulk metadata and export queries
 idx_chapters_manga_id     ON chapters(manga_id)

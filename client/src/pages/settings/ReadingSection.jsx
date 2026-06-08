@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ToggleRow from '../../components/ToggleRow';
+import { isAndroid } from '../../api/volumeButtons';
 import '../Settings.css';
 
 // Mirrors Reader.jsx — keep the migration logic identical so opening Settings
@@ -54,6 +55,10 @@ export default function ReadingSection() {
   const [scaleType, setScaleType]                 = useState(() => localStorage.getItem('reader_scaleType') || 'screen');
   const [pageLayout, setPageLayout]               = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
   const [prefetchPages, setPrefetchPages]         = useState(() => localStorage.getItem('reader_prefetchPages') !== 'false');
+  // Volume-button page turning (Android only) — the toggles below only render
+  // on Android and the native bridge no-ops elsewhere.
+  const [volumeButtonNav, setVolumeButtonNav]         = useState(() => localStorage.getItem('reader_volumeButtonNav') === 'true');
+  const [volumeButtonReverse, setVolumeButtonReverse] = useState(() => localStorage.getItem('reader_volumeButtonReverse') === 'true');
   const [resetHintsMsg, setResetHintsMsg]         = useState(null);
 
   useEffect(() => { localStorage.setItem('reader_readingMode',  readingMode); },         [readingMode]);
@@ -70,6 +75,8 @@ export default function ReadingSection() {
   useEffect(() => { localStorage.setItem('reader_scaleType',    scaleType); },           [scaleType]);
   useEffect(() => { localStorage.setItem('reader_pageLayout',   pageLayout); },          [pageLayout]);
   useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
+  useEffect(() => { localStorage.setItem('reader_volumeButtonNav', String(volumeButtonNav)); }, [volumeButtonNav]);
+  useEffect(() => { localStorage.setItem('reader_volumeButtonReverse', String(volumeButtonReverse)); }, [volumeButtonReverse]);
 
   // One-time cleanup of the legacy boolean key.
   useEffect(() => {
@@ -311,6 +318,24 @@ export default function ReadingSection() {
             value={predictNextChapter}
             onChange={setPredictNextChapter}
           />
+          {isAndroid() && (
+            <>
+              <ToggleRow
+                label="Volume buttons turn pages"
+                desc="Use the device's volume keys to turn pages in paged modes: Volume Up = next page, Volume Down = previous page. Same effect as tapping the side of the screen. Has no effect in webtoon / continuous-scroll mode."
+                value={volumeButtonNav}
+                onChange={setVolumeButtonNav}
+              />
+              {volumeButtonNav && (
+                <ToggleRow
+                  label="Reverse volume buttons"
+                  desc="Swap the mapping so Volume Down = next page and Volume Up = previous page."
+                  value={volumeButtonReverse}
+                  onChange={setVolumeButtonReverse}
+                />
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

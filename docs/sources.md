@@ -65,6 +65,7 @@ The page has four panes:
 | File | Responsibility |
 |---|---|
 | [server/src/sources/index.js](../server/src/sources/index.js) | Registry of source adapters keyed by id |
+| [server/src/sources/_pacer.js](../server/src/sources/_pacer.js) | Shared per-adapter rate-limit pacer — `createPacer(intervalMs)` returns `{ wait() }` enforcing a minimum gap between calls. Each adapter creates its own instance so upstreams are paced independently. |
 | [server/src/sources/urlParser.js](../server/src/sources/urlParser.js) | URL ↔ `(source, source_id)` translation for every adapter |
 | [server/src/sources/mangadex.js](../server/src/sources/mangadex.js) | MangaDex API client — search, series, chapters, MangaDex@Home image URLs |
 | [server/src/sources/weebcentral.js](../server/src/sources/weebcentral.js) | WeebCentral HTML/HTMX scraper |

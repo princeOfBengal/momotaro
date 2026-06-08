@@ -10,7 +10,7 @@ The scanner turns filesystem folders and CBZ files into database records.
 | [server/src/scanner/chapterParser.js](../server/src/scanner/chapterParser.js) | Parses chapter/volume numbers from names; lists and streams CBZ entries via `yauzl` |
 | [server/src/scanner/thumbnailGenerator.js](../server/src/scanner/thumbnailGenerator.js) | Generates WebP cover images via Sharp (accepts either a filesystem path or a CBZ entry descriptor) |
 | [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js) | Active-cover priority resolver. Used by `applyMetadataToManga`, `POST /api/admin/reset-thumbnails`, and the post-scan reinforcement pass. See [Cover Priority](#cover-priority). |
-| [server/src/scanner/localMetadata.js](../server/src/scanner/localMetadata.js) | Reads YAML/JSON sidecar metadata from manga folders |
+| [server/src/scanner/localMetadata.js](../server/src/scanner/localMetadata.js) | Reads JSON sidecar (generic + scraper `primary_title` format) and `ComicInfo.xml` metadata from manga folders |
 | [server/src/watcher/index.js](../server/src/watcher/index.js) | chokidar watcher — triggers `scanMangaDirectory` on file changes |
 
 ## Expected Library Layout
@@ -50,7 +50,7 @@ This means a re-scan of an unchanged library does almost no I/O beyond directory
 
 ## Cached Disk-Usage Columns
 
-The scanner populates four columns that the stats and info endpoints read directly, avoiding per-request disk walks:
+The scanner populates four columns that the stats endpoint reads directly, avoiding per-request disk walks (the per-manga `/info` endpoint recomputes on demand — see the note below this table):
 
 | Table | Column | How it's computed |
 |---|---|---|
@@ -89,7 +89,7 @@ A second statement zeros out any manga left with no chapter rows so deletions pr
 
 The trade-off: at N manga with C chapters each, the per-manga path issues N statements hitting the `chapters` table N times; the bulk path replaces that with one `GROUP BY` pass. For a 10 k-manga library this eliminates ~10 k correlated-subquery round-trips per full scan.
 
-`GET /api/stats` sums `manga.bytes_on_disk` in a single query; `GET /api/manga/:id/info` reads the columns directly. Before the cached columns existed both endpoints walked the library folder on every request — untenable at 8 TB.
+`GET /api/stats` sums `manga.bytes_on_disk` in a single query — before the cached column existed it walked the library folder on every request, untenable at 8 TB. `GET /api/manga/:id/info` is the deliberate exception: it recomputes folder size and chapter count on demand (a single-manga walk is cheap, and the modal also reports missing-chapter gaps) so its figures reflect the disk's current state rather than the last scan rollup.
 
 ## Cover Priority
 
@@ -409,9 +409,14 @@ Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cb
 
 `reschedule()` is idempotent — it's called on startup and again every time a setting changes through the admin API. The timer is `.unref()`'d so a pending wake-up never blocks graceful shutdown. On fire, `cbzCache.wipe()` removes every extracted chapter directory and the scheduler computes the next occurrence in server local time. When a daily/weekly window would already be in the past for today, the scheduler rolls forward to the next valid day.
 
-## Local JSON Metadata
+## Local Metadata
 
-`localMetadata.js` → `findLocalMetadata(mangaPath)` searches for a JSON sidecar file in the manga directory (or its first chapter subdirectory) and maps it onto the internal metadata shape.
+`localMetadata.js` → `findLocalMetadata(mangaPath)` searches for on-disk metadata in the manga directory (or its first chapter subdirectory yielding one) and maps it onto the internal metadata shape. Two formats are supported, tried in this order:
+
+1. **JSON sidecar** — see file priority and field mapping below.
+2. **`ComicInfo.xml`** — used as a fallback only if no usable JSON sidecar is found (same manga-dir-then-first-subdir search order).
+
+### JSON sidecar
 
 **File priority order:**
 
@@ -419,7 +424,7 @@ Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cb
 2. Image sidecar (e.g. `cover.png.json`)
 3. Any other `*.json` file
 
-**Fields extracted:**
+**Generic field mapping** (`normalizeLocalMeta`):
 
 | Internal field | JSON keys tried (in order) |
 |---|---|
@@ -430,7 +435,33 @@ Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cb
 | `year` | `year`, `Year`, `published`, `date` (first 4 chars parsed as year) |
 | `score` | `score`, `Score`, `rating`, `Rating` (auto-scaled from 0–100 to 0–10 if > 10) |
 
-Local metadata is **always applied when a sidecar is found**, regardless of the manga's current `metadata_source`. Local has the highest display priority (see [api.md § Linkage and display priority](./api.md#linkage-and-display-priority)), so dropping a `metadata.json` into a folder switches the displayed fields to the file's contents. The scanner never touches `anilist_id`, `mal_id`, or `doujinshi_id` — adding a sidecar never breaks an external linkage; the user still sees the linkage in the Metadata modal and can swap display source via Break Linkage or by re-applying the third-party source. Removing the file and re-scanning does **not** automatically revert display: the row will still be marked `metadata_source = 'local'` until the user explicitly applies another source or runs Break Linkage.
+**Scraper format** (`normalizeScraperMeta`) — if the parsed object has a `primary_title` key (the shape produced by AniList/MangaUpdates aggregator scrapers), it is normalised with a dedicated mapping instead of the generic one:
+
+| Internal field | Source |
+|---|---|
+| `title` | `primary_title` |
+| `author` | `authors[]` (joined with a comma) |
+| `description` | `description` |
+| `genres` | `genres[]` only (the format's `tags`/`categories` are content descriptors and are intentionally **not** surfaced as genres) |
+| `year` | `start_date.year`, else `year` |
+| `score` | `anilist_score` (0–100, ÷10), else `mangaupdates_bayesian_rating` / `mangaupdates_rating` / `animeplanet_rating` (0–10) |
+
+### ComicInfo.xml
+
+`parseComicInfoXml` is a minimal namespace-tolerant regex parser: it collects every leaf element directly under `<ComicInfo>` into a `{ localName: text }` map, stripping any namespace prefix (so `<ty:PublishingStatusTachiyomi>` becomes `PublishingStatusTachiyomi`) and decoding XML entities (`&lt;`, `&amp;`, numeric `&#nn;` / `&#xnn;`, etc.). `normalizeComicInfo` then maps the tags:
+
+| Internal field | ComicInfo tags (in order) |
+|---|---|
+| `title` | `Series` (the work title), falling back to `Title` (the issue/chapter title) |
+| `author` | `Writer`, `Penciller`, `Inker`, `Letterer` |
+| `description` | `Summary` |
+| `genres` | `Genre` or `Tags` (comma-split) |
+| `year` | `Year` (first 4 chars, clamped 1900–2100) |
+| `score` | `CommunityRating` (0–5 in the spec, scaled ×2 to 0–10) |
+
+All three normalizers return `null` (no metadata applied) when the source yields no title, genres, or description.
+
+Local metadata is **always applied when a sidecar or `ComicInfo.xml` is found**, regardless of the manga's current `metadata_source`. Local has the highest display priority (see [api.md § Linkage and display priority](./api.md#linkage-and-display-priority)), so dropping a `metadata.json` into a folder switches the displayed fields to the file's contents. The scanner never touches `anilist_id`, `mal_id`, or `doujinshi_id` — adding a sidecar never breaks an external linkage; the user still sees the linkage in the Metadata modal and can swap display source via Break Linkage or by re-applying the third-party source. Removing the file and re-scanning does **not** automatically revert display: the row will still be marked `metadata_source = 'local'` until the user explicitly applies another source or runs Break Linkage.
 
 ## Stale Record Pruning
 

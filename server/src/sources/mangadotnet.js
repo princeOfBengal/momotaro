@@ -66,6 +66,17 @@ async function pacedFetch(url, options = {}) {
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
+    const isHtml = /text\/html/i.test(resp.headers.get('content-type') || '')
+      || /^\s*<(?:!doctype|html)/i.test(body);
+    // The site sits behind Cloudflare and serves an HTML maintenance / error
+    // page (not JSON) when it's down — e.g. a 503 "Under Maintenance". Surface
+    // a clean, human-readable message instead of dumping raw HTML at the user.
+    if (isHtml) {
+      const titleMatch = body.match(/<title[^>]*>([^<]*)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : '';
+      const detail = title || (resp.status === 503 ? 'service unavailable' : `HTTP ${resp.status}`);
+      throw new Error(`MangaDotNet is unavailable (${detail}). The site appears to be down — please try again later.`);
+    }
     throw new Error(`MangaDotNet ${resp.status} ${url}: ${body.slice(0, 200)}`);
   }
   return resp.json();

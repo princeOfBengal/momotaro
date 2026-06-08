@@ -8,6 +8,7 @@ import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
 import { enableImmersive, disableImmersive, isNativeShell } from '../api/immersive';
+import { enableVolumeButtons, disableVolumeButtons, addVolumeButtonListener, isAndroid } from '../api/volumeButtons';
 import {
   isEncryptionEnabled as offlineIsEncryptionEnabled,
   isUnlocked          as offlineIsUnlocked,
@@ -175,6 +176,13 @@ export default function Reader() {
   // prefetchPages off (today's behaviour was no next-chapter prefetch). See
   // `resolveInitialPredictNextChapter` above for the migration rationale.
   const [predictNextChapter, setPredictNextChapter] = useState(resolveInitialPredictNextChapter);
+  // Volume-button page turning (Android only). Opt-in. `reverse` swaps the
+  // mapping so Volume Down = next, Volume Up = prev. Both are per-device
+  // localStorage like every other reader setting. The settings surfaces only
+  // render these on Android, and the native bridge no-ops off Android, so the
+  // PWA / Linux AppImage never act on them even if the keys are present.
+  const [volumeButtonNav, setVolumeButtonNav] = useState(() => localStorage.getItem('reader_volumeButtonNav') === 'true');
+  const [volumeButtonReverse, setVolumeButtonReverse] = useState(() => localStorage.getItem('reader_volumeButtonReverse') === 'true');
   // `extracting: true` from the server means Phase 2 is still running. The
   // Reader schedules one delayed re-fetch to pick up the late dim values
   // (in case the Phase 1 probe failed for some entries) and the freshly-
@@ -354,6 +362,37 @@ export default function Reader() {
   useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
   useEffect(() => { localStorage.setItem('reader_fastChapterOpen', String(fastChapterOpen)); }, [fastChapterOpen]);
   useEffect(() => { localStorage.setItem('reader_predictNextChapter', String(predictNextChapter)); }, [predictNextChapter]);
+  useEffect(() => { localStorage.setItem('reader_volumeButtonNav', String(volumeButtonNav)); }, [volumeButtonNav]);
+  useEffect(() => { localStorage.setItem('reader_volumeButtonReverse', String(volumeButtonReverse)); }, [volumeButtonReverse]);
+
+  // Volume-button page turning (Android only). Subscribe to native volume-key
+  // events while enabled and in a paged mode. The bridge round-trip is
+  // expensive, so we subscribe once and read the latest page-turn callbacks +
+  // reverse flag through a ref — that way toggling "reverse" or paging state
+  // never forces a resubscribe, yet the handler always acts on fresh state.
+  // Scroll/webtoon has no discrete page turn, so volume buttons are a no-op
+  // there by design (the effect bails on !isPaged). Cleanup always calls
+  // disableVolumeButtons() so the native key interception can never outlive
+  // the reader — volume returns to normal everywhere else.
+  const volNavRef = useRef({ nextPage: () => {}, prevPage: () => {}, reverse: false });
+  useEffect(() => {
+    if (!isAndroid() || !volumeButtonNav || !isPaged) return undefined;
+    // Register the JS listener BEFORE telling native to start consuming keys,
+    // so a press can never be swallowed without a handler to act on it.
+    const remove = addVolumeButtonListener((direction) => {
+      // Native only ever sends 'up' / 'down'; ignore anything else so a
+      // malformed event can't fall through to an unintended page turn.
+      if (direction !== 'up' && direction !== 'down') return;
+      const { nextPage: nx, prevPage: pv, reverse } = volNavRef.current;
+      const goNext = reverse ? direction === 'down' : direction === 'up';
+      if (goNext) nx(); else pv();
+    });
+    enableVolumeButtons();
+    return () => {
+      disableVolumeButtons();
+      remove();
+    };
+  }, [volumeButtonNav, isPaged]);
 
   // Fullscreen
   useEffect(() => {
@@ -793,6 +832,10 @@ export default function Reader() {
     saveProgress(prev);
   }
 
+  // Keep the native volume-button listener pointed at the latest page-turn
+  // callbacks + reverse flag without forcing a resubscribe each render.
+  volNavRef.current = { nextPage, prevPage, reverse: volumeButtonReverse };
+
   function handlePageChange(page, fromScrubber = false) {
     // Snap to spread anchor in double-manga mode
     const snapped = getSpreadAnchor(page);
@@ -911,6 +954,8 @@ export default function Reader() {
       prefetchPages={prefetchPages}
       fastChapterOpen={fastChapterOpen}
       predictNextChapter={predictNextChapter}
+      volumeButtonNav={volumeButtonNav}
+      volumeButtonReverse={volumeButtonReverse}
       scaleType={scaleType}
       pageLayout={pageLayout}
       showSettings={showSettings}
@@ -931,6 +976,8 @@ export default function Reader() {
       onPrefetchPagesChange={setPrefetchPages}
       onFastChapterOpenChange={setFastChapterOpen}
       onPredictNextChapterChange={setPredictNextChapter}
+      onVolumeButtonNavChange={setVolumeButtonNav}
+      onVolumeButtonReverseChange={setVolumeButtonReverse}
       onScaleTypeChange={setScaleType}
       onPageLayoutChange={setPageLayout}
       readingOrientation={readingOrientation}

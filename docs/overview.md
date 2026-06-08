@@ -60,8 +60,11 @@ momotaro/
 │       ├── api/               # `client.js` (all API calls + device/user/admin tokens + `rewriteMediaUrls`), plus the offline subsystem — `offlineApi`, `offlineDb`, `offlineFolder`, `offlineStorage`, `offlineCrypto`, `outboxSync`, `downloader`, `downloadKeepAlive`, `immersive` (see [offline.md](./offline.md))
 │       ├── version.js         # APP_VERSION constant — kept in sync with `versionName` in `android/app/build.gradle`
 │       ├── pages/             # Route-level components (Home, Library, MangaDetail, Reader, Settings, EditManga, Libraries, Genres, ArtGallery, ThirdPartySourcing, AnilistCallback, Pairing, Login, Downloads)
-│       ├── components/        # Shared UI components (AppSidebar, Sidebar, MangaCard, Ribbon, ArtGalleryRibbon, RibbonOrderEditor, GenreChipPicker, InstallPrompt, UpdateBanner, AdminTaskBanner, AccountSection, UserManagementBlock, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
-│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`, `useAdminTask`
+│       │   └── settings/      # Per-tab Settings section components (Anilist, MyAnimeList, Doujinshi, Libraries, Homepage, Reading, Database, Scheduling, ThirdPartySourcing, SystemLogs, Statistics, ClientManagement, PortForwarding, Android, Linux, OfflineDownloads, …) + AdminAuthForms + nativeShell helper — Settings.jsx is now a slim tab router over these
+│       ├── components/        # Shared UI components (AppSidebar, Sidebar, BottomNav, MangaCard, Ribbon, ArtGalleryRibbon, RibbonOrderEditor, GenreChipPicker, ToggleRow, InstallPrompt, UpdateBanner, AdminTaskBanner, RequireAdminAccess, AccountSection, UserManagementBlock, Reader{Paged,Scroll,Controls,EdgeHints}, VirtualizedMangaGrid)
+│       ├── dialog/            # In-app modal subsystem replacing window.alert/confirm/prompt — `DialogProvider`, `dialogService` (`appAlert`/`appConfirm`/`appPrompt` + `ensureAdminAccess`), `AdminUnlockDialog`, `scrollLock`
+│       ├── hooks/             # `useReaderPrefetch`, `useGridColumnCount`, `useScrollPosition`, `useAppUpdateCheck`, `useAdminTask`, `useAdminTaskButton`
+│       ├── utils/             # Dependency-free helpers — `format.js` (elapsed / next-run formatters), `readingProgress.js` (per-user resume keys)
 │       └── context/           # React contexts: `SidebarContext`, `UserContext`, `PreferencesContext`, `ConnectivityContext`
 ├── assets/              # Source artwork / logo files
 ├── data/                # Runtime data: DB, thumbnails, CBZ extract cache, per-source metadata cache, downloads/ (signed APK + version.json — see [android.md](./android.md)) — gitignored

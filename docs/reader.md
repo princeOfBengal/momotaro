@@ -93,6 +93,8 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_prefetchPages` | `true` (any value other than the literal string `false` is treated as on — see [Page Prefetch](#page-prefetch)) |
 | `reader_fastChapterOpen` | `false` (opt-in; the `?fast=1` flag for `/api/chapters/:id/pages` — see [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast)) |
 | `reader_predictNextChapter` | `true` for users who had `reader_prefetchPages` on (preserves today's implicit behaviour), `false` for users who had it off. One-time migration via `resolveInitialPredictNextChapter`; settings independent thereafter. |
+| `reader_volumeButtonNav` | `false` (opt-in, **Android only**). Turn pages with the hardware volume keys. See [Volume-button navigation](#volume-button-navigation-android-only). |
+| `reader_volumeButtonReverse` | `false` (Android only). Swap the mapping so Volume Down = next, Volume Up = prev. |
 
 **Legacy migrations**:
 
@@ -260,6 +262,46 @@ top: calc(52px + env(safe-area-inset-top, 0px));
 | `ArrowRight` / `ArrowDown` | Next page (or previous in RTL mode) |
 | `ArrowLeft` / `ArrowUp` | Previous page (or next in RTL mode) |
 | `Escape` | Close settings panel, or navigate back to manga detail |
+
+## Volume-Button Navigation (Android only)
+
+On the Android Capacitor app the hardware volume keys can turn pages, with the
+same effect as a side tap/swipe: **Volume Up = next page, Volume Down = previous
+page** (logical direction — it does not invert with RTL). A reverse toggle swaps
+the two. Both are opt-in and live in **Advanced** reader settings (Settings →
+Reading → Advanced, and the in-reader Advanced tab) — the toggles only render on
+Android.
+
+| Setting | localStorage key |
+|---|---|
+| Volume buttons turn pages | `reader_volumeButtonNav` (default `false`) |
+| Reverse volume buttons | `reader_volumeButtonReverse` (default `false`) |
+
+**How it works.** The in-tree `VolumeButtons` Capacitor plugin
+([VolumeButtonsPlugin.java](../client/android/app/src/main/java/dev/momotaro/app/VolumeButtonsPlugin.java))
+holds an `active` flag; [MainActivity.java](../client/android/app/src/main/java/dev/momotaro/app/MainActivity.java)
+overrides `onKeyDown`/`onKeyUp` and, while active, consumes `KEYCODE_VOLUME_UP` /
+`KEYCODE_VOLUME_DOWN` (suppressing the system volume HUD and the volume change)
+and forwards a `volumeButton` event with `direction: "up" | "down"` to the JS
+reader. The JS bridge ([client/src/api/volumeButtons.js](../client/src/api/volumeButtons.js))
+no-ops off Android (`Capacitor.getPlatform() === 'android'`), so the PWA and the
+Linux/Electron AppImage never act on volume keys — the plugin isn't in the
+Electron preload either.
+
+[Reader.jsx](../client/src/pages/Reader.jsx) subscribes once (the bridge
+round-trip is expensive) and reads the latest page-turn callbacks + reverse flag
+through a ref, so toggling reverse never forces a resubscribe. The effect bails
+on `!isPaged`, so **webtoon / continuous-scroll mode is a no-op** (no discrete
+pages to turn) — volume works normally there. Cleanup always calls
+`disableVolumeButtons()`, so the native interception can never outlive the
+reader; combined with the fact that `onKeyDown` only fires for the foreground
+Activity, volume keys behave normally everywhere outside an active paged read.
+
+**No Android permission is required** — observing/consuming volume keys for the
+foreground Activity is unprivileged input, and we never touch the audio stream
+(so no `MODIFY_AUDIO_SETTINGS`). This is a native change, so it ships only in a
+new APK build (`versionCode`/`versionName` + `APP_VERSION` bumped); PWA users
+correctly never see the feature.
 
 ## Progress Saving
 

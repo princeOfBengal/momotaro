@@ -11,10 +11,10 @@ Defined in [client/src/App.jsx](../client/src/App.jsx):
 | `/` | `Home` | Landing page with horizontal ribbons (Continue Reading, Recently Added, Discover, Art Gallery, Top Manga per favourite genre) |
 | `/genres` | `Genres` | Browse By Genre — grid of every genre across visible libraries, each tile decorated with a faded top-rated cover; clicking a tile searches All Libraries for that genre |
 | `/art-gallery` | `ArtGallery` | Standalone Art Gallery page — every bookmarked page grouped by series, each series rendered as its own ribbon. Reached from the sidebar shortcut. |
-| `/third-party-sourcing` | `ThirdPartySourcing` | Third Party Sourcing UI — source dropdown, search, series detail + chapter picker, downloads queue. Accepts `?manga_id=N` to pre-fill the search box and lock the target to that existing manga. See [sources.md](./sources.md). |
+| `/third-party-sourcing` | `ThirdPartySourcing` | **Admin-gated** (wrapped in `RequireAdminAccess`). Third Party Sourcing UI — source dropdown, search, series detail + chapter picker, downloads queue. Accepts `?manga_id=N` to pre-fill the search box and lock the target to that existing manga. See [sources.md](./sources.md). |
 | `/library` | `Library` | Main manga grid with search, sort, and the libraries / reading-lists sidebar |
 | `/manga/:id` | `MangaDetail` | Manga info and chapter list |
-| `/manga/:id/edit` | `EditManga` | Manual metadata editor — title, author, genres, and the `track_volumes` toggle. Reached from the *Edit Metadata* button on MangaDetail. PATCHes `/api/manga/:id`. |
+| `/manga/:id/edit` | `EditManga` | **Admin-gated** (wrapped in `RequireAdminAccess`). Manual metadata editor — title, author, genres, and the `track_volumes` toggle. Reached from the *Edit Metadata* button on MangaDetail. PATCHes `/api/manga/:id`. |
 | `/read/:chapterId` | `Reader` | Full-screen reader |
 | `/libraries` | `Libraries` | Older standalone Library Management page; the same controls also live under Settings → Libraries. |
 | `/settings` | `Settings` | App settings + AniList OAuth |
@@ -29,6 +29,10 @@ Every route except `/`, `/library`, and `/manga/:id` is `React.lazy`-loaded. The
 **Back-link convention:** the `<Link to="/">` used as the navbar logo on every page always returns to Home. "← Back" / "← Library" buttons (on MangaDetail, Settings, Libraries) target `/library` so they return to the full browsable grid, not the ribbon landing page.
 
 **First-launch gating** — [`FirstLaunchGate`](../client/src/App.jsx) wraps every route except `/pairing` and `/auth/anilist/callback`. On mount it asks `GET /api/admin/auth-status` whether the caller would be turned away by the auth middleware and, if so, `<Navigate replace to="/pairing">`s. The native shell (Capacitor APK) short-circuits this when there's no saved server URL and no client token — it redirects to `/pairing` immediately without the probe, since `getServerUrl()` is empty and the would-be fetch would go to `http://momotaro.app/api/admin/auth-status` (the Capacitor asset shell, which has no API). See [android.md § First-launch routing](./android.md#first-launch-routing).
+
+**Provider hierarchy** — [App.jsx](../client/src/App.jsx) nests, outermost to innermost: `BrowserRouter` → `ConnectivityProvider` → `DialogProvider` → (`Suspense`) → `UserProvider` → `PreferencesProvider` → `FirstLaunchGate` → `Routes`. The persistent chrome that must survive route changes — `ConnectivityBanner`, `AdminTaskBanner`, `InstallPrompt`, `UpdateBanner`, `AdminUnlockDialog`, and `BottomNav` — is mounted as siblings of `Routes` (inside `DialogProvider`) so it never re-mounts on navigation.
+
+**Admin-gated routes** — `/third-party-sourcing` and `/manga/:id/edit` are wrapped in [`RequireAdminAccess`](#requireadminaccess), which blocks the page behind the server admin password until a valid admin session exists. One-shot admin actions that don't own a whole route (Optimize, per-manga metadata edits triggered inline, etc.) instead call `ensureAdminAccess()` from [the dialog subsystem](#dialog-subsystem-srcdialog) to pop the same password modal on demand. See [RequireAdminAccess](#requireadminaccess) and [Dialog subsystem](#dialog-subsystem-srcdialog).
 
 ## Pages
 
@@ -104,6 +108,15 @@ Page at `/third-party-sourcing`. Implements the four-pane UI for picking a third
 - **Inline error banner** — when a refetch fails over an existing grid (e.g. the network drops during a search), the error surfaces as a red banner (`.library-inline-error`) above the unchanged grid with a Retry button. Initial-load failures still show the full-page error treatment.
 - **Off-screen card skipping** — `.manga-card` carries `content-visibility: auto` + `contain-intrinsic-size: 0 320px`, so the browser skips layout / paint for cards outside the viewport on long grids. In-page find (Ctrl+F), screen readers, and tab navigation are unaffected. Browsers without support (Safari < 18) fall back to standard rendering.
 
+**Cursor pagination (all four sorts):** the browse grid and the search grid both page via keyset cursors for `title`, `updated`, `year`, and `rating` (a reading-list filter falls back to the unbounded one-shot fetch — that endpoint has no cursor support). `supportsCursorPagination(sort, activeList)` in [Library.jsx](../client/src/pages/Library.jsx) gates this; `PAGE_SIZE = 200` per page, fetched on demand by `VirtualizedMangaGrid`'s `onEndReached`. Appended pages are de-duped by `id` (`appendUnique`) so a row shifted across the cursor boundary by a concurrent metadata change (more likely on the volatile `score` / `year` keys) can't mount two cards under the same React key. Because of pagination the count line reads `N+ series` until the grid is fully scrolled.
+
+**Deep-scroll restore (back-from-detail):** restoring a deep scroll position needs the full row set rebuilt before `useScrollPosition` is armed — otherwise the virtualizer's total height is one page tall when the saved `scrollTop` is applied and the user is clamped to the end of page 1. Two layers handle this:
+
+- **In-session snapshot (fast path).** Back-from-detail is a component remount, not a page reload, and `location.key` is stable across the round-trip. A module-scoped `Map` (`browseSnapshots` in [Library.jsx](../client/src/pages/Library.jsx), keyed by `browseCountKey`) holds the settled `{ rows, cursor, hasMore }` for each recently-viewed browse view. On remount `load()` restores it synchronously — **zero network, instant paint**, with the cursor preserved so `onEndReached` keeps paging seamlessly. The cache is a bounded insertion-order LRU (`putSnapshot` / `getSnapshot`, cap `SNAPSHOT_CACHE_MAX = 6`) since each entry can hold thousands of slim rows, and entries carry a `ts` checked against `SNAPSHOT_TTL_MS = 90 s` (kept close to the server listing cache's 30 s TTL) so returning to a view after an idle re-pulls fresh data instead of restoring a stale grid — bounding the restored grid's staleness (e.g. an edited title/cover) to the app's existing listing-freshness contract. A pure re-store (same row reference, e.g. right after a restore) is skipped so the TTL keeps reflecting the original fetch time.
+- **Serial refetch (cold-cache fallback).** When the snapshot has been LRU-evicted but the `sessionStorage` depth (`library-count:<key>`, keyed identically to the scroll position) still exists, `load()` re-fetches sequentially up to that depth (bounded by `REHYDRATE_MAX_PAGES = 60`) before revealing the grid. This is the pre-snapshot behaviour, retained only for the eviction edge case.
+
+The pagination + snapshot helpers (`appendUnique`, `browseCountKey`, `shouldPersistDepth`, `rehydrateTarget`, `getSnapshot`, `putSnapshot`) live in [libraryPagination.js](../client/src/pages/libraryPagination.js) so they're unit-tested without a React harness — see [client/test/libraryPagination.test.mjs](../client/test/libraryPagination.test.mjs).
+
 ### MangaDetail (`src/pages/MangaDetail.jsx`)
 
 - Shows cover, metadata (title, author/artist, status, year, genres, score, description)
@@ -117,7 +130,7 @@ Page at `/third-party-sourcing`. Implements the four-pane UI for picking a third
   - fallback → `folder_name`
 - **Art Gallery** — a grid of user-bookmarked pages rendered at the bottom of the page, below the chapter list. Populated via the *Add to Art Gallery* button in the reader (see [reader.md](./reader.md)). The grid is `repeat(auto-fill, minmax(140px, 1fr))` with each tile showing the page thumbnail (aspect-ratio 2/3, `object-fit: cover`), a label with the chapter/volume string and the 1-based page number, and a circular ✕ remove button overlayed in the top-right corner. The ✕ is hidden on desktop until hover/focus, and always visible on touch devices via `@media (hover: none)`. Clicking a tile navigates to `/read/:chapterId?page=<page_index>&mangaId=<id>` so the user lands on the exact page. Data comes from `GET /api/manga/:id/gallery`, which is fetched once on mount and kept in component state; removal goes through `DELETE /api/manga/:id/gallery/:itemId`. When the list is empty the section shows a hint pointing the user at the reader button.
 - **Nav drawer** — hamburger button (☰) in the navbar opens a slide-in drawer listing all libraries and reading lists. Clicking an entry navigates to `/` and passes `{ library: id }` or `{ list: id }` in React Router location state, which `Library` reads on mount to pre-select the filter.
-- **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, total file count, and folder size in MB. The request is made lazily on first open and the result is cached for the lifetime of the page.
+- **More Info button** — opens a modal that fetches `GET /api/manga/:id/info` and displays the manga's filesystem path, chapter count, folder size in MB, and a **missing chapters/volumes** report (gaps in the `1..max` sequence, switching axis with `track_volumes`). The endpoint walks the folder on demand so the figures reflect the disk's current state, not the last scan rollup. The request is made lazily on first open and the result is cached for the lifetime of the page.
 - **Metadata button** opens a modal with a **Source dropdown** (AniList / MyAnimeList / MangaUpdates / Doujinshi.info, defaults to AniList). Each source exposes the same two actions:
   - *Fetch* — auto-fetch by title (`refresh-metadata`, `refresh-mal-metadata`, `refresh-mangaupdates-metadata`, or `refresh-doujinshi-metadata`)
   - *Search Manually* — opens a search modal (`AnilistSearchModal`, `MALSearchModal`, `MangaUpdatesSearchModal`, or `DoujinshiSearchModal`)
@@ -151,6 +164,8 @@ See [reader.md](./reader.md) for full details.
 URL: `/read/:chapterId?mangaId=<id>&page=<n>`
 
 ### Settings (`src/pages/Settings.jsx`)
+
+`Settings.jsx` is a **slim tab router**: it owns the tab chrome, the `location.state.section` deep-link handling, and the active-tab state, then renders one section component per tab from [`src/pages/settings/`](../client/src/pages/settings/) (`AnilistSection`, `MyAnimeListSection`, `DoujinshiSection`, `LibrariesSection`, `HomepageSection`, `ReadingSection`, `DatabaseSection`, `SchedulingSection`, `ThirdPartySourcingSection`, `SystemLogsSection`, `StatisticsSection`, `ClientManagementSection`, `PortForwardingSection`, `AndroidSection`, `LinuxSection`, `OfflineDownloadsSection`, plus `OfflineLockedPanel`, `AdminAuthForms`, and the `nativeShell` helper). Each section is its own chunk, prefetched on sidebar hover. The behaviour of each tab is described below regardless of which file implements it.
 
 - Accepts an optional `location.state.section` value on navigation to open a specific tab directly (e.g. the "Go to Library Management" button in the first-time setup state passes `{ section: 'libraries' }`)
 - **Statistics tab**: overview of the manga library. When more than one library exists, a row of pill buttons (**All Libraries** plus one per library) appears above the tiles — selecting a library re-fetches `GET /api/stats?library_id=N` so every tile and ranked list switches to that scope. With a single library the switcher is hidden. Contents:
@@ -396,6 +411,38 @@ Selection is driven by optional `onSelectAll` / `onSelectLibrary` / `onSelectLis
 
 Mobile behaviour is managed by the host via `drawerOpen` + `onCloseDrawer` props — the hamburger button on each page's navbar toggles `drawerOpen`, and the sidebar applies the slide-in transform when it's true. Styling uses the `.library-sidebar*` class family in [pages/Library.css](../client/src/pages/Library.css); Home imports that file explicitly so both pages share the exact same layout rules.
 
+### `BottomNav`
+
+Phone-only persistent navigation rail rendered by [components/BottomNav.jsx](../client/src/components/BottomNav.jsx), mounted once at the App root (outside `<Routes>`) so it survives route changes without re-mounting. Four tabs — **Home** (`/`), **Library** (`/library`), **Downloads** (`/downloads`), **Settings** (`/settings`) — each an inline-SVG icon + label.
+
+- **Active-tab logic** — Home matches `/` exactly; the others match by prefix. `/manga/:id`, `/manga/:id/edit`, `/genres`, and `/art-gallery` are treated as part of the **Library** area so the Library tab stays lit when the user drills into a series. The `/library` exact-or-slash check avoids a false match against `/libraries` (the Library Management settings page).
+- **Hidden routes** — the component returns `null` on any path under `/read/`, `/pairing`, `/login`, or `/auth/` so the full-screen reader and the pre-app gates get no nav DOM at all.
+- **Layout token** — CSS gates display on `max-width: 700px` (it renders but is `display:none` on desktop). Scrolling containers reserve space via `--bottom-nav-h` (declared in `global.css`); the reader overrides that token to `0` so its full-bleed layout isn't pushed by the rail during the route-transition unmount.
+
+### `RequireAdminAccess`
+
+Route wrapper ([components/RequireAdminAccess.jsx](../client/src/components/RequireAdminAccess.jsx)) that gates a whole page behind the server admin password. Wraps `/third-party-sourcing` and `/manga/:id/edit` in [App.jsx](../client/src/App.jsx).
+
+On mount it calls `GET /api/admin/auth-status`:
+
+- **`logged_in`** → renders `children` unchanged.
+- **`configured: false`** (fresh install, no admin password ever set) → shows a modal pointing the user to **Settings → Client Management** to create one, with a one-click *Open Settings* jump (`location.state.section = 'clients'`).
+- **otherwise** → shows an inline admin-password modal that calls `api.adminLogin(pw)` and re-checks; *Cancel* navigates back (or Home when there's no history).
+- **Offline / probe failure** — if the status probe can't reach the server but a token already exists in `localStorage`, the user is trusted through (the wrapped page is offline-aware and any gated API call will surface a real error); the password field is disabled while offline since it can only be verified live.
+
+### Dialog subsystem (`src/dialog/`)
+
+In-app replacement for `window.alert` / `confirm` / `prompt`, plus the imperative admin-access gate. Files:
+
+- **[dialogService.js](../client/src/dialog/dialogService.js)** — React-free imperative API any module (utility, async hook, catch handler) can call without threading context. Exposes `appAlert(msg) → Promise<void>`, `appConfirm(msg) → Promise<boolean>`, `appPrompt(msg, default) → Promise<string|null>`, mirroring the native globals' contracts. One dialog at a time; concurrent calls queue FIFO and resolve in order. If no provider is mounted after a tick it falls back to the native browser primitive. Also exposes **`ensureAdminAccess() → Promise<boolean>`** — resolves `true` immediately when an admin token already exists, otherwise pops the admin-password modal; used by action-level callers (`if (!(await ensureAdminAccess())) return;`) to gate one-shot admin operations without wrapping a route.
+- **[DialogProvider.jsx](../client/src/dialog/DialogProvider.jsx)** — mounts near the App root, registers itself as the dialog host via `__attachDialogHost`, and renders the actual modal UI.
+- **[AdminUnlockDialog.jsx](../client/src/dialog/AdminUnlockDialog.jsx)** — the modal host for `ensureAdminAccess()`, mounted as a sibling of `<Routes>`.
+- **[scrollLock.js](../client/src/dialog/scrollLock.js)** — body-scroll lock helper used while a dialog is open.
+
+### `ToggleRow`
+
+Generic on/off switch row ([components/ToggleRow.jsx](../client/src/components/ToggleRow.jsx)) used across Settings sections. Props: `label`, `desc`, `value`, `onChange`. Renders an accessible `role="switch"` button using the `.setting-row*` / `.toggle-*` classes from `Settings.css`.
+
 ## API Client (`src/api/client.js`)
 
 Single `api` object with typed methods for every endpoint. Returns parsed JSON data (unwraps `{ data: ... }` envelope). Throws on non-OK responses.
@@ -480,7 +527,7 @@ api.exportSystemLogs()         // GET admin/logs/export → triggers .txt downlo
 
 ## Context
 
-Five React contexts wrap the app tree (set up in [client/src/App.jsx](../client/src/App.jsx)).
+Four React contexts back the app tree (the `UserProvider`, `PreferencesProvider`, and `ConnectivityProvider` wrap the routes in [client/src/App.jsx](../client/src/App.jsx); `SidebarContext` is scoped to the Library page).
 
 - **`SidebarContext`** ([src/context/SidebarContext.jsx](../client/src/context/SidebarContext.jsx)) — boolean `sidebarOpen` + `setSidebarOpen` shared between `Library` page and `Sidebar` component.
 - **`UserContext`** ([src/context/UserContext.jsx](../client/src/context/UserContext.jsx)) — holds the logged-in user, hydrates from `GET /api/users/me` on mount, exposes `login` / `register` / `logout` / `useUser()`. Identity only; independent of connectivity and pairing.
@@ -494,6 +541,7 @@ Five React contexts wrap the app tree (set up in [client/src/App.jsx](../client/
 - **`useScrollPosition`** ([src/hooks/useScrollPosition.js](../client/src/hooks/useScrollPosition.js)) — windowed-grid scroll bookkeeping for `VirtualizedMangaGrid`.
 - **`useAppUpdateCheck`** ([src/hooks/useAppUpdateCheck.js](../client/src/hooks/useAppUpdateCheck.js)) — polls `GET /api/app/version` and reports whether the server's reported version differs from the bundled [`APP_VERSION`](../client/src/version.js). Gated on `Capacitor.isNativePlatform()` so the PWA never sees the banner. Powers [`UpdateBanner`](#updatebanner). See [android.md § Update mechanism](./android.md#end-to-end-update-flow).
 - **`useAdminTask`** ([src/hooks/useAdminTask.js](../client/src/hooks/useAdminTask.js)) — drives the UI of a long-running admin action (vacuum, cache wipe, reset thumbnails, regenerate). Kicks off the `POST`, adopts an already-running task on mount or on `409`, polls the status companion endpoint (`GET /api/admin/<task>/status`) at 1.5 s while running, exposes an elapsed-time counter, and reset()s after the user dismisses the badge. Polling pauses while the tab is hidden and refreshes immediately on visibility return. In-flight responses from earlier requests are discarded on race. Pairs with the [Async admin tasks contract](./api.md#async-admin-tasks).
+- **`useAdminTaskButton`** ([src/hooks/useAdminTaskButton.jsx](../client/src/hooks/useAdminTaskButton.jsx)) — wraps `useAdminTask` with the full button visual state machine used by the heavy admin-action cards (Compact DB, Clear Cache, Reset / Regenerate Thumbnails, Bulk Optimize, per-manga Optimize). Returns `{ task, button, badge }`: idle shows the original label; running shows `"<label>… 0:14"` or `"<label> 242 / 1,847"` when progress is reported; done shows a green result badge (auto-dismissed after 30 s, suppressed entirely if older than 5 min on re-mount); failure shows a red error badge. Confirmation prompts route through `appConfirm` from the [dialog subsystem](#dialog-subsystem-srcdialog).
 
 ## PWA
 
@@ -628,5 +676,8 @@ No CSS framework — hand-written component-scoped CSS files. Global base styles
 | `src/pages/MangaDetail.css` | Detail layout, chapter list, modals / bottom sheets |
 | `src/pages/Reader.css` | Full-screen reader layout, `bars-visible` padding |
 | `src/components/ReaderControls.css` | Top/bottom bars, zoom controls, settings panel |
-| `src/pages/Settings.css` | Settings layout, tab bar, stat tiles/grid |
+| `src/pages/Settings.css` | Settings layout, tab bar, stat tiles/grid, `.setting-row*` / `.toggle-*` (shared by `ToggleRow`) |
 | `src/pages/Libraries.css` | Library management list and form |
+| `src/components/BottomNav.css` | Phone-only bottom navigation rail (gated `≤ 700px`) |
+| `src/components/RequireAdminAccess.css` | Admin-gate prompt modal (`.admin-prompt-*`) |
+| `src/dialog/Dialog.css` | In-app alert / confirm / prompt + admin-unlock modal styling |

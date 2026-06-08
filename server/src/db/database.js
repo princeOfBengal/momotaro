@@ -127,6 +127,17 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_manga_library_id       ON manga(library_id);
     CREATE INDEX IF NOT EXISTS idx_manga_title             ON manga(title);
     CREATE INDEX IF NOT EXISTS idx_manga_updated_at        ON manga(updated_at DESC);
+    -- Back the keyset cursors for sort=year / sort=rating in GET /api/library.
+    -- Column order + direction mirror the ORDER BY (year DESC NULLS LAST, id ASC;
+    -- score DESC NULLS LAST, title ASC, id ASC) so the planner can satisfy both
+    -- the ORDER BY and the keyset range without a temp b-tree even at 10k+ rows.
+    CREATE INDEX IF NOT EXISTS idx_manga_year              ON manga(year DESC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_manga_score             ON manga(score DESC, title ASC, id ASC);
+    -- Back the Home "Recently Added" ribbon (ORDER BY created_at DESC, id DESC)
+    -- and its optional recent-window filter (created_at >= cutoff). Column order
+    -- + direction mirror the ORDER BY so the planner skips the temp b-tree even
+    -- at 10k+ rows; without it every /api/home cache miss full-sorts the table.
+    CREATE INDEX IF NOT EXISTS idx_manga_created_at         ON manga(created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_manga_lib_status        ON manga(library_id, status);
     CREATE INDEX IF NOT EXISTS idx_manga_lib_metadata_src  ON manga(library_id, metadata_source);
     CREATE INDEX IF NOT EXISTS idx_chapters_manga_id       ON chapters(manga_id);

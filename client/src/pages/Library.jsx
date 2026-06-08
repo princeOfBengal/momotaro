@@ -6,6 +6,7 @@ import VirtualizedMangaGrid from '../components/VirtualizedMangaGrid';
 import { useScrollPosition } from '../hooks/useScrollPosition';
 import { useConnectivity } from '../context/ConnectivityContext';
 import { useUserPref } from '../context/PreferencesContext';
+import { appendUnique, browseCountKey as makeBrowseCountKey, shouldPersistDepth, rehydrateTarget, getSnapshot, putSnapshot } from './libraryPagination';
 import './Library.css';
 // Reuse the skeleton classes (.skeleton-block, .skeleton-line, .skeleton-tile)
 // already defined for Home — same precedent as Home importing Library.css.
@@ -16,12 +17,42 @@ import './Home.css';
 // on tablet-class CPUs.
 const PAGE_SIZE = 200;
 
-// Cursor pagination is only supported by the API for sort=title and
-// sort=updated. sort=year and sort=rating fall back to unbounded fetching.
+// Upper bound on pages re-fetched when restoring a deep scroll position on
+// back-navigation (H1) — the COLD-CACHE fallback path only, taken when the
+// in-session snapshot below was evicted but the saved depth still exists.
+// 60 pages × 200 = 12 000 items covers a full 10k-series library; the cap stops
+// a pathological saved count from fetching forever.
+const REHYDRATE_MAX_PAGES = 60;
+
+// In-session browse snapshots, keyed by browseCountKey. Module-scoped so it
+// survives the back-from-detail remount (location.key is stable across it) but
+// is naturally dropped on a full page reload. A hit lets load() restore the
+// grid — rows + cursor + hasMore — instantly with no network, replacing the
+// serial cursor refetch that the fallback above performs on a miss. Bounded
+// LRU (see putSnapshot) because each entry can hold thousands of slim rows.
+const browseSnapshots = new Map();
+
+// Freshness bound on the instant restore. A snapshot older than this falls
+// through to a normal fetch, so returning to a view after an idle re-pulls
+// fresh data rather than restoring a stale grid. Kept close to the server
+// listing cache's 30 s TTL so the restored grid's staleness (e.g. an edited
+// title/score/cover not yet reflected) stays within the app's existing
+// listing-freshness contract, while still covering the realistic
+// back-from-detail round-trip (seconds).
+const SNAPSHOT_TTL_MS = 90 * 1000;
+
+// Cursor pagination is supported by the API for all four library sorts
+// (title / updated / year / rating). The reading-list endpoint has no cursor
+// support, so a list filter still falls back to the unbounded one-shot fetch.
 function supportsCursorPagination(sort, activeList) {
   if (activeList !== null) return false;
-  return sort === 'title' || sort === 'updated';
+  return ['title', 'updated', 'year', 'rating'].includes(sort);
 }
+
+// Pagination / scroll-depth helpers (appendUnique, browseCountKey,
+// shouldPersistDepth, rehydrateTarget) live in ./libraryPagination so they can
+// be unit-tested without a React render harness. See that file + its test for
+// the H2 de-dupe and Bug-1 stale-key invariants.
 
 // Initial-load skeleton — renders placeholder cards inside the same
 // .manga-grid so vertical real-estate is reserved before data arrives.
@@ -129,9 +160,31 @@ export default function Library() {
   // grid to reconcile. The grid is unmounted from the DOM entirely while
   // search is active (see render below), so its size is irrelevant during
   // the keystroke path.
+  // sessionStorage key under which the browse grid persists how many items
+  // were loaded for this exact filter+history-entry, so `load` can rehydrate
+  // that depth on back-navigation (H1). Mirrors the browse `scrollKey` suffix
+  // below so the two always agree on what "this view" means.
+  const browseCountKey = makeBrowseCountKey(location.key, activeLibrary, activeList, sort);
+
+  // Tracks which browseCountKey the current `manga` array actually belongs to.
+  // `load` stamps it once a fetch settles. The persist effect below only writes
+  // when this matches the live key — otherwise a sort/library switch (which
+  // changes browseCountKey synchronously, before `load` swaps the data) would
+  // persist the *previous* view's depth under the *new* key, and `load` would
+  // then rehydrate the new view to that bogus depth.
+  const loadedKeyRef = useRef(null);
+
   const load = useCallback(async () => {
     try {
       setLoading(true);
+      // Disarm infinite-scroll for the duration of the refetch. The grid is
+      // held visible (dimmed) during a sort/library switch, so an onEndReached
+      // firing mid-flight would otherwise call loadMore with the *previous*
+      // sort's cursor under the *new* sort — the equal-width cursors (title /
+      // updated / year are all 2-wide) would be accepted by the server and
+      // append garbage. load() re-arms hasMore/nextCursor once it settles.
+      setNextCursor(null);
+      setHasMore(false);
       const useCursor = supportsCursorPagination(sort, activeList);
 
       if (activeList !== null) {
@@ -140,13 +193,52 @@ export default function Library() {
         setNextCursor(null);
         setHasMore(false);
       } else if (useCursor) {
+        // H1 fast path — restore the whole settled view from the in-session
+        // snapshot. On back-from-detail this is the common case: the grid comes
+        // back instantly (rows + cursor + hasMore), the virtualizer's height is
+        // correct on first paint, and useScrollPosition lands the saved
+        // scrollTop without a single network request.
+        const snap = getSnapshot(browseSnapshots, browseCountKey);
+        if (snap && Date.now() - snap.ts < SNAPSHOT_TTL_MS) {
+          setManga(snap.rows);
+          setNextCursor(snap.cursor);
+          setHasMore(snap.hasMore);
+          loadedKeyRef.current = browseCountKey;
+          setError(null);
+          return;
+        }
+
         const params = { sort, limit: PAGE_SIZE };
         if (activeLibrary !== null) params.library_id = activeLibrary;
         const resp = await api.getLibrary(params, { raw: true });
-        setManga(resp.data || []);
-        setNextCursor(resp.next_cursor ?? null);
-        setHasMore(!!resp.has_more);
+        let rows = resp.data || [];
+        let cur  = resp.next_cursor ?? null;
+        let more = !!resp.has_more;
+
+        // H1 cold-cache fallback — the snapshot was evicted (LRU) but the saved
+        // depth still exists. Without rebuilding it, the virtualizer's total
+        // height is one page tall and the restore clamps the user to the bottom
+        // of page 1. Re-fetch sequentially (keyset cursors are inherently
+        // serial) until we reach the saved count or run out, bounded by
+        // REHYDRATE_MAX_PAGES. No-op on a fresh visit (no saved count).
+        let target = 0;
+        try { target = rehydrateTarget(sessionStorage.getItem(browseCountKey)); } catch {}
+        let pages = 0;
+        while (more && cur && rows.length < target && pages < REHYDRATE_MAX_PAGES) {
+          pages++;
+          const p = { sort, limit: PAGE_SIZE, cursor: cur };
+          if (activeLibrary !== null) p.library_id = activeLibrary;
+          const next = await api.getLibrary(p, { raw: true });
+          rows = appendUnique(rows, next.data || []);
+          cur  = next.next_cursor ?? null;
+          more = !!next.has_more;
+        }
+
+        setManga(rows);
+        setNextCursor(cur);
+        setHasMore(more);
       } else {
+        // Defensive fallback for an unrecognised sort (none today). Unbounded.
         const params = { sort };
         if (activeLibrary !== null) params.library_id = activeLibrary;
         const data = await api.getLibrary(params);
@@ -154,15 +246,45 @@ export default function Library() {
         setNextCursor(null);
         setHasMore(false);
       }
+      // The data now corresponds to this key — allow the persist effect to
+      // record its depth.
+      loadedKeyRef.current = browseCountKey;
       setError(null);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [sort, activeLibrary, activeList]);
+  }, [sort, activeLibrary, activeList, browseCountKey]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Persist the browse grid for H1 restore. `load` reads this back on the next
+  // mount of the same view. Two layers: the in-session snapshot (rows + cursor
+  // + hasMore) drives the instant fast-path restore, and the sessionStorage
+  // depth backs the serial cold-cache fallback for when the snapshot has been
+  // LRU-evicted. Only meaningful in cursor-browse mode; reading-list / unbounded
+  // paths load everything at once so there's nothing to rehydrate.
+  useEffect(() => {
+    if (!shouldPersistDepth({
+      loading,
+      activeList,
+      length: manga.length,
+      loadedKey: loadedKeyRef.current,
+      currentKey: browseCountKey,
+    })) return;
+    // Skip a no-op re-store right after a snapshot restore: setManga(snap.rows)
+    // re-runs this effect with the same array reference, and refreshing `ts`
+    // then would let endless sort-toggling keep a stale view alive past its TTL.
+    // A genuine fetch / loadMore always produces a new array, so reference
+    // inequality is the right "data actually changed" signal.
+    const existing = browseSnapshots.get(browseCountKey);
+    if (existing && existing.rows === manga) return;
+    // Snapshot store is a reference copy — no serialization — so it's cheap to
+    // run on every settle, including after each loadMore append.
+    putSnapshot(browseSnapshots, browseCountKey, { rows: manga, cursor: nextCursor, hasMore, ts: Date.now() });
+    try { sessionStorage.setItem(browseCountKey, String(manga.length)); } catch {}
+  }, [manga, nextCursor, hasMore, loading, activeList, browseCountKey]);
 
   // ── Search fetch ─────────────────────────────────────────────────────────
   // Debounced first-page search. Local `cancelled` flag (no AbortController),
@@ -243,7 +365,7 @@ export default function Library() {
       const params = { sort, limit: PAGE_SIZE, cursor: nextCursor };
       if (activeLibrary !== null) params.library_id = activeLibrary;
       const resp = await api.getLibrary(params, { raw: true });
-      setManga(prev => [...prev, ...(resp.data || [])]);
+      setManga(prev => appendUnique(prev, resp.data || []));
       setNextCursor(resp.next_cursor ?? null);
       setHasMore(!!resp.has_more);
     } catch {
@@ -275,7 +397,7 @@ export default function Library() {
       };
       if (activeLibrary !== null) params.library_id = activeLibrary;
       const resp = await api.getLibrary(params, { raw: true });
-      setSearchResults(prev => [...(prev || []), ...(resp.data || [])]);
+      setSearchResults(prev => appendUnique(prev || [], resp.data || []));
       setSearchNextCursor(resp.next_cursor ?? null);
       setSearchHasMore(!!resp.has_more);
     } catch {

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { isAndroid } from '../api/volumeButtons';
 import './ReaderControls.css';
 
 function ToggleSetting({ label, desc, value, onChange }) {
@@ -65,6 +66,8 @@ export default function ReaderControls({
   prefetchPages,
   fastChapterOpen,
   predictNextChapter,
+  volumeButtonNav,
+  volumeButtonReverse,
   scaleType,
   pageLayout,
   showSettings,
@@ -85,6 +88,8 @@ export default function ReaderControls({
   onPrefetchPagesChange,
   onFastChapterOpenChange,
   onPredictNextChapterChange,
+  onVolumeButtonNavChange,
+  onVolumeButtonReverseChange,
   onScaleTypeChange,
   onPageLayoutChange,
   readingOrientation,
@@ -475,6 +480,24 @@ export default function ReaderControls({
                   value={predictNextChapter}
                   onChange={onPredictNextChapterChange}
                 />
+                {isAndroid() && (
+                  <>
+                    <ToggleSetting
+                      label="Volume buttons turn pages"
+                      desc="Use the device's volume keys to turn pages in paged modes: Volume Up = next page, Volume Down = previous page. Same effect as tapping the side of the screen. Has no effect in webtoon / continuous-scroll mode."
+                      value={volumeButtonNav}
+                      onChange={onVolumeButtonNavChange}
+                    />
+                    {volumeButtonNav && (
+                      <ToggleSetting
+                        label="Reverse volume buttons"
+                        desc="Swap the mapping so Volume Down = next page and Volume Up = previous page."
+                        value={volumeButtonReverse}
+                        onChange={onVolumeButtonReverseChange}
+                      />
+                    )}
+                  </>
+                )}
               </>
             )}
           </div>

@@ -32,6 +32,7 @@ client/
     │       └── java/dev/momotaro/app/        # in-tree Capacitor plugins
     │           ├── MainActivity.java                 # registers all in-tree plugins before super.onCreate
     │           ├── ImmersiveModePlugin.java          # status/nav-bar toggle for the Reader page
+    │           ├── VolumeButtonsPlugin.java          # volume-key page turning in the Reader (see reader.md)
     │           ├── DownloadKeepAlivePlugin.java +    # foreground-service notification keeping the queue alive
     │           │   DownloadKeepAliveService.java     #   (see offline.md)
     │           └── OfflineFolderPlugin.java          # SAF tree URI + DocumentFile-backed I/O

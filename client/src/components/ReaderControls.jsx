@@ -1,25 +1,21 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { isAndroid } from '../api/volumeButtons';
+import ToggleRow from './ToggleRow';
+import { useActionStatus } from '../hooks/useActionStatus';
+import {
+  READING_MODE_OPTIONS,
+  ORIENTATION_OPTIONS,
+  PAGE_TRANSITION_OPTIONS,
+  BG_COLOR_OPTIONS,
+} from '../constants/readerOptions';
 import './ReaderControls.css';
 
-function ToggleSetting({ label, desc, value, onChange }) {
-  return (
-    <div className="setting-row">
-      <div className="setting-row-info">
-        <span className="setting-row-label">{label}</span>
-        {desc && <span className="setting-row-desc">{desc}</span>}
-      </div>
-      <button
-        className={`toggle-switch ${value ? 'on' : ''}`}
-        onClick={e => { e.stopPropagation(); onChange(!value); }}
-        role="switch"
-        aria-checked={value}
-      >
-        <span className="toggle-thumb" />
-      </button>
-    </div>
-  );
+// In-reader toggle: same primitive as Settings, but it must swallow the click
+// so flipping a switch doesn't bubble to the reader background's tap-to-toggle
+// chrome handler.
+function ToggleSetting(props) {
+  return <ToggleRow {...props} stopPropagation />;
 }
 
 function IconFullscreenEnter() {
@@ -108,45 +104,11 @@ export default function ReaderControls({
   onScrubEnd,
 }) {
   const [activeTab, setActiveTab] = useState('general');
-  const [thumbStatus, setThumbStatus] = useState('idle'); // idle | loading | done | error
-  const [galleryStatus, setGalleryStatus] = useState('idle'); // idle | loading | done | error
-  const [downloadStatus, setDownloadStatus] = useState('idle'); // idle | loading | done | error
+  // idle → loading → done|error → idle (auto-reset). See useActionStatus.
+  const { status: thumbStatus, run: runThumb } = useActionStatus();
+  const { status: galleryStatus, run: runGallery } = useActionStatus();
+  const { status: downloadStatus, run: runDownload } = useActionStatus();
 
-  async function handleSetThumbnail() {
-    setThumbStatus('loading');
-    try {
-      await onSetPageAsThumbnail();
-      setThumbStatus('done');
-      setTimeout(() => setThumbStatus('idle'), 2000);
-    } catch {
-      setThumbStatus('error');
-      setTimeout(() => setThumbStatus('idle'), 2000);
-    }
-  }
-
-  async function handleToggleGallery() {
-    setGalleryStatus('loading');
-    try {
-      await onToggleGalleryPage();
-      setGalleryStatus('done');
-      setTimeout(() => setGalleryStatus('idle'), 2000);
-    } catch {
-      setGalleryStatus('error');
-      setTimeout(() => setGalleryStatus('idle'), 2000);
-    }
-  }
-
-  async function handleDownloadPage() {
-    setDownloadStatus('loading');
-    try {
-      await onDownloadPage();
-      setDownloadStatus('done');
-      setTimeout(() => setDownloadStatus('idle'), 2000);
-    } catch {
-      setDownloadStatus('error');
-      setTimeout(() => setDownloadStatus('idle'), 2000);
-    }
-  }
   const backUrl = mangaId ? `/manga/${mangaId}` : '/';
   const unitLabel = manga?.track_volumes ? 'Volume' : 'Chapter';
   const chapterTitle = chapter
@@ -262,12 +224,7 @@ export default function ReaderControls({
                 <div className="setting-group">
                   <label className="setting-group-label">Reading Mode</label>
                   <div className="setting-options setting-options-grid">
-                    {[
-                      { value: 'ltr', label: 'Left to Right' },
-                      { value: 'rtl', label: 'Right to Left' },
-                      { value: 'vertical', label: 'Vertical' },
-                      { value: 'webtoon', label: 'Webtoon' },
-                    ].map(({ value, label }) => (
+                    {READING_MODE_OPTIONS.map(({ value, label }) => (
                       <button
                         key={value}
                         className={`setting-btn ${readingMode === value ? 'active' : ''}`}
@@ -280,10 +237,7 @@ export default function ReaderControls({
                 <div className="setting-group">
                   <label className="setting-group-label">Reading Orientation</label>
                   <div className="setting-options">
-                    {[
-                      { value: 'ltr', label: 'Left to Right' },
-                      { value: 'rtl', label: 'Right to Left' },
-                    ].map(({ value, label }) => (
+                    {ORIENTATION_OPTIONS.map(({ value, label }) => (
                       <button
                         key={value}
                         className={`setting-btn ${readingOrientation === value ? 'active' : ''}`}
@@ -296,12 +250,7 @@ export default function ReaderControls({
                 <div className="setting-group">
                   <label className="setting-group-label">Page Transition</label>
                   <div className="setting-options setting-options-grid">
-                    {[
-                      { value: 'off',   label: 'Off' },
-                      { value: 'slide', label: 'Slide' },
-                      { value: 'fade',  label: 'Fade' },
-                      { value: 'curl',  label: 'Curl' },
-                    ].map(({ value, label }) => (
+                    {PAGE_TRANSITION_OPTIONS.map(({ value, label }) => (
                       <button
                         key={value}
                         className={`setting-btn ${pageAnimation === value ? 'active' : ''}`}
@@ -349,7 +298,7 @@ export default function ReaderControls({
                 <button
                   className={`setting-btn setting-btn-full ${thumbStatus === 'done' ? 'setting-btn-success' : thumbStatus === 'error' ? 'setting-btn-error' : ''}`}
                   disabled={thumbStatus === 'loading' || !mangaId}
-                  onClick={handleSetThumbnail}
+                  onClick={() => runThumb(onSetPageAsThumbnail)}
                 >
                   {thumbStatus === 'loading' ? 'Saving…'
                     : thumbStatus === 'done'    ? 'Thumbnail saved!'
@@ -360,7 +309,7 @@ export default function ReaderControls({
                 <button
                   className={`setting-btn setting-btn-full ${galleryStatus === 'done' ? 'setting-btn-success' : galleryStatus === 'error' ? 'setting-btn-error' : ''}`}
                   disabled={galleryStatus === 'loading' || !mangaId}
-                  onClick={handleToggleGallery}
+                  onClick={() => runGallery(onToggleGalleryPage)}
                 >
                   {galleryStatus === 'loading' ? (isCurrentPageInGallery ? 'Removing…' : 'Adding…')
                     : galleryStatus === 'done'    ? (isCurrentPageInGallery ? 'Added!' : 'Removed!')
@@ -372,7 +321,7 @@ export default function ReaderControls({
                 <button
                   className={`setting-btn setting-btn-full ${downloadStatus === 'done' ? 'setting-btn-success' : downloadStatus === 'error' ? 'setting-btn-error' : ''}`}
                   disabled={downloadStatus === 'loading'}
-                  onClick={handleDownloadPage}
+                  onClick={() => runDownload(onDownloadPage)}
                 >
                   {downloadStatus === 'loading' ? 'Downloading…'
                     : downloadStatus === 'done'    ? 'Downloaded!'
@@ -387,11 +336,7 @@ export default function ReaderControls({
                 <div className="setting-group">
                   <label className="setting-group-label">Background Color</label>
                   <div className="setting-options">
-                    {[
-                      { value: 'black', label: 'Black' },
-                      { value: 'gray', label: 'Gray' },
-                      { value: 'white', label: 'White' },
-                    ].map(({ value, label }) => (
+                    {BG_COLOR_OPTIONS.map(({ value, label }) => (
                       <button
                         key={value}
                         className={`setting-btn setting-btn-color setting-btn-color-${value} ${bgColor === value ? 'active' : ''}`}

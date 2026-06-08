@@ -1,11 +1,19 @@
 import React from 'react';
 
-// Generic on/off switch row used across Settings sections. The `.setting-row*`
-// and `.toggle-*` classes live in Settings.css today; importing Settings.css
-// at the section-component level keeps that coupling intact without coupling
-// this primitive to a page-specific stylesheet.
+// Generic on/off switch row used across Settings sections and the in-reader
+// settings panel. The `.setting-row*` and `.toggle-*` classes are defined in
+// both Settings.css and ReaderControls.css, so this primitive only emits the
+// classNames and lets whichever stylesheet is in scope style it.
+//
+// `stopPropagation` is opt-in: the reader renders this over a background that
+// toggles the chrome on tap, so the switch must swallow the click there. The
+// Settings page has no such handler and leaves it off.
 
-export default function ToggleRow({ label, desc, value, onChange }) {
+export default function ToggleRow({ label, desc, value, onChange, stopPropagation = false }) {
+  const handleClick = (e) => {
+    if (stopPropagation) e.stopPropagation();
+    onChange(!value);
+  };
   return (
     <div className="setting-row">
       <div className="setting-row-info">
@@ -14,7 +22,7 @@ export default function ToggleRow({ label, desc, value, onChange }) {
       </div>
       <button
         className={`toggle-switch ${value ? 'on' : ''}`}
-        onClick={() => onChange(!value)}
+        onClick={handleClick}
         role="switch"
         aria-checked={value}
       >

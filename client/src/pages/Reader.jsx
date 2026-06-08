@@ -16,41 +16,8 @@ import {
 } from '../api/offlineCrypto';
 import { getOfflineChapter as getOfflineChapterRow } from '../api/offlineDb';
 import { resumeAfterUnlock as downloaderResumeAfterUnlock } from '../api/downloader';
+import { useReaderSettings } from '../hooks/useReaderSettings';
 import './Reader.css';
-
-// Resolve the page-transition style. Migrates the legacy boolean key
-// `reader_animTrans` (true → 'slide', false → 'off') the first time it's read.
-function resolveInitialPageAnimation() {
-  const stored = localStorage.getItem('reader_pageAnimation');
-  if (stored === 'off' || stored === 'slide' || stored === 'fade' || stored === 'curl') return stored;
-  const legacy = localStorage.getItem('reader_animTrans');
-  if (legacy === 'true')  return 'slide';
-  if (legacy === 'false') return 'off';
-  return 'slide';
-}
-
-function clampAnimSpeed(n) {
-  if (!Number.isFinite(n)) return 1;
-  return Math.min(2, Math.max(0.5, n));
-}
-
-// Initial value for `reader_predictNextChapter`. If the user hasn't set it
-// yet, fall back to whatever `reader_prefetchPages` is — that's the setting
-// that implicitly gated next-chapter prefetch before this feature shipped.
-// This preserves today's behaviour for upgrade: a user who turned image
-// prefetch off doesn't suddenly start getting next-chapter pre-extraction
-// requests; a user with the default on stays in the same state. We write
-// the resolved value back to localStorage so subsequent reads (and the
-// Settings page) see a concrete value rather than re-running the migration
-// after the user later flips `prefetchPages`.
-function resolveInitialPredictNextChapter() {
-  const stored = localStorage.getItem('reader_predictNextChapter');
-  if (stored !== null) return stored !== 'false';
-  const inherited = localStorage.getItem('reader_prefetchPages') !== 'false';
-  try { localStorage.setItem('reader_predictNextChapter', String(inherited)); }
-  catch { /* private browsing — fine */ }
-  return inherited;
-}
 
 const PROGRESS_DEBOUNCE_MS = 2000;
 
@@ -148,41 +115,30 @@ export default function Reader() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Reader settings — persisted to localStorage
-  const [readingMode, setReadingMode] = useState(() => localStorage.getItem('reader_readingMode') || 'rtl');
-  const [zoom, setZoom] = useState(() => Number(localStorage.getItem('reader_zoom')) || 100);
-  const [pageAnimation, setPageAnimation] = useState(resolveInitialPageAnimation);
-  const [pageAnimSpeed, setPageAnimSpeed] = useState(() => clampAnimSpeed(Number(localStorage.getItem('reader_pageAnimSpeed')) || 1));
-  const [showEdgeHints, setShowEdgeHints] = useState(() => localStorage.getItem('reader_edgeHints') === 'true');
-  const [gesturesEnabled, setGesturesEnabled] = useState(() => localStorage.getItem('reader_gestures') !== 'false');
-  const [alwaysFullscreen, setAlwaysFullscreen] = useState(() => localStorage.getItem('reader_alwaysFS') === 'true');
-  const [bgColor, setBgColor] = useState(() => localStorage.getItem('reader_bgColor') || 'black');
-  const [grayscale, setGrayscale] = useState(() => localStorage.getItem('reader_grayscale') === 'true');
-  const [scaleType, setScaleType] = useState(() => localStorage.getItem('reader_scaleType') || 'screen');
-  const [pageLayout, setPageLayout] = useState(() => localStorage.getItem('reader_pageLayout') || 'single');
-  const [readingOrientation, setReadingOrientation] = useState(() => localStorage.getItem('reader_orientation') || 'ltr');
-  const [brightness, setBrightness] = useState(() => Number(localStorage.getItem('reader_brightness')) || 100);
-  const [prefetchPages, setPrefetchPages] = useState(() => localStorage.getItem('reader_prefetchPages') !== 'false');
-  // First-page-fast CBZ open. Per-device toggle from Settings → Reading
-  // Settings → Advanced (and the matching Advanced tab in the in-reader
-  // settings menu). Default off so the existing full-extract path stays the
-  // default until users opt in. When on, the Reader passes `?fast=1` to
-  // /api/chapters/:id/pages and the server returns after only the prefix is
-  // on disk, with the remainder extracting in the background.
-  const [fastChapterOpen, setFastChapterOpen] = useState(() => localStorage.getItem('reader_fastChapterOpen') === 'true');
-  // Predictive next-chapter pre-extraction. Default ON for users who had
-  // `reader_prefetchPages` on (today's implicit behaviour: the prefetch hook
-  // already fired getPages(next.id) for them). Default OFF for users who had
-  // prefetchPages off (today's behaviour was no next-chapter prefetch). See
-  // `resolveInitialPredictNextChapter` above for the migration rationale.
-  const [predictNextChapter, setPredictNextChapter] = useState(resolveInitialPredictNextChapter);
-  // Volume-button page turning (Android only). Opt-in. `reverse` swaps the
-  // mapping so Volume Down = next, Volume Up = prev. Both are per-device
-  // localStorage like every other reader setting. The settings surfaces only
-  // render these on Android, and the native bridge no-ops off Android, so the
-  // PWA / Linux AppImage never act on them even if the keys are present.
-  const [volumeButtonNav, setVolumeButtonNav] = useState(() => localStorage.getItem('reader_volumeButtonNav') === 'true');
-  const [volumeButtonReverse, setVolumeButtonReverse] = useState(() => localStorage.getItem('reader_volumeButtonReverse') === 'true');
+  // Reader settings — persisted to localStorage via the shared hook (keys,
+  // defaults, legacy migrations, and per-setting persistence all live there;
+  // see useReaderSettings). Settings → Reading consumes the same hook, so the
+  // two surfaces can't drift. `setPageAnimSpeed` clamps to [0.5, 2] internally.
+  const {
+    readingMode, setReadingMode,
+    zoom, setZoom,
+    pageAnimation, setPageAnimation,
+    pageAnimSpeed, setPageAnimSpeed,
+    showEdgeHints, setShowEdgeHints,
+    gesturesEnabled, setGesturesEnabled,
+    alwaysFullscreen, setAlwaysFullscreen,
+    bgColor, setBgColor,
+    grayscale, setGrayscale,
+    scaleType, setScaleType,
+    pageLayout, setPageLayout,
+    readingOrientation, setReadingOrientation,
+    brightness, setBrightness,
+    prefetchPages, setPrefetchPages,
+    fastChapterOpen, setFastChapterOpen,
+    predictNextChapter, setPredictNextChapter,
+    volumeButtonNav, setVolumeButtonNav,
+    volumeButtonReverse, setVolumeButtonReverse,
+  } = useReaderSettings();
   // `extracting: true` from the server means Phase 2 is still running. The
   // Reader schedules one delayed re-fetch to pick up the late dim values
   // (in case the Phase 1 probe failed for some entries) and the freshly-
@@ -337,33 +293,8 @@ export default function Reader() {
     onPageDimsLearned: handlePageDimsLearned,
   });
 
-  // Persist settings
-  useEffect(() => { localStorage.setItem('reader_readingMode', readingMode); }, [readingMode]);
-  useEffect(() => { localStorage.setItem('reader_zoom', zoom); }, [zoom]);
-  useEffect(() => { localStorage.setItem('reader_pageAnimation', pageAnimation); }, [pageAnimation]);
-  useEffect(() => { localStorage.setItem('reader_pageAnimSpeed', String(pageAnimSpeed)); }, [pageAnimSpeed]);
-  useEffect(() => { localStorage.setItem('reader_edgeHints', String(showEdgeHints)); }, [showEdgeHints]);
-  useEffect(() => { localStorage.setItem('reader_gestures', gesturesEnabled); }, [gesturesEnabled]);
-
-  // One-time cleanup of the legacy boolean key (resolveInitialPageAnimation
-  // already handled the migration at read-time).
-  useEffect(() => {
-    if (localStorage.getItem('reader_animTrans') !== null) {
-      localStorage.removeItem('reader_animTrans');
-    }
-  }, []);
-  useEffect(() => { localStorage.setItem('reader_alwaysFS', alwaysFullscreen); }, [alwaysFullscreen]);
-  useEffect(() => { localStorage.setItem('reader_bgColor', bgColor); }, [bgColor]);
-  useEffect(() => { localStorage.setItem('reader_grayscale', grayscale); }, [grayscale]);
-  useEffect(() => { localStorage.setItem('reader_scaleType', scaleType); }, [scaleType]);
-  useEffect(() => { localStorage.setItem('reader_pageLayout', pageLayout); }, [pageLayout]);
-  useEffect(() => { localStorage.setItem('reader_orientation', readingOrientation); }, [readingOrientation]);
-  useEffect(() => { localStorage.setItem('reader_brightness', brightness); }, [brightness]);
-  useEffect(() => { localStorage.setItem('reader_prefetchPages', String(prefetchPages)); }, [prefetchPages]);
-  useEffect(() => { localStorage.setItem('reader_fastChapterOpen', String(fastChapterOpen)); }, [fastChapterOpen]);
-  useEffect(() => { localStorage.setItem('reader_predictNextChapter', String(predictNextChapter)); }, [predictNextChapter]);
-  useEffect(() => { localStorage.setItem('reader_volumeButtonNav', String(volumeButtonNav)); }, [volumeButtonNav]);
-  useEffect(() => { localStorage.setItem('reader_volumeButtonReverse', String(volumeButtonReverse)); }, [volumeButtonReverse]);
+  // Reader-preference persistence (and the legacy reader_animTrans cleanup)
+  // now lives in useReaderSettings — see above.
 
   // Volume-button page turning (Android only). Subscribe to native volume-key
   // events while enabled and in a paged mode. The bridge round-trip is
@@ -966,7 +897,7 @@ export default function Reader() {
       onReadingModeChange={setReadingMode}
       onZoomChange={setZoom}
       onPageAnimationChange={setPageAnimation}
-      onPageAnimSpeedChange={(n) => setPageAnimSpeed(clampAnimSpeed(n))}
+      onPageAnimSpeedChange={setPageAnimSpeed}
       onShowEdgeHintsChange={setShowEdgeHints}
       onGesturesChange={setGesturesEnabled}
       onAlwaysFullscreenChange={setAlwaysFullscreen}

@@ -2,15 +2,12 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const yauzl = require('yauzl');
+const { naturalSort, compareByBasename } = require('../utils');
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif']);
 
 function isImage(filename) {
   return IMAGE_EXTS.has(path.extname(filename).toLowerCase());
-}
-
-function naturalSort(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
 /**
@@ -178,7 +175,11 @@ async function listCbzEntries(cbzPath) {
       size:      entry.uncompressedSize || 0,
     });
   }
-  out.sort((a, b) => naturalSort(a.entryName, b.entryName));
+  // Basename sort to match cbzCache's extraction order (planChapterPages /
+  // runPhase2). Sorting on the full entryName would mis-group archives whose
+  // images live in subdirectories, making the scanner's cover/first-page pick
+  // disagree with the reader's page 1.
+  out.sort((a, b) => compareByBasename(a.entryName, b.entryName));
   return out;
 }
 

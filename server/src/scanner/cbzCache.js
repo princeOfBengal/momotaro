@@ -4,6 +4,7 @@ const path = require('path');
 const yauzl = require('yauzl');
 const sharp = require('sharp');
 const config = require('../config');
+const { naturalSort, compareByBasename } = require('../utils');
 
 // Per-chapter disk cache for CBZ archives.
 //
@@ -99,10 +100,6 @@ sharp(Buffer.alloc(8)).metadata().catch(() => {});
 
 function isImage(name) {
   return IMAGE_EXTS.has(path.extname(name).toLowerCase());
-}
-
-function naturalSort(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
 function chapterDirFor(chapterId, mtimeMs) {
@@ -263,7 +260,7 @@ function planChapterPages(cbzPath) {
       zip.on('end', () => {
         // Natural-sort on the basename only — archive directory prefixes would
         // otherwise group out-of-order (e.g. `_cover/` before `pages/001.jpg`).
-        entries.sort((a, b) => naturalSort(path.basename(a.fileName), path.basename(b.fileName)));
+        entries.sort((a, b) => compareByBasename(a.fileName, b.fileName));
         const pad = Math.max(4, String(entries.length).length);
         const plannedPages = entries.map((entry, i) => {
           const ext = (path.extname(entry.fileName) || '.jpg').toLowerCase();
@@ -699,7 +696,7 @@ async function runPhase2({ state, cbzPath, baseStat }) {
       zip.on('end', res);
       zip.readEntry();
     });
-    entries.sort((a, b) => naturalSort(path.basename(a.fileName), path.basename(b.fileName)));
+    entries.sort((a, b) => compareByBasename(a.fileName, b.fileName));
 
     const pad = Math.max(4, String(entries.length).length);
     const plannedFilenames = entries.map((entry, i) => {
@@ -912,8 +909,26 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
     if (mode === 'full') {
       // Full-mode callers need the .ready marker before returning. Phase 1 +
       // Phase 2 both resolve on the same `phase2` promise.
-      await existing.phase1.catch((e) => { if (isChapterRemovedError(e)) throw e; });
-      await existing.phase2.catch((e) => { if (isChapterRemovedError(e)) throw e; });
+      //
+      // On failure, don't blindly return success: if the shared extraction
+      // failed for a corrupt archive / read error, the failing worker tore the
+      // dir down, so returning here would hand the caller a `dir` that no longer
+      // exists and it would ENOENT on the follow-up readdir. But a late, non-
+      // fatal-to-disk error (e.g. ENOSPC writing the 0-byte .ready after every
+      // page already extracted) leaves a complete dir the caller can still use.
+      // The `.ready` marker distinguishes the two precisely: present → the dir
+      // is genuinely complete; absent → partial/gone, so propagate the error.
+      let phaseErr = null;
+      try {
+        await existing.phase1;
+        await existing.phase2;
+      } catch (e) {
+        phaseErr = e;
+      }
+      if (phaseErr) {
+        try { await fsp.access(readyPath); }
+        catch { throw phaseErr; }
+      }
       return { dir, plannedPages: null, freshlyExtracted: false, mode, extracting: false };
     }
     // Fast-mode callers can return as soon as Phase 1 is done.
@@ -992,10 +1007,13 @@ async function runFullExtract({ chapterId, cbzPath, stat, dir }) {
     } catch (err) {
       state.failed = err;
       rejectAllWaiters(state, err);
-      if (isChapterRemovedError(err)) {
-        removeFromIndex(dir);
-        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-      }
+      // Reclaim the reserved bytes and drop the partial dir for ANY failure,
+      // not just removal errors — symmetric with runFastExtract. A full extract
+      // never wrote `.ready` on a failure, so the dir is unusable by contract;
+      // leaving it (and its index reservation) behind otherwise over-reserves
+      // cache space until the next open of this chapter heals it.
+      removeFromIndex(dir);
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
       throw err;
     } finally {
       try { if (zip) zip.close(); } catch {}
@@ -1076,11 +1094,17 @@ async function runFastExtract({ chapterId, cbzPath, stat, dir, resumePage, onPag
       state.failed = err;
       rejectAllWaiters(state, err);
       try { if (zip) zip.close(); } catch {}
-      if (isChapterRemovedError(err)) {
-        removeFromIndex(dir);
-        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-        releaseStateSlot(dir, state);
-      }
+      // Release the slot and tear down the partial dir for ANY Phase 1 failure,
+      // not just removal errors. A corrupt/truncated archive or a transient
+      // read error must not leave `state` wedged in chapterStates — otherwise
+      // every later open awaits this rejected phase1 and 500s forever. There's
+      // no `.ready` marker on a failed Phase 1, so the dir is always safe to
+      // remove; the next open re-extracts from scratch. releaseStateSlot only
+      // deletes when the slot still points at THIS state, so it's a no-op if a
+      // concurrent cancelChapter already cleared it.
+      removeFromIndex(dir);
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      releaseStateSlot(dir, state);
       throw err;
     }
   })();

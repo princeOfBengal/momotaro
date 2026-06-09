@@ -317,7 +317,17 @@ correctly never see the feature.
 
 ## Progress Saving
 
-`saveProgress(page, completed)` is debounced 2000ms (`PROGRESS_DEBOUNCE_MS`). It calls `PUT /api/progress/:mangaId`. When reaching the last page, `markChapterComplete: true` is sent, which adds the chapter to `completed_chapters` and triggers AniList sync.
+`saveProgress(page, completed)` calls `PUT /api/progress/:mangaId`, debounced 2000 ms (`PROGRESS_DEBOUNCE_MS`). When reaching the last page, `markChapterComplete: true` is sent, which adds the chapter to `completed_chapters` and triggers AniList sync. The per-device resume position (`localStorage`) is written **synchronously** inside `saveProgress`, so an abrupt exit never loses the page; only the server-side `PUT` is debounced.
+
+**Staged payload + flush.** The pending write is staged in a ref (`pendingProgressRef`) as plain data — `{ mangaId, chapterId, page, completed }` — rather than captured in the debounce closure. `flushProgress()` reads that ref and fires the `PUT` immediately; the debounce timer simply calls `flushProgress` when it elapses. A dedicated effect flushes on **chapter change and unmount**:
+
+```js
+useEffect(() => () => flushProgress(), [chapterId, flushProgress]);
+```
+
+This closes a dropped-completion bug: reaching the last page schedules a `markChapterComplete` write, but tapping **Next chapter** within the 2 s debounce window would previously let the next chapter's first save `clearTimeout` the pending one — silently dropping the completion (and its AniList sync). Because the payload lives in a ref (not a closure), the flush always posts the chapter the write was queued for, even after `chapterId` has changed. `flushProgress` clears the timer and nulls the ref, so the timer path and the flush path can never double-send. `flushProgress` is a stable `useCallback` (`[]` deps), so the flush effect's cleanup fires only on chapter change / unmount — not every render.
+
+**Ordering caveat (benign).** Firing the previous chapter's write at navigation can race with the new chapter's first save; if it lands later, "continue reading" briefly points at the old chapter. This self-corrects on the next page turn, and the completion itself is never lost because `completed_chapters` is a server-side union.
 
 ---
 

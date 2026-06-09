@@ -146,7 +146,7 @@ Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `
 4. Determine tracking mode from `manga.track_volumes`:
    - `track_volumes = 1` → query `chapters.volume` column → report as volume progress
    - `track_volumes = 0` → query `chapters.number` column → report as chapter progress
-5. Find the **highest** completed number (`Math.floor(Math.max(...))`)
+5. Report the **highest** completed chapter/volume number — `MAX` over completed chapters, `Math.floor`'d. This is intentional and **not** a contiguous 1..N count: marking a later chapter complete reports that number even if earlier chapters are still unmarked (AniList progress is a single "furthest read" integer, so this matches how AniList models it). Do not "fix" it into a contiguous walk.
 6. Fall back to `completedChapters.length` if no numbered entries exist
 7. Determine status: `COMPLETED` if `completedChapters.length >= totalChapters`, else `CURRENT`
 8. Call `saveMediaListEntry(token, anilistId, status, { chapters: N })` or `{ volumes: N }`

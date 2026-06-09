@@ -5,6 +5,7 @@ const sharp = require('sharp');
 const config = require('../config');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
+const { naturalSort } = require('../utils');
 const cbzCache = require('../scanner/cbzCache');
 
 const router = express.Router();
@@ -167,10 +168,66 @@ async function backfillDimsFromDisk(db, chapterId, chapterDir) {
     rows,
     r => readImageDimensions(path.join(chapterDir, r.path))
   );
-  const upd = db.prepare('UPDATE pages SET width = ?, height = ? WHERE id = ?');
+  // The `(width IS NULL OR height IS NULL)` guard keeps this one-way: it can
+  // only fill unknowns, never overwrite a value another writer set between the
+  // SELECT above and now (e.g. the Phase 2 makeDimReprobeHook landing real dims
+  // for a page whose file briefly read as absent here, yielding {null,null}).
+  const upd = db.prepare(
+    'UPDATE pages SET width = ?, height = ? WHERE id = ? AND (width IS NULL OR height IS NULL)'
+  );
   db.transaction(() => {
     rows.forEach((r, i) => upd.run(dims[i].width, dims[i].height, r.id));
   })();
+}
+
+// Cache-hit reconciliation for a CBZ chapter whose extraction this call did NOT
+// perform (`freshlyExtracted === false`). Heals two kinds of staleness:
+//
+//   1. Path mismatch — rows written by an older path scheme (ZIP entry names
+//      rather than cache filenames), or a parallel extraction that produced
+//      files we have no rows for. Rebuilt from the on-disk file list.
+//   2. Null dimensions — a Phase 1 256 KB header sniff that failed leaves
+//      width/height NULL; re-reading sharp.metadata() off the extracted file
+//      is reliable where the sniff was not.
+//
+// CRITICAL: the path-mismatch rebuild only runs when extraction is COMPLETE
+// (`extracting === false`). During fast-mode Phase 2 the on-disk file set is a
+// partial — and, with priority extraction, non-prefix — subset of the planned
+// pages. Treating that as a mismatch would trim the pages table to the
+// extracted count, delete tail rows (destroying the stable IDs the reader's
+// in-flight <img> URLs depend on), and scramble page_index. The fresh call
+// already upserted the full planned-page list, so mid-extraction there is
+// nothing to rebuild — only dims to heal, which backfillDimsFromDisk does
+// safely (an absent file reads {null,null} → guarded no-op UPDATE).
+async function reconcileCbzPageRowsOnCacheHit(db, chapterId, dir, { extracting }) {
+  const rows = db.prepare(
+    'SELECT path, width, height FROM pages WHERE chapter_id = ?'
+  ).all(chapterId);
+
+  let diskFiles = [];
+  try {
+    diskFiles = fs.readdirSync(dir).filter(f => f !== '.ready' && !f.endsWith('.tmp'));
+  } catch { /* ignore — dir may have been concurrently evicted */ }
+
+  const diskSet = new Set(diskFiles);
+  const pathMismatch = !extracting &&
+    (rows.length !== diskFiles.length || rows.some(r => !diskSet.has(r.path)));
+  const hasNullDims = rows.some(r => r.width === null || r.height === null);
+
+  if (pathMismatch && diskFiles.length > 0) {
+    diskFiles.sort(naturalSort);
+    const planned = diskFiles.map((f, i) => ({
+      pageIndex: i,
+      originalName: f,
+      cacheFilename: f,
+      width: null,
+      height: null,
+    }));
+    upsertCbzPageRows(db, chapterId, planned);
+    await backfillDimsFromDisk(db, chapterId, dir);
+  } else if (hasNullDims) {
+    await backfillDimsFromDisk(db, chapterId, dir);
+  }
 }
 
 // Resolve a page by id, returning everything the serving route needs to find
@@ -278,54 +335,13 @@ router.get('/chapters/:id/pages', asyncWrapper(async (req, res) => {
         await backfillDimsFromDisk(db, chapter.id, extraction.dir);
       }
     } else if (!extraction.freshlyExtracted) {
-      // Cache hit — heal two kinds of staleness:
-      //
-      // 1. Path mismatch. A prior version of the code wrote rows with the
-      //    now-stale path scheme (e.g. ZIP entry names rather than cache
-      //    filenames), or a parallel extraction created files we don't yet
-      //    have rows for. Rebuild the rows from the on-disk file list.
-      //
-      // 2. Null dimensions. Fast-mode Phase 1's 256 KB header probe can fail
-      //    for a corrupt image header or an unusual codec — those pages get
-      //    null `width`/`height` and would be mispaired in Double Page
-      //    (Manga) (which treats unknown as not-wide). Phase 2 only extracts
-      //    files, it doesn't re-probe dims. Without this heal, Phase 1
-      //    probe failures would stick around forever and Double Page
-      //    (Manga) would render a wide spread paired with its neighbour on
-      //    every chapter re-open. Reading sharp.metadata() from the
-      //    extracted file is reliable where the 256 KB sniff was not, so
-      //    backfillDimsFromDisk corrects the row. The client's 6s re-fetch
-      //    loop hits this path and picks up the corrected dims — that's
-      //    what actually makes the late re-fetch useful.
-      const rows = db.prepare(
-        'SELECT path, width, height FROM pages WHERE chapter_id = ?'
-      ).all(chapter.id);
-      let diskFiles = [];
-      try {
-        diskFiles = fs.readdirSync(extraction.dir).filter(f => f !== '.ready' && !f.endsWith('.tmp'));
-      } catch { /* ignore — dir may have been concurrently evicted */ }
-      const diskSet = new Set(diskFiles);
-      const pathMismatch = rows.length !== diskFiles.length || rows.some(r => !diskSet.has(r.path));
-      const hasNullDims  = rows.some(r => r.width === null || r.height === null);
-
-      if (pathMismatch && diskFiles.length > 0) {
-        diskFiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-        const planned = diskFiles.map((f, i) => ({
-          pageIndex: i,
-          originalName: f,
-          cacheFilename: f,
-          width: null,
-          height: null,
-        }));
-        upsertCbzPageRows(db, chapter.id, planned);
-        await backfillDimsFromDisk(db, chapter.id, extraction.dir);
-      } else if (hasNullDims) {
-        // backfillDimsFromDisk only sharp-reads rows whose dims are NULL, so
-        // a chapter with full dims pays only the indexed `hasNullDims` query
-        // above. A row whose file isn't on disk yet (Phase 2 mid-extract)
-        // produces a {null,null} read that's a safe no-op UPDATE.
-        await backfillDimsFromDisk(db, chapter.id, extraction.dir);
-      }
+      // Cache hit — heal stale paths / null dims. The rebuild is gated on the
+      // extraction being COMPLETE so a re-fetch mid-Phase-2 can't truncate the
+      // pages table (see reconcileCbzPageRowsOnCacheHit). The client's 6 s
+      // re-fetch loop hits this path and picks up corrected dims.
+      await reconcileCbzPageRowsOnCacheHit(db, chapter.id, extraction.dir, {
+        extracting: !!extraction.extracting,
+      });
     }
 
     extracting = !!extraction.extracting;
@@ -560,3 +576,11 @@ router.get('/pages/:id/image', asyncWrapper(async (req, res, next) => {
 }));
 
 module.exports = router;
+// Test-only seam: the cache-hit reconciliation logic is the part with the
+// subtle correctness invariant (no truncation mid-extraction), so it's exported
+// for unit testing against a temp SQLite DB without standing up Express.
+module.exports.__test = {
+  reconcileCbzPageRowsOnCacheHit,
+  upsertCbzPageRows,
+  backfillDimsFromDisk,
+};

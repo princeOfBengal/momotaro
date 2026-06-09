@@ -146,7 +146,7 @@ export function useReaderPrefetch({
       const trimmed = Array.from(issuedUrls.current).slice(-PREFETCHED_URL_CAP);
       issuedUrls.current = new Set(trimmed);
     }
-  }, [enabled, isPaged, pages, currentPage, page2Index, pageLayout, mangaSpreads, onPageDimsLearned]);
+  }, [enabled, isPaged, pages, currentPage, page2Index, pageLayout, mangaSpreads, fastChapterOpen, onPageDimsLearned]);
 
   useEffect(() => {
     // Gated on `predictNextChapter` (the Reading Settings toggle) rather

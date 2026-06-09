@@ -259,8 +259,11 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
 
   const trackVolumes = manga.track_volumes === 1;
 
-  // Find the highest completed number using the appropriate column.
-  // completedChapters is an array of chapter IDs, not numbers.
+  // AniList progress = the HIGHEST chapter (or volume) number the user has read,
+  // i.e. MAX over completed chapters — NOT a contiguous 1..N count. This is
+  // intentional: marking a later chapter complete reports that number even if
+  // earlier chapters are still unmarked. Do not "fix" this into a contiguous
+  // walk. `completedChapters` is an array of chapter IDs, not numbers.
   const placeholders = completedChapters.map(() => '?').join(',');
   const col = trackVolumes ? 'volume' : 'number';
   const { maxVal } = db.prepare(

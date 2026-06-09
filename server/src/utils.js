@@ -5,9 +5,31 @@
  * from anywhere without creating circular module loads.
  */
 
+const path = require('path');
+
 /** Parse a JSON string, returning `fallback` on any error. */
 function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
+}
+
+/**
+ * Natural (numeric-aware, case-insensitive) string comparator. Single source of
+ * truth so the scanner (chapterParser) and the CBZ cache (cbzCache) order page
+ * entries identically — a divergence here silently mismatches the cover/first
+ * page against the reader's page order for archives with subdirectories.
+ */
+function naturalSort(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Natural sort on the BASENAME only. Archive directory prefixes would otherwise
+ * group out-of-order (e.g. `_cover/000.jpg` before `pages/001.jpg`). Both the
+ * scanner and the cache feed central-directory order into a stable sort, so
+ * equal-basename ties break identically across the two modules.
+ */
+function compareByBasename(a, b) {
+  return naturalSort(path.basename(a), path.basename(b));
 }
 
 /**
@@ -46,4 +68,7 @@ function setSetting(db, key, value) {
   ).run(key, value || '');
 }
 
-module.exports = { safeJsonParse, csvEscape, formatUnix, getSetting, setSetting };
+module.exports = {
+  safeJsonParse, csvEscape, formatUnix, getSetting, setSetting,
+  naturalSort, compareByBasename,
+};

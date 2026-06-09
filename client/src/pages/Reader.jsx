@@ -170,6 +170,7 @@ export default function Reader() {
   const [galleryPageIds, setGalleryPageIds] = useState(() => new Set());
 
   const progressTimer = useRef(null);
+  const pendingProgressRef = useRef(null);  // staged debounced progress payload
   const controlsTimer = useRef(null);
   const scrubActiveRef = useRef(false);
   const scrollerRef = useRef(null);
@@ -574,11 +575,32 @@ export default function Reader() {
     }, { replace: true });
   }, [currentPage]);
 
+  // Send any pending debounced progress write immediately. Reads the payload
+  // from a ref (plain data, not a closure) so it always flushes the chapter the
+  // write was queued for — even if chapterId has since changed. Used by both
+  // the debounce timer and the on-chapter-change flush effect below.
+  const flushProgress = useCallback(() => {
+    if (progressTimer.current) {
+      clearTimeout(progressTimer.current);
+      progressTimer.current = null;
+    }
+    const payload = pendingProgressRef.current;
+    if (!payload) return;
+    pendingProgressRef.current = null;
+    api.updateProgress(payload.mangaId, {
+      chapterId: payload.chapterId,
+      page: payload.page,
+      markChapterComplete: payload.completed,
+    }).catch(() => {});
+  }, []);
+
   // Save progress.
   // Per-device resume position is written to localStorage immediately so an
   // abrupt exit (close tab, lock phone) still preserves the page. The
   // server-side progress (used for AniList sync + completion tracking) stays
-  // debounced to avoid spamming the API while the user pages quickly.
+  // debounced to avoid spamming the API while the user pages quickly. The
+  // payload is staged as plain data so a later flush (timer OR chapter change)
+  // posts the correct chapter even after chapterId has moved on.
   const saveProgress = useCallback((page, completed = false) => {
     if (!mangaId) return;
     if (completed) {
@@ -586,15 +608,31 @@ export default function Reader() {
     } else {
       setResume(mangaId, chapterId, page);
     }
+    pendingProgressRef.current = {
+      mangaId,
+      chapterId: parseInt(chapterId, 10),
+      page,
+      completed,
+    };
     clearTimeout(progressTimer.current);
-    progressTimer.current = setTimeout(() => {
-      api.updateProgress(mangaId, {
-        chapterId: parseInt(chapterId, 10),
-        page,
-        markChapterComplete: completed,
-      }).catch(() => {});
-    }, PROGRESS_DEBOUNCE_MS);
-  }, [mangaId, chapterId]);
+    progressTimer.current = setTimeout(flushProgress, PROGRESS_DEBOUNCE_MS);
+  }, [mangaId, chapterId, flushProgress]);
+
+  // Flush a pending debounced write when the chapter changes or the reader
+  // unmounts. Without this, reaching the last page (which schedules a
+  // markChapterComplete write) and immediately jumping to the next chapter
+  // would let the next chapter's first save clearTimeout the pending one —
+  // silently dropping the completion (and its AniList sync). The flush reads
+  // the staged payload, so it posts the chapter it was queued for.
+  //
+  // NOTE (current_chapter_id ordering): firing the previous chapter's write at
+  // navigation can race with the new chapter's first save; if it lands later,
+  // "continue reading" briefly points at the old chapter. This self-corrects on
+  // the next page turn, and completion itself is never lost (completed_chapters
+  // is a server-side union), so the race is benign.
+  useEffect(() => {
+    return () => { flushProgress(); };
+  }, [chapterId, flushProgress]);
 
   // Show controls and (re)start the auto-hide timer.
   const showControlsAndReset = useCallback(() => {

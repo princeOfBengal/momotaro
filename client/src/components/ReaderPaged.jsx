@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { onPageImgError, onPageImgLoad } from './pageImageRetry';
 import './ReaderPaged.css';
 
 const SWIPE_THRESHOLD     = 40;   // px horizontal required to count as a swipe
@@ -50,6 +51,10 @@ export default function ReaderPaged({
   animKey,
   animDir,
   gesturesEnabled,
+  // When true, page-image URLs carry `?fast=1` so the server streams pages via
+  // the fast-open path instead of blocking each image on a full chapter
+  // extraction. Mirrors the reader's "Fast chapter open" setting.
+  fast,
   onNext,
   onPrev,
   onCenterTap,
@@ -459,11 +464,12 @@ export default function ReaderPaged({
           className={`reader-paged-anim-wrapper${animClass ? ` ${animClass}` : ''}`}
         >
           <img
-            src={api.pageImageUrl(leftPage.id)}
+            src={api.pageImageUrl(leftPage.id, { fast })}
             alt={leftAlt}
             className="reader-page-img"
             draggable={false}
             onLoad={(e) => {
+              onPageImgLoad(e.currentTarget);
               // Skip if dims are already known — the server-side path
               // populated them (or a previous onLoad already did).
               if (leftPage.is_wide !== null && leftPage.is_wide !== undefined) return;
@@ -472,20 +478,23 @@ export default function ReaderPaged({
               if (!w || !h) return;
               onPageDimsLearned?.(leftPage.id, w, h);
             }}
+            onError={onPageImgError}
           />
           {page2 && (
             <img
-              src={api.pageImageUrl(rightPage.id)}
+              src={api.pageImageUrl(rightPage.id, { fast })}
               alt={rightAlt}
               className="reader-page-img"
               draggable={false}
               onLoad={(e) => {
+                onPageImgLoad(e.currentTarget);
                 if (rightPage.is_wide !== null && rightPage.is_wide !== undefined) return;
                 const w = e.target.naturalWidth;
                 const h = e.target.naturalHeight;
                 if (!w || !h) return;
                 onPageDimsLearned?.(rightPage.id, w, h);
               }}
+              onError={onPageImgError}
             />
           )}
         </div>

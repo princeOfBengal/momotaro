@@ -536,11 +536,13 @@ export function releasePageBlobs() {
 }
 
 // The Reader builds image src URLs synchronously from page_id. We can't
-// reach the filesystem synchronously, so the offline path returns a sentinel
-// URL the Reader's `<img onError>` will swap for a backup; in practice the
-// Reader uses `getPages` first (which already populates `_local_src`) and
-// pageImageUrl is only used as a fallback. We expose a synchronous lookup
-// via a session-scoped cache populated by getPages.
+// reach the filesystem synchronously, so the offline path returns whatever
+// this session-scoped cache (populated by getPages) holds for the page, and
+// otherwise a sentinel that simply fails to load. In practice the Reader uses
+// `getPages` first (which already populates `_local_src` / this cache), so
+// pageImageUrl is only a fallback. Note the reader's shared `<img>` retry
+// (pageImageRetry.js) deliberately skips non-http(s) URLs, so a missing
+// offline blob is left as a broken image rather than retried in a loop.
 const _pageIdToLocalUrl = new Map();
 
 export function rememberPageUrl(pageId, url) {

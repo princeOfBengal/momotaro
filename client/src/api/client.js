@@ -363,10 +363,14 @@ const _rawApi = {
   // downloader and offline shim don't need to change. Used by Reader.jsx,
   // which forwards `fast` and `resumePage` from the reader's setting and
   // schedules a late dim re-fetch when `extracting` is true.
-  getPagesWithMeta: (chapterId, { fast = false, resumePage = null } = {}) => {
+  getPagesWithMeta: (chapterId, { fast = false, resumePage = null, prefetch = false } = {}) => {
     const params = new URLSearchParams();
     if (fast) params.set('fast', '1');
     if (Number.isInteger(resumePage) && resumePage >= 0) params.set('resume_page', String(resumePage));
+    // `prefetch=1` tells the server this is a background next-chapter
+    // pre-extraction so its Phase 2 takes a lower-priority, capped slot and
+    // doesn't starve the chapter the user is actively reading.
+    if (prefetch) params.set('prefetch', '1');
     const q = params.toString();
     return apiFetch(
       `/api/chapters/${chapterId}/pages${q ? '?' + q : ''}`,
@@ -1021,9 +1025,17 @@ const _rawApi = {
   // string as a fallback (see [server/src/middleware/auth.js]). On the
   // LAN with auth disabled this just produces a slightly longer URL
   // that the server ignores.
-  pageImageUrl: (pageId) => {
+  // `fast: true` appends `?fast=1` so the server serves CBZ pages through the
+  // fast-open per-page streaming path (mode='fast') instead of blocking on a
+  // full chapter extraction. The reader sets it only when the per-device "Fast
+  // chapter open" setting is on. Other callers (cover thumbnails, the page
+  // downloader via buildPageImageUrl) omit it and get the legacy full path.
+  pageImageUrl: (pageId, { fast = false } = {}) => {
     const tok = getClientToken();
-    const qs = tok ? `?t=${encodeURIComponent(tok)}` : '';
+    const params = [];
+    if (tok)  params.push(`t=${encodeURIComponent(tok)}`);
+    if (fast) params.push('fast=1');
+    const qs = params.length ? `?${params.join('&')}` : '';
     return `${getServerUrl()}/api/pages/${pageId}/image${qs}`;
   },
   thumbnailUrl,
@@ -1199,16 +1211,18 @@ function createRoutedApi(raw) {
   // `getPages`. The offline shim keeps a small Map keyed by page_id.
   // First call when offline primes the chunk so subsequent renders hit
   // the cached map directly.
-  wrapped.pageImageUrl = (pageId) => {
+  wrapped.pageImageUrl = (pageId, opts) => {
     if (isOfflineNow()) {
       if (_offline) {
+        // Offline reads come from local files — no extraction, so `fast` is
+        // irrelevant and intentionally ignored here.
         const local = _offline.pageImageUrl(pageId);
         if (local) return local;
       } else {
         primeOffline();
       }
     }
-    return raw.pageImageUrl(pageId);
+    return raw.pageImageUrl(pageId, opts);
   };
 
   return wrapped;

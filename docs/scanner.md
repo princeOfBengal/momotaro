@@ -297,7 +297,7 @@ Extracted files are renamed to `NNNN.<ext>` (zero-padded count of image entries)
 | `'full'` (default) | Reader without Fast chapter open opted in; every thumbnail / cover / metadata / `getCbzPageFile` caller | Single-shot decompress of every image entry, write `.ready`, resolve. Matches pre-feature behaviour. |
 | `'fast'` | Reader with Fast chapter open opted in (`?fast=1` on `/api/chapters/:id/pages`) | Two-phase extract — see [Fast mode (first-page-fast)](#fast-mode-first-page-fast) below. |
 
-A `full`-mode caller arriving while a `fast` Phase 2 is still running waits for Phase 2 to complete before resolving, so thumbnail/cover generation always sees a fully-extracted directory.
+A `full`-mode caller arriving while a `fast` Phase 2 is still running waits for Phase 2 to complete before resolving, so thumbnail/cover generation always sees a fully-extracted directory. The state's `phase2` field holds the **real** Phase 2 promise (the unhandled-rejection guard is attached separately), so a fatal Phase 2 error — `ARCHIVE_REMOVED` from a mid-flight rewrite/delete — propagates to that waiting full-mode caller instead of resolving as a false success against a directory Phase 2 has already torn down.
 
 ### Fast mode (first-page-fast)
 
@@ -313,12 +313,15 @@ The fast path returns to the client after only a handful of pages are on disk; t
 **Phase 2** (background, never blocks the response):
 
 - Bounded by `CBZ_PHASE2_CONCURRENCY` slots across the whole library — a binge-clicker can't spawn unbounded background extracts.
+- **Foreground / background priority.** The scheduler has two tiers. A real chapter open or page serve is *foreground*; the reader's next-chapter pre-extraction (`?prefetch=1`) is *background*. Foreground waiters always drain before background ones, and background extractions are additionally capped at `CBZ_PHASE2_CONCURRENCY - 1` (min 1) concurrent slots. This guarantees the chapter the user is actively reading can always acquire a slot rather than timing out behind prefetch work. The trade-off: when the background cap is hit and no foreground work is waiting, a freed slot can sit briefly idle rather than launching a second prefetch — a deliberate choice favouring foreground responsiveness over background throughput.
+- **Priority is read live, and promotion is supported.** The scheduler keys on the chapter *state* and reads its foreground/background flag at grant time — it never captures a fixed priority. So when a foreground caller (a real open, a page serve, or a full-mode thumbnail/cover job) arrives for a chapter whose Phase 2 was started as a prefetch, `ensureChapterExtracted` *promotes* that extraction to foreground. A still-queued extraction is then re-picked ahead of other background work; an already-running one frees background-cap room for other prefetches. This closes the gap where following a prefetch into the next chapter would otherwise inherit background priority. Promotion is monotonic (background → foreground only), and because background-ness is derived live from the running set rather than a maintained counter, it can never leave the concurrency accounting out of sync. Regression coverage (foreground priority, background cap, promotion while queued/running, cancelled-waiter cleanup, no underflow): [server/test/phase2Scheduler.test.js](../server/test/phase2Scheduler.test.js).
+- **Failed-page handling.** A single entry that fails to extract (corrupt zip entry, read/write error) is dropped from the work set — Phase 2 does not retry it. The failure is recorded on the chapter state (`failedPages`) so both current and *future* `waitForPageFile` callers reject immediately with `PAGE_EXTRACT_FAILED` instead of blocking the full `CBZ_PAGE_WAIT_TIMEOUT_MS`. The page-image route maps that to `404`, so the client stops retrying (see [reader image retry](./frontend.md)) rather than spinning forever on a page that will never land. One bad page never poisons the rest of the chapter. Regression coverage: [server/test/cbzCacheFailedPage.test.js](../server/test/cbzCacheFailedPage.test.js).
 - Extracts every entry not yet on disk, in strict ascending page-index order (with priority-hint reordering — see below).
 - After each successful page extract, fires an `onPageExtracted(pageIndex, absPath)` callback that the route uses to backfill any dims Phase 1's header sniff missed. Read via `sharp.metadata()` on the on-disk file (reliable where the 256 KB sniff was not). UPDATEs are batched and run only against rows whose current `width`/`height` are still NULL, so a good Phase 1 dim is never clobbered.
 - Periodically re-stats the source CBZ (`CBZ_PHASE2_RESTAT_INTERVAL` pages) to detect rename / rewrite / delete mid-flight. A mismatched mtime + size aborts cleanly via `ARCHIVE_REMOVED` — the partial directory is removed and pageWaiters reject with `410 Gone`.
 - `.ready` is written when the last entry has been renamed into place.
 
-**Per-page waiters**: while Phase 2 is in flight, individual `/api/pages/:id/image` requests for pages not yet extracted block on `waitForPageFile(chapterDir, cacheFilename, { timeoutMs })`. The wait resolves when the rename-into-place succeeds for that specific filename; rejects on cancellation (`CHAPTER_REMOVED` → HTTP 410), archive removal, or timeout (`PAGE_WAIT_TIMEOUT` → HTTP 503 + `Retry-After: 2`). Capped at 32 waiters per chapter so a key-mashing user can't pin arbitrary HTTP slots.
+**Per-page waiters**: while Phase 2 is in flight, individual `/api/pages/:id/image` requests for pages not yet extracted block on `waitForPageFile(chapterDir, cacheFilename, { timeoutMs })`. The wait resolves when the rename-into-place succeeds for that specific filename; rejects on cancellation (`CHAPTER_REMOVED` → HTTP 410), archive removal, per-page extract failure (`PAGE_EXTRACT_FAILED` → HTTP 404), or timeout (`PAGE_WAIT_TIMEOUT` → HTTP 503 + `Retry-After: 2`). Capped at 32 waiters per chapter so a key-mashing user can't pin arbitrary HTTP slots. After Phase 2 completes and the state slot is released, a request for a still-absent page distinguishes *evicted mid-flight* (`.ready` missing → 503 retry) from *genuinely failed* (`.ready` present but file absent → 404).
 
 **Priority hints**: `POST /api/chapters/:id/prioritize-pages` (called from the reader on scrubber/jump) moves the named page indices to the front of the Phase 2 work queue. Ensures that a user who scrubs ahead doesn't end up waiting on Phase 2 to reach their target in strict ascending order. No-op when there's no active fast extraction or when the chapter row has been removed.
 
@@ -333,7 +336,7 @@ Read from environment variables via [server/src/config.js](../server/src/config.
 | `CBZ_FAST_PREFIX` | 6 | Pages extracted synchronously in Phase 1. Default chosen so a paged reader's first spread + prefetch lookahead are all on disk by the time Phase 1 returns. |
 | `CBZ_DIM_PROBE_CONCURRENCY` | 6 | Parallel header-probe workers in Phase 1. |
 | `CBZ_DIM_PROBE_BUFFER_BYTES` | 262144 (256 KB) | Per-entry cap when sniffing image headers; sharp stops as soon as it has dims. |
-| `CBZ_PHASE2_CONCURRENCY` | 2 | Global cap on concurrent Phase 2 extractions across all chapters. |
+| `CBZ_PHASE2_CONCURRENCY` | 2 | Global cap on concurrent Phase 2 extractions across all chapters. Clamped to `>= 1` at load (a non-positive or non-numeric value would wedge the scheduler — `running.size >= 0` is always true — so it falls back to a usable floor). Background (prefetch) extractions get `value - 1` slots (min 1). |
 | `CBZ_PAGE_WAIT_TIMEOUT_MS` | 30000 | Ceiling on `waitForPageFile`. |
 | `CBZ_PHASE2_RESTAT_INTERVAL` | 8 | How often Phase 2 re-stats the source CBZ to catch rename / rewrite / delete. |
 
@@ -341,8 +344,8 @@ Read from environment variables via [server/src/config.js](../server/src/config.
 
 `GET /api/chapters/:id/pages` in [server/src/routes/pages.js](../server/src/routes/pages.js):
 
-1. Pick mode from `?fast=1`. Default is `full`.
-2. `cbzCache.ensureChapterExtracted(chapterId, cbzPath, { mode, resumePage, onPageExtracted })`. Concurrent calls for the same chapter share state via the `chapterStates` Map.
+1. Pick mode from `?fast=1` (default `full`). `?prefetch=1` marks the call as a background pre-extraction (see [Foreground / background priority](#fast-mode-first-page-fast) above); foreground opens omit it.
+2. `cbzCache.ensureChapterExtracted(chapterId, cbzPath, { mode, resumePage, onPageExtracted, background })`. Concurrent calls for the same chapter share state via the `chapterStates` Map; a foreground call arriving for an in-flight background extraction promotes it.
 3. On a fresh extraction, UPSERT `pages` rows from `plannedPages` keyed on `(chapter_id, page_index)`. Stable IDs.
 4. Heal pass: detect path mismatch (rows point at a stale filename scheme) OR any null-dim rows; in either case re-read sharp on the extracted file via `backfillDimsFromDisk`. The null-dim heal is what catches Phase 1 probe failures — without it, a dim that the 256 KB sniff missed would stay NULL until the next chapter re-open. With it, the client's late re-fetch loop picks up the corrected dim and Double Page (Manga) layout self-corrects.
 5. Respond with `{ data: pages[], extracting, total_pages }`. The client uses `extracting` to schedule a re-fetch a few seconds later.
@@ -352,9 +355,9 @@ Read from environment variables via [server/src/config.js](../server/src/config.
 `GET /api/pages/:id/image`:
 
 1. Lookup `pages.path` + chapter meta.
-2. `cbzCache.ensureChapterExtracted(...)` (mode inherited from `?fast=1`) — if the chapter was LRU-evicted since it was opened, re-extract. Extraction is deterministic from archive bytes, so the filenames produced match what `pages.path` already stores — no row rebuild needed on the serve path.
+2. `cbzCache.ensureChapterExtracted(...)` (mode inherited from `?fast=1`) — if the chapter was LRU-evicted since it was opened, re-extract. Extraction is deterministic from archive bytes, so the filenames produced match what `pages.path` already stores — no row rebuild needed on the serve path. The reader's `<img>` requests carry `?fast=1` only when the per-device *Fast chapter open* setting is on ([`api.pageImageUrl(id, { fast })`](../client/src/api/client.js)); with the setting off they arrive as `mode='full'` and resolve against the already-complete directory. **Without the `fast` flag, a serve that lands mid-extraction would take the full-mode branch and block on the entire chapter finishing — defeating per-page streaming — so the reader must send it whenever fast-open is on.**
 3. If the requested file is already on disk, `res.sendFile(<dir>/<pages.path>)`.
-4. Otherwise wait on `waitForPageFile`. Either resolve and `sendFile`, or map errors to 410 Gone (chapter removed) / 503 Retry-After (timeout).
+4. Otherwise wait on `waitForPageFile`. Either resolve and `sendFile`, or map errors to 410 Gone (chapter removed), 404 (`PAGE_EXTRACT_FAILED` — the entry could not be extracted; the client should stop retrying), or 503 Retry-After (timeout / waiter overload).
 
 ### Size cap and eviction
 
@@ -368,6 +371,8 @@ Read from environment variables via [server/src/config.js](../server/src/config.
 - Otherwise `rm -rf` the directory and remove it from the index, until total drops below cap.
 
 Evicting at page granularity would leave partially-populated chapter directories behind, forcing re-extractions mid-read. Per-chapter eviction keeps the invariant that a directory is either fully present or entirely absent.
+
+**In-progress eviction guard (ordering invariant):** `ensureChapterExtracted` checks `chapterStates` (active extraction → wait on it) *before* the in-memory `index`/`.ready` probe. This ordering matters because in fast mode the dir is added to `index` at the start of Phase 1 but `.ready` isn't written until Phase 2 finishes — so for the entire Phase 2 window the dir is simultaneously "indexed" and "marker-less". The reader hammers `GET /api/pages/:id/image?fast=1` during exactly that window; if the index branch ran first it would read the missing marker as corruption and `evictChapterDir()` the directory Phase 2 is still extracting into, whose next write then fails with `ENOENT … <page>.tmp`. Checking `chapterStates` first routes those concurrent callers to await the in-flight extraction instead. (Full mode never exposed this: its pages-list call blocks until `.ready` exists, so page-image requests always arrive to a complete, marked directory.) Regression coverage: [server/test/cbzCacheRace.test.js](../server/test/cbzCacheRace.test.js).
 
 **Crash-safety:** each image file is written to `<target>.tmp` and renamed into place on `finish`. The `.ready` marker is the final step of a successful extraction — directories missing it on startup are assumed to be partial extractions from a crashed run and are deleted.
 
@@ -384,7 +389,7 @@ CBZ cache state must survive deletions and renames cleanly — a manga or chapte
 - `DELETE /api/manga/:id` — collects the manga's CBZ chapter IDs before the CASCADE.
 - `DELETE /api/libraries/:id` — joins through manga to collect every CBZ chapter ID in the library.
 
-Each cancellation aborts the chapter's `AbortController`, rejects every open page waiter with `CHAPTER_REMOVED` (mapped to HTTP 410 by the page-image route), removes the cache directory, and drops the state slot. Calls against a chapter with no active extraction are no-ops.
+Each cancellation aborts the chapter's `AbortController`, rejects every open page waiter with `CHAPTER_REMOVED` (mapped to HTTP 410 by the page-image route), drops the chapter's queued Phase 2 slot-waiter (`dropPhase2Waiter` — so a cancelled extraction that was still queued for a scheduler slot is removed and resolved instead of lingering to be granted and immediately self-abort), removes the cache directory, and drops the state slot. Calls against a chapter with no active extraction are no-ops.
 
 **`auditOrphans(db)`** — closes the watcher's depth-0 / missing-`unlinkDir` blind spot. Walks `CBZ_CACHE_DIR`, parses `<chapterId>` from each subdirectory's name, drops any dir whose chapter ID is no longer present in the `chapters` table. Defensive: never touches a directory that's currently in `chapterStates` (an active extraction) even if the chapter row appears missing — concurrent rename + new-id resolution would otherwise tear an in-flight extraction. Runs:
 

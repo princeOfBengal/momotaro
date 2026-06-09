@@ -213,6 +213,15 @@ function resumePageHint(req) {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
+// Parse the optional `?prefetch=1` flag. Sent by the reader's next-chapter
+// pre-extraction so the resulting Phase 2 takes a lower-priority, capped slot
+// and can't starve the chapter the user is actively reading. Absent / falsy =
+// foreground (default), so every existing caller keeps current behaviour.
+function prefetchFlag(req) {
+  const v = req.query.prefetch;
+  return v === '1' || v === 'true';
+}
+
 // GET /api/chapters/:id/pages — list all pages for a chapter.
 // Folder chapters: a straight DB read; dims are populated at scan time.
 // CBZ chapters: drive ensureChapterExtracted (fast or full per ?fast=1),
@@ -246,6 +255,7 @@ router.get('/chapters/:id/pages', asyncWrapper(async (req, res) => {
         mode,
         resumePage,
         onPageExtracted,
+        background: prefetchFlag(req),
       });
     } catch (err) {
       if (err && err.code === 'ENOENT') {
@@ -499,10 +509,16 @@ router.get('/pages/:id/image', asyncWrapper(async (req, res, next) => {
         res.setHeader('Retry-After', '2');
         return res.status(503).json({ error: 'Page still extracting — try again' });
       }
+      if (err.code === 'PAGE_EXTRACT_FAILED') {
+        // This page's zip entry could not be extracted (corrupt entry / read
+        // error). Phase 2 won't retry it, so 404 rather than 503 — the client
+        // should stop retrying and show a broken page, not spin forever.
+        return res.status(404).json({ error: 'Page could not be extracted' });
+      }
       if (err.code === 'NO_ACTIVE_EXTRACTION') {
         // The extraction state was cleared between our ensureChapterExtracted
         // and waitForPageFile — either it finished (file should now exist) or
-        // was evicted. Either way, recheck disk and send if present.
+        // was evicted. Recheck disk and send if present.
         if (fs.existsSync(abs)) {
           return res.sendFile(abs, {
             maxAge: 86_400_000,
@@ -511,6 +527,14 @@ router.get('/pages/:id/image', asyncWrapper(async (req, res, next) => {
             headers: { 'Content-Type': mimeFor(meta.storedPath) },
           });
         }
+        // File absent. If the extraction completed (`.ready` present) the page
+        // genuinely failed to extract — 404 so the client stops. Otherwise the
+        // dir was evicted mid-flight; ask the client to retry (it re-extracts).
+        const ready = fs.existsSync(path.join(extraction.dir, '.ready'));
+        if (ready) {
+          return res.status(404).json({ error: 'Page could not be extracted' });
+        }
+        res.setHeader('Retry-After', '2');
         return res.status(503).json({ error: 'Page no longer available — retry' });
       }
       return next(err);

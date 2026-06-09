@@ -437,7 +437,7 @@ Both return `{ data: { deleted: true } }` on success; neither is an error if the
 | GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide). Accepts `?fast=1` and `?resume_page=N` for the first-page-fast CBZ flow. |
 | POST | `/api/chapters/:id/prioritize-pages` | Priority hint for fast-mode Phase 2 — move named page indices to front of the work queue. No-op when no active fast extraction. |
 | POST | `/api/pages/dims` | Client-reported page dimensions (backup safety net from `<img onLoad>`). Batch of up to 100. UPDATE filter `AND (width IS NULL OR height IS NULL)` so client reports never overwrite server-probed values. |
-| GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`). May return HTTP 410 Gone (chapter removed) or HTTP 503 + `Retry-After` (fast-mode Phase 2 didn't deliver the page within `CBZ_PAGE_WAIT_TIMEOUT_MS`). |
+| GET | `/api/pages/:id/image` | Serve page image (binary, `Cache-Control: public, max-age=86400`). Reader requests carry `?fast=1` when Fast chapter open is on. May return HTTP 410 Gone (chapter removed), HTTP 404 (entry failed to extract — stop retrying), or HTTP 503 + `Retry-After` (fast-mode Phase 2 didn't deliver the page within `CBZ_PAGE_WAIT_TIMEOUT_MS`; reader retries with backoff). |
 
 ### `GET /api/chapters/:id/pages`
 
@@ -449,6 +449,7 @@ Lists pages for a chapter. For folder chapters this is a straight DB read; for C
 | --- | --- |
 | `fast=1` | Opt into fast-mode extraction. Server runs Phase 1 (plan + probe dims + extract the first `CBZ_FAST_PREFIX` pages) and returns; Phase 2 continues in the background. Sent by the reader when the per-device "Fast chapter open" setting is on. Folder chapters ignore this flag — they're already instant. |
 | `resume_page=N` | Resume-position hint. When fast mode is on, Phase 1 also extracts a small window around `N` so a deep-link / saved-resume entry doesn't block on `waitForPageFile` for the user's landing page. Ignored in full mode. |
+| `prefetch=1` | Marks the call as a background next-chapter pre-extraction (the reader fires this near end-of-chapter). The resulting Phase 2 takes a lower-priority, capped slot so it can't starve the chapter the user is actively reading. Absent = foreground. See [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast). |
 
 **Response shape:**
 
@@ -512,7 +513,8 @@ Page images are served via `res.sendFile`:
 Error responses specific to fast mode:
 
 - **HTTP 410 Gone** — chapter (or its archive) was removed while the request was waiting. The reader surfaces this as a distinct "this chapter is no longer available" screen with a back link, rather than retrying as a generic error.
-- **HTTP 503 + `Retry-After: 2`** — fast-mode Phase 2 didn't extract the requested page within `CBZ_PAGE_WAIT_TIMEOUT_MS` (default 30 s), or the per-chapter waiter cap was hit. Client may retry once.
+- **HTTP 503 + `Retry-After: 2`** — fast-mode Phase 2 didn't extract the requested page within `CBZ_PAGE_WAIT_TIMEOUT_MS` (default 30 s), or the per-chapter waiter cap was hit. The reader's `<img>` retries with backoff (see [pageImageRetry](../client/src/components/pageImageRetry.js)) so a page that 503s while Phase 2 catches up self-recovers instead of staying a broken image.
+- **HTTP 404** — the page's archive entry genuinely failed to extract (corrupt zip entry / read error). Phase 2 does not retry such a page, so the server returns 404 rather than 503 to signal the client should stop retrying. Distinguished from the 503 case by the chapter's `.ready` marker being present with the file still absent.
 
 ---
 

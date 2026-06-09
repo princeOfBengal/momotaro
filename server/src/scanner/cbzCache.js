@@ -48,7 +48,12 @@ const DEFAULT_CACHE_LIMIT_BYTES = 20 * 1024 * 1024 * 1024; // 20 GB default cap
 const FAST_PREFIX               = config.CBZ_FAST_PREFIX;
 const DIM_PROBE_CONCURRENCY     = config.CBZ_DIM_PROBE_CONCURRENCY;
 const DIM_PROBE_BUFFER_BYTES    = config.CBZ_DIM_PROBE_BUFFER_BYTES;
-const PHASE2_CONCURRENCY        = config.CBZ_PHASE2_CONCURRENCY;
+// Clamp to >= 1: a non-positive or non-numeric value (env typo) would otherwise
+// wedge the scheduler — `running.size >= 0` is always true, so nothing could
+// ever be granted and every fast-mode page would hang.
+const PHASE2_CONCURRENCY        = Number.isFinite(config.CBZ_PHASE2_CONCURRENCY)
+  ? Math.max(1, Math.floor(config.CBZ_PHASE2_CONCURRENCY))
+  : 2;
 const PAGE_WAIT_TIMEOUT_MS      = config.CBZ_PAGE_WAIT_TIMEOUT_MS;
 const PHASE2_RESTAT_INTERVAL    = config.CBZ_PHASE2_RESTAT_INTERVAL;
 const MAX_WAITERS_PER_CHAPTER   = 32;
@@ -71,8 +76,22 @@ const chapterStates = new Map(); // chapterDir -> ChapterState
 // Global queue gate for Phase 2 background work — keeps a binge-clicker from
 // spawning unbounded sharp work across the whole library. Each running Phase 2
 // counts as one slot.
-let phase2Active = 0;
-const phase2Queue = [];
+//
+// Priority is evaluated at GRANT time from the chapter's *live* state, never
+// captured, so the next-chapter PREFETCH (a background pre-extraction the reader
+// fires near end-of-chapter) can never starve the chapter the user is actively
+// reading, AND a chapter that was started as a prefetch but then opened can be
+// promoted to foreground mid-flight:
+//   - Foreground requests (a real chapter open / page serve) drain first.
+//   - Background (prefetch) requests are additionally capped one slot below the
+//     global limit, so a foreground request can always acquire a slot rather
+//     than timing out behind prefetch work.
+//   - `promotePhase2ToForeground(state)` flips a background extraction to
+//     foreground; because background-ness is read live (no captured boolean,
+//     no separate counter) the change is reflected everywhere with no risk of
+//     a counter leak.
+const phase2Running = new Set();   // states currently holding a slot
+const phase2Waiters = [];          // [{ state, resolve }] — FIFO; priority read live
 
 // One-time libvips warm-up; first sharp() call lazy-loads bindings. Cheap
 // belt-and-braces so the very first chapter open doesn't pay the cost.
@@ -354,7 +373,7 @@ function extractOneEntry(zip, entry, chapterDir, cacheFilename) {
       let written = 0;
       stream.on('data', (c) => { written += c.length; });
       stream.on('error', (e) => { out.destroy(); fs.unlink(tmp, () => {}); reject(e); });
-      out.on('error', (e) => { fs.unlink(tmp, () => {}); reject(e); });
+      out.on('error', (e) => { stream.destroy(); fs.unlink(tmp, () => {}); reject(e); });
       out.on('finish', () => {
         fs.rename(tmp, target, (rnErr) => {
           if (rnErr) { fs.unlink(tmp, () => {}); return reject(rnErr); }
@@ -382,17 +401,35 @@ function makeArchiveRemovedError() {
   return e;
 }
 
+// A single page entry failed to extract (corrupt zip entry, read/write error).
+// Phase 2 does NOT retry the index — it's dropped from `remaining` — so we
+// record the failure on the state and reject both current and future waiters
+// with this code. The page-image route maps it to 404 so the client stops
+// retrying immediately instead of blocking the full PAGE_WAIT_TIMEOUT and then
+// 503-looping forever.
+function makePageExtractFailedError(cause) {
+  const e = new Error('Page failed to extract');
+  e.code = 'PAGE_EXTRACT_FAILED';
+  if (cause) e.cause = cause;
+  return e;
+}
+
 // ── Chapter state slot ────────────────────────────────────────────────────
 // Created on first ensure* call for a (chapterId, mtime) pair. Removed when
 // the state's phase2 promise settles (success or abort) and the dir is
 // either fully extracted or cleaned up.
 
-function buildState({ chapterId, chapterDir, totalPages, onPageExtracted = null }) {
+function buildState({ chapterId, chapterDir, totalPages, onPageExtracted = null, background = false }) {
   return {
     chapterId,
     chapterDir,
     totalPages,
+    // True when this extraction was kicked off by the reader's next-chapter
+    // prefetch rather than a foreground open. Phase 2 acquires a lower-priority,
+    // capped slot so it can't starve the chapter the user is reading.
+    background,
     extracted: new Set(),       // cacheFilenames already on disk
+    failedPages: new Map(),     // cacheFilename -> PAGE_EXTRACT_FAILED error
     pageWaiters: new Map(),     // cacheFilename -> [{ resolve, reject }, ...]
     priorityIndices: [],        // page indices the worker should jump ahead to
     abortController: new AbortController(),
@@ -428,6 +465,16 @@ function notifyPageReady(state, cacheFilename) {
   }
 }
 
+// Drop a chapter's state slot, but only if it still points at THIS state.
+// A worker's cleanup must never delete a slot that belongs to a different
+// extraction: if cancelChapter tore down the old state and a re-extract for the
+// same dir (same chapter id + floor-second mtime) registered a fresh state
+// before this worker's finally ran, an unguarded delete would orphan the new
+// extraction's slot.
+function releaseStateSlot(chapterDir, state) {
+  if (chapterStates.get(chapterDir) === state) chapterStates.delete(chapterDir);
+}
+
 // ── Public: cancellation ──────────────────────────────────────────────────
 // Called when a chapter row is removed (manga delete, library delete,
 // rename, scanner pruning). Aborts any in-flight extraction, rejects every
@@ -444,6 +491,7 @@ function cancelChapter(chapterId, reason = 'Chapter removed') {
     const err = makeChapterRemovedError(reason);
     state.failed = err;
     rejectAllWaiters(state, err);
+    dropPhase2Waiter(state);
     chapterStates.delete(dir);
     removeFromIndex(dir);
     fs.rm(dir, { recursive: true, force: true }, () => {});
@@ -519,24 +567,96 @@ function auditOrphans(db, { dryRun = false } = {}) {
 
 // ── Phase 2 scheduler ─────────────────────────────────────────────────────
 // Bounded concurrency across the whole library — keeps a burst of opens
-// from spawning unbounded sharp work. Each phase2() invocation is wrapped
-// in a slot acquire/release. Cancelled chapters release their slot via the
-// AbortSignal exit path.
+// from spawning unbounded sharp work. Each runPhase2() is wrapped in a slot
+// acquire/release keyed on the chapter STATE (not a captured boolean), so the
+// scheduler always sees the chapter's current foreground/background priority.
+// Cancelled chapters release their slot via the AbortSignal exit path.
+//
+// Background (prefetch) Phase 2 is capped one slot below the global limit so an
+// actively-read foreground chapter can always acquire a slot and never time out
+// behind prefetch work. min 1 so a single-slot configuration still makes
+// background progress.
+function backgroundCap() {
+  return Math.max(1, PHASE2_CONCURRENCY - 1);
+}
 
-function acquirePhase2Slot() {
+// Derived live from the running set (≤ PHASE2_CONCURRENCY members) rather than
+// a maintained counter — so promoting a running extraction (background → fg)
+// is reflected immediately with nothing to keep in sync.
+function backgroundRunningCount() {
+  let n = 0;
+  for (const s of phase2Running) if (s.background) n++;
+  return n;
+}
+
+function canGrantPhase2(state) {
+  if (phase2Running.size >= PHASE2_CONCURRENCY) return false;
+  if (state.background && backgroundRunningCount() >= backgroundCap()) return false;
+  return true;
+}
+
+function acquirePhase2Slot(state) {
   return new Promise(resolve => {
-    if (phase2Active < PHASE2_CONCURRENCY) {
-      phase2Active++;
+    if (canGrantPhase2(state)) {
+      phase2Running.add(state);
       return resolve();
     }
-    phase2Queue.push(resolve);
+    phase2Waiters.push({ state, resolve });
   });
 }
 
-function releasePhase2Slot() {
-  phase2Active--;
-  const next = phase2Queue.shift();
-  if (next) { phase2Active++; next(); }
+function releasePhase2Slot(state) {
+  phase2Running.delete(state);
+  drainPhase2Queue();
+}
+
+// Grant as many queued waiters as currently permitted, foreground first. A
+// foreground waiter is always grantable while a slot is free; a background
+// waiter only while under the background cap. If the cap is reached and only
+// background work is queued, a freed slot stays idle until a foreground request
+// arrives or a running background finishes — a deliberate trade of a little
+// background throughput for guaranteed foreground responsiveness.
+function drainPhase2Queue() {
+  for (;;) {
+    if (phase2Running.size >= PHASE2_CONCURRENCY) return;
+    let idx = phase2Waiters.findIndex(w => !w.state.background);
+    if (idx === -1 && backgroundRunningCount() < backgroundCap()) {
+      idx = phase2Waiters.findIndex(w => w.state.background);
+    }
+    if (idx === -1) return;
+    const [w] = phase2Waiters.splice(idx, 1);
+    phase2Running.add(w.state);
+    w.resolve();
+  }
+}
+
+// Promote a chapter's Phase 2 from background (prefetch) to foreground — called
+// when a foreground caller (real open, page serve, thumbnail/cover job) arrives
+// for a chapter whose extraction was started as a prefetch. Monotonic
+// (background → foreground only), so the background cap can never be
+// retroactively violated. Re-drains: a still-queued waiter is re-picked as
+// foreground; a running one frees background-cap room for other prefetches.
+function promotePhase2ToForeground(state) {
+  if (!state.background) return;
+  state.background = false;
+  drainPhase2Queue();
+}
+
+// Remove a chapter's queued Phase 2 slot-waiter (if it hasn't been granted yet)
+// and resolve it, so a cancelled chapter doesn't sit in the queue waiting to be
+// granted a slot only to immediately self-abort. Resolving WITHOUT adding the
+// state to `phase2Running` means the cancelled extraction never occupies a real
+// slot — its runPhase2 proceeds past the await, sees the aborted signal, and
+// exits through its finally (whose `phase2Running.delete` is a harmless no-op).
+// A state whose Phase 2 is already running has no queue entry, so this no-ops
+// for it and the AbortSignal handles the teardown.
+function dropPhase2Waiter(state) {
+  for (let i = phase2Waiters.length - 1; i >= 0; i--) {
+    if (phase2Waiters[i].state === state) {
+      const [w] = phase2Waiters.splice(i, 1);
+      try { w.resolve(); } catch {}
+    }
+  }
 }
 
 // ── Phase 2 worker ────────────────────────────────────────────────────────
@@ -550,7 +670,10 @@ async function runPhase2({ state, cbzPath, baseStat }) {
   const signal = abortController.signal;
   let zip;
 
-  await acquirePhase2Slot();
+  // Priority (foreground/background) is read live from `state` by the scheduler,
+  // so a promotion between here and completion takes effect without any captured
+  // value to get out of sync.
+  await acquirePhase2Slot(state);
   try {
     if (signal.aborted) throw makeChapterRemovedError();
 
@@ -645,13 +768,18 @@ async function runPhase2({ state, cbzPath, baseStat }) {
         await extractOneEntry(zip, entries[i], chapterDir, cacheFilename);
       } catch (e) {
         if (isChapterRemovedError(e) || signal.aborted) throw e;
-        // Single-page failure (corrupt entry). Reject the waiters for this
-        // page only and continue — don't poison the whole chapter.
+        // Single-page failure (corrupt entry / read-write error). Record it so
+        // any LATER waiter for this page rejects immediately (Phase 2 dropped
+        // the index from `remaining` and never retries it) instead of blocking
+        // the full PAGE_WAIT_TIMEOUT. Reject the current waiters too, then
+        // continue — one bad page must not poison the rest of the chapter.
+        const failErr = makePageExtractFailedError(e);
+        state.failedPages.set(cacheFilename, failErr);
         const list = state.pageWaiters.get(cacheFilename);
         if (list) {
           state.pageWaiters.delete(cacheFilename);
           for (const w of list) {
-            try { w.reject(e); } catch {}
+            try { w.reject(failErr); } catch {}
           }
         }
         sinceRestat++;
@@ -696,15 +824,15 @@ async function runPhase2({ state, cbzPath, baseStat }) {
     // If we aborted because the chapter row went away or the archive vanished,
     // tear down the dir; otherwise leave whatever is on disk for the next
     // chapter-open to find (cache will detect missing .ready and re-extract).
-    if (isChapterRemovedError(err) || err.code === 'ARCHIVE_REMOVED') {
+    if (isChapterRemovedError(err)) {
       removeFromIndex(chapterDir);
       try { fs.rmSync(chapterDir, { recursive: true, force: true }); } catch {}
     }
     throw err;
   } finally {
     try { if (zip) zip.close(); } catch {}
-    chapterStates.delete(chapterDir);
-    releasePhase2Slot();
+    releaseStateSlot(chapterDir, state);
+    releasePhase2Slot(state);
   }
 }
 
@@ -743,6 +871,10 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
   // runs backfillDimsFromDisk after a single full extract; no per-page
   // signal needed).
   const onPageExtracted = typeof opts.onPageExtracted === 'function' ? opts.onPageExtracted : null;
+  // Background (prefetch) extractions take a lower-priority, capped Phase 2
+  // slot. Only meaningful in fast mode; full mode doesn't go through the
+  // Phase 2 gate at all.
+  const background = opts.background === true;
   let stat;
   try { stat = await fsp.stat(cbzPath); }
   catch (e) {
@@ -756,21 +888,27 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
   const dir = chapterDirFor(chapterId, stat.mtimeMs);
   const readyPath = path.join(dir, READY_MARKER);
 
-  // In-memory cache hit.
-  if (index.has(dir)) {
-    try {
-      await fsp.access(readyPath);
-      touch(dir);
-      return { dir, plannedPages: null, freshlyExtracted: false, mode, extracting: false };
-    } catch {
-      // Marker gone — treat as corrupt and re-extract.
-      evictChapterDir(dir);
-    }
-  }
-
   // Another caller is mid-extraction for this exact dir. Wait on their state.
+  //
+  // This MUST be checked before the index/`.ready` probe below. In fast mode the
+  // dir is added to `index` at the start of Phase 1 but the `.ready` marker isn't
+  // written until Phase 2 finishes — so for the whole Phase 2 window the dir is
+  // simultaneously "in the index" and "missing its marker". The reader hammers
+  // /api/pages/:id/image?fast=1 during exactly that window; if the index branch
+  // ran first it would see no marker, conclude the dir is corrupt, and
+  // evictChapterDir() it — rm -rf'ing the directory Phase 2 is still extracting
+  // into. Phase 2's next write then fails with ENOENT on `<page>.tmp`. Checking
+  // chapterStates first routes these concurrent callers to wait on the in-flight
+  // extraction instead of clobbering it.
   if (chapterStates.has(dir)) {
     const existing = chapterStates.get(dir);
+    // A foreground caller (real open, page serve, or a full-mode thumbnail/cover
+    // job) arriving for a chapter whose Phase 2 was started as a background
+    // prefetch promotes it: the user is now actively reading (or a job is
+    // blocking on) this chapter, so it must no longer be scheduled behind other
+    // background work. No-op when this call is itself a prefetch, or the
+    // extraction is already foreground.
+    if (!background && existing.background) promotePhase2ToForeground(existing);
     if (mode === 'full') {
       // Full-mode callers need the .ready marker before returning. Phase 1 +
       // Phase 2 both resolve on the same `phase2` promise.
@@ -785,8 +923,22 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
       plannedPages: phase1Result.plannedPages,
       freshlyExtracted: false,
       mode,
-      extracting: !!existing.phase2 && existing.phase2.then ? true : false,
+      extracting: !!existing.phase2,
     };
+  }
+
+  // In-memory cache hit. Reached only when no extraction is in flight for this
+  // dir (the chapterStates guard above handles that case), so a missing marker
+  // here genuinely means a completed extraction left corrupt — safe to evict.
+  if (index.has(dir)) {
+    try {
+      await fsp.access(readyPath);
+      touch(dir);
+      return { dir, plannedPages: null, freshlyExtracted: false, mode, extracting: false };
+    } catch {
+      // Marker gone — treat as corrupt and re-extract.
+      evictChapterDir(dir);
+    }
   }
 
   // On-disk hit from a previous run that init() hasn't walked yet.
@@ -800,7 +952,7 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
   if (mode === 'full') {
     return runFullExtract({ chapterId, cbzPath, stat, dir });
   }
-  return runFastExtract({ chapterId, cbzPath, stat, dir, resumePage: opts.resumePage, onPageExtracted });
+  return runFastExtract({ chapterId, cbzPath, stat, dir, resumePage: opts.resumePage, onPageExtracted, background });
 }
 
 // ── Full (legacy) extraction ──────────────────────────────────────────────
@@ -847,7 +999,7 @@ async function runFullExtract({ chapterId, cbzPath, stat, dir }) {
       throw err;
     } finally {
       try { if (zip) zip.close(); } catch {}
-      chapterStates.delete(dir);
+      releaseStateSlot(dir, state);
     }
   })();
 
@@ -865,12 +1017,12 @@ async function runFullExtract({ chapterId, cbzPath, stat, dir }) {
 // Phase 2: background worker extracts the remainder in ascending order, with
 // priority indices serviced first.
 
-async function runFastExtract({ chapterId, cbzPath, stat, dir, resumePage, onPageExtracted }) {
+async function runFastExtract({ chapterId, cbzPath, stat, dir, resumePage, onPageExtracted, background = false }) {
   cleanupStaleForChapter(chapterId, dir);
   await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
   await fsp.mkdir(dir, { recursive: true });
 
-  const state = buildState({ chapterId, chapterDir: dir, totalPages: 0, onPageExtracted });
+  const state = buildState({ chapterId, chapterDir: dir, totalPages: 0, onPageExtracted, background });
   chapterStates.set(dir, state);
   addToIndex(dir, stat.size);
 
@@ -927,7 +1079,7 @@ async function runFastExtract({ chapterId, cbzPath, stat, dir, resumePage, onPag
       if (isChapterRemovedError(err)) {
         removeFromIndex(dir);
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-        chapterStates.delete(dir);
+        releaseStateSlot(dir, state);
       }
       throw err;
     }
@@ -937,10 +1089,21 @@ async function runFastExtract({ chapterId, cbzPath, stat, dir, resumePage, onPag
 
   // Phase 2 kicks off as soon as Phase 1 settles. Failures in Phase 1 abort
   // Phase 2 too (no point trying to extract more if planning failed).
-  state.phase2 = phase1.then(async () => {
+  //
+  // Keep the REAL phase2 promise on `state.phase2` so a concurrent full-mode
+  // caller awaiting it (ensureChapterExtracted's chapterStates branch) sees a
+  // fatal ARCHIVE_REMOVED / CHAPTER_REMOVED rejection instead of a spuriously
+  // resolved promise. The previous `.then(...).catch(() => {})` REPLACED the
+  // promise with a resolved one, so a full-mode thumbnail/cover caller would
+  // return "success" for a directory Phase 2 had already torn down, then 500
+  // on the follow-up readdir. We attach the unhandled-rejection guard as a
+  // SEPARATE catch on a throwaway handle so it can't mask the real promise.
+  const phase2Real = phase1.then(async () => {
     if (state.failed) return;
     await runPhase2({ state, cbzPath, baseStat: stat });
-  }).catch(() => { /* swallowed — failure already recorded on state */ });
+  });
+  state.phase2 = phase2Real;
+  phase2Real.catch(() => { /* failure already recorded on state.failed */ });
 
   // Surface unhandled rejections from Phase 1 so the caller sees them.
   const result = await phase1;
@@ -970,6 +1133,8 @@ function waitForPageFile(chapterDir, cacheFilename, { timeoutMs = PAGE_WAIT_TIME
     return Promise.reject(e);
   }
   if (state.failed) return Promise.reject(state.failed);
+  // This specific page already failed to extract — reject fast (no 30s wait).
+  if (state.failedPages.has(cacheFilename)) return Promise.reject(state.failedPages.get(cacheFilename));
   if (state.extracted.has(cacheFilename)) return Promise.resolve();
 
   // Backpressure: refuse to queue more than N waiters per chapter so a key-
@@ -1141,4 +1306,22 @@ module.exports = {
   // Exposed so route handlers can route 'CHAPTER_REMOVED' / 'ARCHIVE_REMOVED'
   // to HTTP 410.
   isChapterRemovedError,
+  // Test-only seam for the Phase 2 priority scheduler. Not used by production
+  // code paths — exported so the scheduler's foreground/background ordering and
+  // background cap can be unit-tested without driving real extractions.
+  __testing: {
+    acquirePhase2Slot,
+    releasePhase2Slot,
+    promotePhase2ToForeground,
+    dropPhase2Waiter,
+    phase2Stats: () => ({
+      active: phase2Running.size,
+      backgroundActive: backgroundRunningCount(),
+      queued: phase2Waiters.length,
+      foregroundQueued: phase2Waiters.filter(w => !w.state.background).length,
+      backgroundQueued: phase2Waiters.filter(w => w.state.background).length,
+      concurrency: PHASE2_CONCURRENCY,
+      backgroundCap: backgroundCap(),
+    }),
+  },
 };

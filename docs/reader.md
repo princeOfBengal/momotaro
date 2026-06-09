@@ -9,6 +9,7 @@ The reader is a fullscreen page viewer with three reading modes and rich gesture
 | [client/src/pages/Reader.jsx](../client/src/pages/Reader.jsx) | State management, navigation, settings, progress saving |
 | [client/src/components/ReaderPaged.jsx](../client/src/components/ReaderPaged.jsx) | Paged mode renderer — handles all pointer/touch/gesture input |
 | [client/src/components/ReaderScroll.jsx](../client/src/components/ReaderScroll.jsx) | Scroll/webtoon mode renderer |
+| [client/src/components/pageImageRetry.js](../client/src/components/pageImageRetry.js) | Shared `<img>` `onError` retry — recovers a page that 503s while fast-mode Phase 2 is still extracting it |
 | [client/src/components/ReaderControls.jsx](../client/src/components/ReaderControls.jsx) | Top/bottom bars + settings panel |
 | [client/src/components/ReaderPaged.css](../client/src/components/ReaderPaged.css) | Paged reader styles (scale types, animations) |
 | [client/src/components/ReaderControls.css](../client/src/components/ReaderControls.css) | Controls bar styles |
@@ -58,6 +59,17 @@ Coverage: every image rendered in `ReaderPaged.jsx` (1 or 2 displayed) and `Read
 
 Offline behaviour: the local pages-state patch still applies (in-session layout correct). The `POST /api/pages/dims` is buffered + fire-and-forget; offline failures are caught and swallowed, so the buffer clears on the attempt and the local state remains correct.
 
+## Image loading & retry
+
+Reader pages render as plain `<img src={api.pageImageUrl(id, { fast })}>`. With **Fast chapter open** on, the URL carries `?fast=1`, so a page the user reaches before fast-mode Phase 2 has extracted it is served via the per-page wait path — and if that wait times out the server returns `503 Retry-After: 2`. An `<img>` can't honour `Retry-After` on its own, so without help the page would paint a permanent broken image even though the bytes land moments later.
+
+[pageImageRetry.js](../client/src/components/pageImageRetry.js) supplies the shared `onError`/`onLoad` handlers wired into both `ReaderPaged` and `ReaderScroll`:
+
+- On error it schedules a bounded, backed-off retry (up to 4 attempts, ~1.5 s × attempt) that re-points the element at a cache-busted URL (`&_r=<n>`) so the browser actually refetches. The attempt count lives on the element's `dataset` (no React re-render churn) and resets in `onLoad`.
+- It only retries `http(s)` URLs — offline `blob:` URLs (a missing/undecryptable local page) are left as-is, since retrying can't help.
+- A guard abandons the retry if the element was re-pointed at a different page meanwhile (user flipped pages / the scroll list re-keyed), so a live image is never yanked back to a stale page.
+- A genuinely missing page (a corrupt CBZ entry the server reports as `404`, or a folder page that's gone) simply exhausts the attempt budget and stays broken — the pre-feature outcome, reached deterministically instead of after a long hang.
+
 ## Scale Types (Paged Mode)
 
 Controlled by `.scale-{type}` class on `.reader-paged-inner`:
@@ -91,7 +103,7 @@ All reader settings are stored in `localStorage` with `reader_` prefix:
 | `reader_pageLayout` | `single` |
 | `reader_orientation` | `ltr` |
 | `reader_prefetchPages` | `true` (any value other than the literal string `false` is treated as on — see [Page Prefetch](#page-prefetch)) |
-| `reader_fastChapterOpen` | `false` (opt-in; the `?fast=1` flag for `/api/chapters/:id/pages` — see [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast)) |
+| `reader_fastChapterOpen` | `false` (opt-in; the `?fast=1` flag for `/api/chapters/:id/pages` **and** for the reader's page-image requests via `api.pageImageUrl(id, { fast })`, so pages stream per-file instead of blocking on a full extraction — see [scanner.md § Fast mode](./scanner.md#fast-mode-first-page-fast)) |
 | `reader_predictNextChapter` | `true` for users who had `reader_prefetchPages` on (preserves today's implicit behaviour), `false` for users who had it off. One-time migration via `resolveInitialPredictNextChapter`; settings independent thereafter. |
 | `reader_volumeButtonNav` | `false` (opt-in, **Android only**). Turn pages with the hardware volume keys. See [Volume-button navigation](#volume-button-navigation-android-only). |
 | `reader_volumeButtonReverse` | `false` (Android only). Swap the mapping so Volume Down = next, Volume Up = prev. |

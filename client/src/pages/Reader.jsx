@@ -991,6 +991,7 @@ export default function Reader() {
           animKey={animKey}
           animDir={animDir}
           gesturesEnabled={gesturesEnabled}
+          fast={fastChapterOpen}
           onNext={nextPage}
           onPrev={prevPage}
           onCenterTap={handleCenterTap}
@@ -1006,6 +1007,7 @@ export default function Reader() {
           onPageChange={handlePageChange}
           zoom={zoom}
           isWebtoon={isWebtoon}
+          fast={fastChapterOpen}
           onPageDimsLearned={handlePageDimsLearned}
         />
       )}

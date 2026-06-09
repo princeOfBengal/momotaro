@@ -117,7 +117,10 @@ export function useReaderPrefetch({
     for (const i of targets) {
       const page = pages[i];
       if (!page) continue;
-      const url = api.pageImageUrl(page.id);
+      // Match the displayed images: when fast-open is on, warm via the fast
+      // path so these lookahead requests stream too instead of each blocking on
+      // a full chapter extraction.
+      const url = api.pageImageUrl(page.id, { fast: fastChapterOpen });
       if (issuedUrls.current.has(url)) continue;
       issuedUrls.current.add(url);
       const img = new Image();
@@ -170,7 +173,7 @@ export function useReaderPrefetch({
     // in the background. Legacy → server blocks until full extract completes
     // before responding (unchanged from pre-feature behaviour).
     const pagesPromise = fastChapterOpen
-      ? api.getPagesWithMeta(next.id, { fast: true })
+      ? api.getPagesWithMeta(next.id, { fast: true, prefetch: true })
       : api.getPages(next.id);
 
     pagesPromise.then(result => {
@@ -182,7 +185,7 @@ export function useReaderPrefetch({
       for (let i = 0; i < Math.min(NEXT_CHAPTER_PAGES_TO_WARM, nextPages.length); i++) {
         const p = nextPages[i];
         if (!p) continue;
-        const url = api.pageImageUrl(p.id);
+        const url = api.pageImageUrl(p.id, { fast: fastChapterOpen });
         if (issuedUrls.current.has(url)) continue;
         issuedUrls.current.add(url);
         const img = new Image();

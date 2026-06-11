@@ -187,7 +187,7 @@ async function performOptimize(manga) {
 
   // Rescan so the DB reflects the new file names
   try {
-    await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id);
+    await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id, { source: 'optimize' });
   } catch (err) {
     console.error('[Optimize] Rescan error:', err.message);
   }

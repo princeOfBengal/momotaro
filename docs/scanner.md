@@ -533,4 +533,23 @@ On startup, `migrateToSharded()` walks `THUMBNAIL_DIR` at depth 0, looking for s
 
 `chokidar` watches all configured library paths at depth 0 (top-level entries only). Changes are debounced 3000 ms per manga directory to avoid thrashing during multi-file copy operations. On change, `scanMangaDirectory()` is called for the affected manga only — not a full rescan.
 
-**Note:** The watcher listens to `add`, `addDir`, `change`, and `unlink` events but **not** `unlinkDir`. Deleting an entire manga folder will not trigger a watcher event. The manga record is cleaned up the next time a full library scan runs (via the library-level pruning pass described above).
+### Settle-before-scan (complete population of new series)
+
+Because the watcher runs at **depth 0** it only sees the top-level manga folder itself — it does **not** receive events for chapters being copied *inside* that folder. A new series is therefore announced by a single `addDir` fired at the very *start* of the copy, while its (potentially dozens of) chapters are still streaming in. Scanning the moment the 3000 ms debounce elapses would index only the handful of chapters written so far, leaving the series partially populated until the user pressed Rescan.
+
+To fix this, once the debounce fires the watcher does **not** scan immediately. It first polls a cheap recursive signature of the manga folder (entry count + total size + newest mtime) every `STABLE_POLL_MS` (2000 ms) and waits until the signature holds steady across one interval — i.e. the copy has finished — before running the scan, up to a `STABLE_MAX_WAIT_MS` ceiling (5 minutes) for very large drops. A 50-chapter copy thus settles fully before a single authoritative `scanMangaDirectory` call indexes every chapter. The poll is scoped to the one affected folder, so it never reintroduces the per-directory watch cost that depth-0 watching deliberately avoids.
+
+An in-flight guard (`scanning` set) ensures a folder that receives further events while its scan is running re-arms the debounce instead of launching a second concurrent scan of the same folder.
+
+### Logging
+
+Watcher-triggered scans (and every other single-folder scan — downloader, optimize, the per-manga refresh route) pass a `source` label to `scanMangaDirectory`, which bookends the work with log lines so individual folder rescans are as visible in the logs as full-library scans:
+
+```text
+[Scanner] Scanning manga folder "My Series" (watcher)
+[Scanner] Done scanning "My Series": 50 chapter(s) (watcher).
+```
+
+The bulk `scanLibrary` path leaves `source` unset, so a full walk does **not** emit one line per manga (it logs at the library level instead). Recognised labels: `watcher`, `download`, `optimize`, `manual refresh`.
+
+**Note:** The watcher listens to `add`, `addDir`, `change`, and `unlink` events but **not** `unlinkDir`. Deleting an entire manga folder will not trigger a watcher event. The manga record is cleaned up the next time a full library scan runs (via the library-level pruning pass described above). Likewise, in-place edits *inside* an existing manga folder (e.g. dropping new chapters into a series that already exists) are not seen at depth 0; those are caught by the downloader's direct `scanMangaDirectory` call, the per-manga Rescan action, or the next full scan.

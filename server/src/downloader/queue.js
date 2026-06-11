@@ -291,11 +291,13 @@ async function runJob(job) {
     // Don't re-download an existing file. The user can delete it manually if
     // they want a fresh copy; this protects against re-runs of the same job.
     if (fs.existsSync(cbzPath)) {
+      // `AND status = 'running'` so a cancel that raced in between pickNextJob
+      // and here isn't clobbered back to 'done'.
       db.prepare(
         `UPDATE download_jobs
             SET status = 'done', finished_at = unixepoch(),
                 target_chapter_filename = COALESCE(target_chapter_filename, ?)
-          WHERE id = ?`
+          WHERE id = ? AND status = 'running'`
       ).run(filename, job.id);
       return;
     }
@@ -355,7 +357,7 @@ async function runJob(job) {
       const { scanMangaDirectory } = require('../scanner/libraryScanner');
       const mangaPath = target.folder;
       const folderName = path.basename(mangaPath);
-      await scanMangaDirectory(mangaPath, folderName, target.libraryId);
+      await scanMangaDirectory(mangaPath, folderName, target.libraryId, { source: 'download' });
       // Now that the manga row exists, persist the URL + linkage so future
       // runs (and the scheduler, when it lands) can find this series. For
       // mode='existing' the URL was already recorded by the route handler;
@@ -369,10 +371,15 @@ async function runJob(job) {
       console.warn(`[Downloader] Post-download rescan failed for ${target.folder}: ${err.message}`);
     }
 
+    // `AND status = 'running'` so a user cancel that landed during the final
+    // page / rename / rescan window (where the worker no longer re-checks
+    // status) isn't silently overwritten back to 'done'. The fully-downloaded
+    // .cbz stays on disk — it's complete and valid — only the job's status
+    // honours the cancel.
     db.prepare(`
       UPDATE download_jobs
          SET status = 'done', finished_at = unixepoch(), error = NULL
-       WHERE id = ?
+       WHERE id = ? AND status = 'running'
     `).run(job.id);
   } catch (err) {
     const cancelled = err._cancelled || err.name === 'AbortError';

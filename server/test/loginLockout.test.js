@@ -53,6 +53,30 @@ assert.equal(lock.status(deviceReq).failed_attempts, 0, 'counter reset');
 // Device key takes precedence over IP for a paired client.
 assert.equal(lock.keyFor({ auth: { kind: 'client', clientId: 9 }, ip: '1.1.1.1' }), 'client:9', 'device key precedence');
 
+// ── Lockout decay: an expired 24 h window restores the full allowance ───────
+// Regression guard for the bug where failed_attempts kept climbing past `max`
+// forever, so the first failure after a lockout expired re-locked instantly.
+const decayReq = { auth: { kind: 'client', clientId: 2 }, ip: '203.0.113.7' };
+const decayKey = lock.keyFor(decayReq);
+for (let i = 0; i < 5; i++) lock.recordFailure(decayReq);
+assert.equal(lock.status(decayReq).locked, true, 'decay device locked after 5 strikes');
+
+// Backdate the row so both the lockout AND the last failure are > 24 h old.
+const longAgo = Math.floor(Date.now() / 1000) - (25 * 60 * 60);
+getDb().prepare(
+  'UPDATE login_lockouts SET locked_until = ?, updated_at = ? WHERE lockout_key = ?'
+).run(longAgo, longAgo, decayKey);
+
+const decayedStatus = lock.status(decayReq);
+assert.equal(decayedStatus.locked, false, 'expired lockout no longer locked');
+assert.equal(decayedStatus.failed_attempts, 0, 'expired lockout counter decays to 0');
+
+// The next failure starts a fresh count (1 of 5) instead of re-locking.
+const afterDecay = lock.recordFailure(decayReq);
+assert.equal(afterDecay.locked, false, 'single failure after expiry does NOT re-lock');
+assert.equal(afterDecay.attempts, 1, 'counter restarts at 1 after the window elapses');
+assert.equal(afterDecay.attempts_remaining, 4, 'full allowance minus one restored');
+
 getDb().close();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('loginLockout.test.js: ALL PASSED');

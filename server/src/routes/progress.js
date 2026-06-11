@@ -30,6 +30,17 @@ router.put('/progress/:mangaId', asyncWrapper(async (req, res) => {
   const mangaId = parseInt(req.params.mangaId, 10);
   const { chapterId, page = 0, markChapterComplete = false } = req.body;
 
+  // A chapterId that isn't part of this manga (deleted since the client loaded,
+  // or a cross-manga id) must not be stored as current_chapter_id or pushed
+  // into completed_chapters. Validating here also turns a would-be foreign-key
+  // 500 (bogus current_chapter_id) into a clean 404. Offline replays of a
+  // since-deleted chapter get this 404 and are dropped by the outbox (see
+  // outboxSync.js) instead of poison-pilling the queue.
+  if (chapterId) {
+    const owns = db.prepare('SELECT 1 FROM chapters WHERE id = ? AND manga_id = ?').pluck().get(chapterId, mangaId);
+    if (!owns) return res.status(404).json({ error: 'Chapter not found for this manga' });
+  }
+
   const existing = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   let completedChapters = safeJsonParse(existing?.completed_chapters, []);
 
@@ -93,6 +104,13 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
   const mangaId   = parseInt(req.params.mangaId,   10);
   const chapterId = parseInt(req.params.chapterId,  10);
   const { completed } = req.body;
+
+  // Reject a chapter that doesn't belong to this manga (deleted since the
+  // client loaded, or a cross-manga id) so a stale toggle can't push a dead id
+  // into completed_chapters. Offline replays for a since-deleted chapter get
+  // this 404 and are dropped by the outbox rather than retried forever.
+  const owns = db.prepare('SELECT 1 FROM chapters WHERE id = ? AND manga_id = ?').pluck().get(chapterId, mangaId);
+  if (!owns) return res.status(404).json({ error: 'Chapter not found for this manga' });
 
   const existing         = db.prepare('SELECT * FROM progress WHERE user_id = ? AND manga_id = ?').get(userId, mangaId);
   let completedChapters  = safeJsonParse(existing?.completed_chapters, []);

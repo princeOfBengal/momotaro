@@ -377,9 +377,19 @@ function computeChapterStats(type, chapterPath, pages) {
  * function. The bulk `scanLibrary` path sets this so it can run one grouped
  * rollup across every manga in the library in a single statement — see there
  * for rationale.
+ *
+ * `source` is an optional label (e.g. 'watcher', 'download', 'optimize',
+ * 'manual refresh') identifying who triggered this single-folder scan. When
+ * provided, the scan is bookended by log lines so individual manga-folder
+ * rescans are as visible in the logs as full-library scans. The bulk
+ * `scanLibrary` path leaves it unset so it doesn't emit one line per manga.
  */
-async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { skipRollup = false } = {}) {
+async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { skipRollup = false, source = null } = {}) {
   const db = getDb();
+
+  if (source) {
+    console.log(`[Scanner] Scanning manga folder "${folderName}" (${source})`);
+  }
 
   // `cover_image` and `cover_user_set` are both needed by the thumbnail
   // regeneration guard at the bottom of this function. Previously this
@@ -448,6 +458,9 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
   } catch {
     const mangaRecord = db.prepare('SELECT id, cover_image FROM manga WHERE id = ?').get(mangaId);
     if (mangaRecord) removeManga(db, mangaRecord);
+    if (source) {
+      console.log(`[Scanner] Folder "${folderName}" unreadable — removed (${source}).`);
+    }
     return;
   }
 
@@ -645,6 +658,10 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
         console.warn(`[Scanner] post-generate cover reinforce failed for manga ${mangaId}: ${err.message}`);
       }
     }
+  }
+
+  if (source) {
+    console.log(`[Scanner] Done scanning "${folderName}": ${chapterEntries.length} chapter(s) (${source}).`);
   }
 }
 

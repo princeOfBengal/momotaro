@@ -110,15 +110,15 @@ and must be kept in sync with the prefs read in
 | `home_discover_min_score` | `0` | number 0–10 |
 | `home_discover_excluded_genres` | `[]` | string[] |
 | `home_favorite_genres_mode` | `"auto"` | `"auto"` \| `"manual"` |
-| `home_favorite_genres_manual` | `[]` | string[] (max 4) |
-| `home_discover_min_match_count` | `1` | number 1–4 |
+| `home_favorite_genres_manual` | `[]` | string[] (max 6) |
+| `home_discover_min_match_count` | `1` | number 1–6 |
 | `home_discover_library_ids` | `[]` (empty = all) | number[] |
 | `home_discover_skip_bookmarked` | `false` | boolean |
 | `home_discover_pool_size` | `30` | number |
 | `home_discover_visible_count` | `15` | number |
 | `home_ribbon_order` | see [frontend.md § Homepage Settings](./frontend.md#settings-srcpagessettingsjsx) | `{ id, visible }[]` |
 | `home_resume_hero_enabled` | `true` | boolean |
-| `home_genre_ribbon_count` | `4` | number 1–4 |
+| `home_genre_ribbon_count` | `4` | number 1–8 |
 | `home_recent_window_hours` | `0` (no window) | number |
 
 **Per-device transient keys that stay in `localStorage`** (they
@@ -1035,7 +1035,7 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 **Per-ribbon semantics:**
 
 - **`continue_reading`** — rows from `progress` sorted `last_read_at DESC`, joined to manga + current chapter. `total_chapters` is the count of chapter rows for the manga; the client uses `completed_count / total_chapters` to draw the progress bar. Filtered to visible libraries.
-- **`discover_candidates`** — top favorite genres are computed exactly as in `/api/stats` (reading-history weighted, visible libraries only) and truncated to 4. Every manga in a visible library that has **no progress row** (or an empty `completed_chapters`) is scored by how many distinct favorite genres it matches; the top N are returned in `(match_count DESC, score DESC NULLS LAST, id ASC)` order. The client then picks a stable seeded-random slice for the Discover ribbon (see *Discover refresh cadence* below). The same pool feeds the Discover ribbon's **Surprise me** button, which navigates to a randomly chosen entry's detail page.
+- **`discover_candidates`** — top favorite genres are computed by the **same shared helper as `/api/stats`** (reading-history weighted with a **volume counting as 4 chapters**, visible libraries only) and truncated to 4, so Discover and the Statistics → Favorite Genres list always rank genres identically. Manual-mode favorite genres (a client-supplied `favorite_genres` override) bypass this derivation entirely. Every manga in a visible library that has **no progress row** (or an empty `completed_chapters`) is scored by how many distinct favorite genres it matches; the top N are returned in `(match_count DESC, score DESC NULLS LAST, id ASC)` order. The client then picks a stable seeded-random slice for the Discover ribbon (see *Discover refresh cadence* below). The same pool feeds the Discover ribbon's **Surprise me** button, which navigates to a randomly chosen entry's detail page.
 - **`recently_added`** — newest manga rows by `created_at DESC, id DESC`, scoped to visible libraries. Surfaces titles produced by the most recent scan without forcing a Library re-sort.
 - **`art_gallery`** — `art_gallery` rows joined to `manga` + `chapters` + `pages`, newest first, visible libraries only. The pre-built `page_image_url` spares the client from hand-composing it.
 - **`favorite_genres_ribbons`** — up to 4 entries (one per top favorite genre). Each entry's `manga` list is a **candidate pool**: every manga in a visible library tagged with that genre whose AniList/MAL score is non-NULL and `>= min_score`, ordered by `id ASC` (deterministic). Randomisation happens client-side — the client shuffles the pool with `discoverSeed XOR hash(genre)` and slices to ~15 visible, so each genre rotates independently from the others while sharing the same Discover refresh cadence. Genres with zero matching manga at the current threshold are omitted, so the returned array may be shorter than 4. Raise / lower `min_score` (default 7, exposed in Settings → Homepage Settings) to broaden or narrow the pool.
@@ -1109,7 +1109,7 @@ The combined effect is that under typical usage the Browse By Genre page costs *
 **`top_genres` vs `favorite_genres`:**
 
 - `top_genres` counts how many **series** are tagged with each genre (the library's genre inventory).
-- `favorite_genres` ranks genres by **reading history**. Every chapter the user has read contributes one point to each of that manga's genres, so a reader who has finished 40 chapters of a 3-genre series adds 40 to each of those three genres. Only manga with at least one completed chapter contribute. Titles with no metadata (and therefore no genres) are naturally excluded. Top 10 returned; ties break on genre name ascending.
+- `favorite_genres` ranks genres by **reading history**, weighting volumes more heavily than chapters. Every read item contributes to each of that manga's genres: a file/folder labeled as a **volume** counts as **4 chapters** (a volume typically holds at least four chapters), while one labeled as a **chapter**, one labeled as **both** volume and chapter, or one with only a bare number counts as **1**. Volume-vs-chapter is read from the scanned `chapters.volume` / `chapters.number` labels. So a reader who has finished 40 chapters of a 3-genre series adds 40 to each of those three genres; one drama volume adds 4 to Drama. Only manga with at least one completed chapter contribute. Titles with no metadata (and therefore no genres) are naturally excluded. Top 10 returned; ties break on genre name ascending. The same volume-weighted computation drives `/api/home`'s Discover and per-genre ribbons, so both views agree.
 
 Genre aggregation and read-time estimation are computed entirely in SQL against the normalised `manga_genres` table, not by walking JSON blobs. `total_size_bytes` is a single `SUM(manga.bytes_on_disk)` over the cached per-manga column written by the scanner; it no longer walks the filesystem. See [scanner.md](./scanner.md#cached-disk-usage-columns).
 

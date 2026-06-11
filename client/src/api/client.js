@@ -623,12 +623,12 @@ const _rawApi = {
   //   minScore                    — `min_score` (per-genre ribbons rating cap)
   //   discoverMinScore            — quality threshold for Discover (0 = off)
   //   discoverExcludedGenres      — string[] of genres to drop from Discover
-  //   discoverMinMatchCount       — 1..4 (require ≥N favorite-genre matches)
+  //   discoverMinMatchCount       — 1..6 (require ≥N favorite-genre matches)
   //   discoverLibraryIds          — number[] (empty = all visible libraries)
   //   discoverSkipBookmarked      — boolean (exclude bookmarked manga)
   //   discoverPoolSize            — caps the candidate pool (clamped server-side)
-  //   favoriteGenres              — string[] (manual override; max 4)
-  //   genreRibbonCount            — 1..4 (number of per-genre ribbons)
+  //   favoriteGenres              — string[] (manual override; max 6)
+  //   genreRibbonCount            — 1..8 (number of per-genre ribbons)
   //   recentWindowHours           — 0 = unbounded; else "added in last N hours"
   getHome: ({
     minScore,

@@ -54,8 +54,8 @@ const DISCOVER_POOL_OPTIONS      = [15, 30, 60];
 const DEFAULT_DISCOVER_POOL      = 30;
 const DISCOVER_VISIBLE_OPTIONS   = [10, 15, 20, 30];
 const DEFAULT_DISCOVER_VISIBLE   = 15;
-const MATCH_COUNT_OPTIONS        = [1, 2, 3, 4];
-const GENRE_RIBBON_COUNT_OPTIONS = [1, 2, 3, 4];
+const MATCH_COUNT_OPTIONS        = [1, 2, 3, 4, 5, 6];
+const GENRE_RIBBON_COUNT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 const RECENT_WINDOW_OPTIONS = [
   { value: 24,  label: 'Last 24 hours' },
@@ -131,6 +131,27 @@ export default function HomepageSection() {
     minMatchCount, discoverLibIds, skipBookmarked, poolSize, visibleCount,
     discoverInterval,
   ]);
+
+  // "Minimum matching genres" can never exceed the number of favourite genres
+  // actually in effect — a higher value makes the HAVING-clause filter
+  // unsatisfiable and Discover comes back empty. In Manual mode with an
+  // explicit selection, that ceiling is the number of genres picked. Otherwise
+  // the favourites are auto-derived server-side (up to 8), so any value in the
+  // full range is potentially satisfiable and we keep all the options.
+  const effectiveFavCount =
+    favGenresMode === 'manual' && favGenresManual.length > 0
+      ? favGenresManual.length
+      : MATCH_COUNT_OPTIONS[MATCH_COUNT_OPTIONS.length - 1];
+  const matchCountOptions = MATCH_COUNT_OPTIONS.filter(n => n <= effectiveFavCount);
+
+  // If the favourite-genre selection shrinks below the current match count,
+  // pull the stored value down so it stays satisfiable.
+  useEffect(() => {
+    if (minMatchCount > effectiveFavCount) setMinMatchCount(effectiveFavCount);
+    // setMinMatchCount is intentionally omitted — the useUserPref setter is
+    // recreated each render and including it would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveFavCount, minMatchCount]);
 
   function handleResetDiscoverNow() {
     try {
@@ -349,7 +370,7 @@ export default function HomepageSection() {
             <label className="setting-group-label">Favourite genres</label>
             <p className="rs-setting-hint">
               <em>Automatic</em> derives your favourites from the genres you've read most.
-              <em> Manual</em> lets you pick up to four genres yourself — useful if your
+              <em> Manual</em> lets you pick up to six genres yourself — useful if your
               read history doesn't yet reflect your taste, or if you want to explore a
               different lane.
             </p>
@@ -369,9 +390,9 @@ export default function HomepageSection() {
               <GenreChipPicker
                 value={favGenresManual}
                 onChange={setFavGenresManual}
-                max={4}
+                max={6}
                 mode="select"
-                placeholder="Pick 1–4 genres."
+                placeholder="Pick 1–6 genres."
               />
             )}
           </div>
@@ -385,7 +406,7 @@ export default function HomepageSection() {
               Higher values narrow Discover to titles closest to your taste.
             </p>
             <div className="setting-options">
-              {MATCH_COUNT_OPTIONS.map(n => (
+              {matchCountOptions.map(n => (
                 <button
                   key={n}
                   className={`setting-btn${minMatchCount === n ? ' active' : ''}`}
@@ -393,6 +414,11 @@ export default function HomepageSection() {
                 >{n}</button>
               ))}
             </div>
+            {favGenresMode === 'manual' && favGenresManual.length > 0 && (
+              <p className="rs-setting-hint" style={{ marginTop: 8 }}>
+                Capped at {favGenresManual.length} — the number of favourite genres you've picked.
+              </p>
+            )}
           </div>
         </div>
 

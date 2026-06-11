@@ -930,7 +930,7 @@ router.post('/manga/:id/scan', asyncWrapper(async (req, res) => {
 
   const { scanMangaDirectory } = require('../scanner/libraryScanner');
   try {
-    await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id);
+    await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id, { source: 'manual refresh' });
   } catch (err) {
     return res.status(500).json({ error: 'Scan failed: ' + err.message });
   }
@@ -1062,6 +1062,65 @@ router.get('/genres', asyncWrapper(async (req, res) => {
   res.json({ data: genresCache.getPayload() });
 }));
 
+// ── Favorite genres (shared) ───────────────────────────────────────────────────
+//
+// Ranking of genres weighted by reading history, used by BOTH `/api/stats`
+// (Statistics → Favorite Genres) and `/api/home` (which feeds the ranking into
+// Discover and the per-genre ribbons). Keeping it in one place guarantees the
+// two views stay consistent.
+//
+// Weighting: each completed chapter contributes to every genre tagged on its
+// manga. A file/folder labeled as a *volume* counts as 4 chapters (a volume
+// typically holds at least four chapters); a file labeled as a *chapter*, one
+// labeled as *both* volume and chapter, or one with only a bare number counts
+// as 1. Volume-vs-chapter is read from `chapters.volume` / `chapters.number`,
+// both populated at scan time by `parseChapterInfo`.
+//
+// Each completed chapter ID is expanded via `json_each` and joined to
+// `chapters`, mirroring the estimated-read-time query — so chapter IDs that no
+// longer exist (chapter deleted since it was marked read) drop out, since an
+// absent chapter can't be classified as a volume or chapter. Manga with no
+// completed chapters yield no rows and so never contribute.
+//
+// `libJoin` / `libFilter` / `libParams` are the same library-scoping fragments
+// the stats route already builds; pass the all-visible-libraries variant for
+// Home. Returns rows `[{ genre, chapters_read }]`, ordered by weight then name.
+function computeFavoriteGenres(db, { userId, libJoin, libFilter, libParams, limit }) {
+  return db.prepare(`
+    SELECT g.genre as genre,
+           SUM(CASE WHEN c.volume IS NOT NULL AND c.number IS NULL THEN 4 ELSE 1 END) as chapters_read
+    FROM progress p, json_each(p.completed_chapters) je
+    JOIN chapters c     ON c.id = CAST(je.value AS INTEGER)
+    JOIN manga m        ON m.id = p.manga_id
+    JOIN manga_genres g ON g.manga_id = p.manga_id
+    ${libJoin}
+    WHERE p.user_id = ?
+      AND ${libFilter}
+    GROUP BY g.genre COLLATE NOCASE
+    ORDER BY chapters_read DESC, g.genre ASC
+    LIMIT ${Number(limit)}
+  `).all(userId, ...libParams);
+}
+
+// COUNT of a progress row's completed chapters that still exist on disk.
+// Expands the `completed_chapters` JSON array and inner-joins `chapters`, so
+// IDs of chapters deleted since they were marked read drop out — the same basis
+// used by `computeFavoriteGenres` and the estimated-read-time aggregate. Keeping
+// every "chapters read" count on this basis stops the views from disagreeing,
+// and prevents a manga's completed_count from ever exceeding its live chapter
+// total. `pAlias` is the progress-row alias in scope at the call site. Returns a
+// scalar-subquery SQL fragment with no bound params.
+//
+// Note this is deliberately NOT volume-weighted: `computeFavoriteGenres` counts
+// a volume as 4 chapters for genre ranking, but raw "chapters read" totals
+// (Popular Manga, Home progress) report actual chapter counts.
+function existingCompletedCountSql(pAlias) {
+  return `(SELECT COUNT(*)
+             FROM json_each(${pAlias}.completed_chapters) je
+             JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
+            WHERE c.manga_id = ${pAlias}.manga_id)`;
+}
+
 // ── Statistics ───────────────────────────────────────────────────────────────
 
 // Keyed by library_id (null key = all libraries). Cleared every 5 minutes per
@@ -1157,26 +1216,12 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     LIMIT 10
   `).all(...libParams).map(r => ({ genre: r.genre, count: r.count }));
 
-  // Favorite Genres — ranking weighted by reading history. Each completed
-  // chapter contributes one point to every genre tagged on its manga, so a
-  // user who has read 40 chapters of a 3-genre manga adds 40 to each of
-  // those three genres. Only manga with at least one completed chapter
-  // contribute. Titles with no AniList/MAL/local metadata have no genres
-  // and are naturally excluded.
-  const favorite_genres = db.prepare(`
-    SELECT g.genre as genre,
-           SUM(json_array_length(p.completed_chapters)) as chapters_read
-    FROM progress p
-    JOIN manga m        ON m.id = p.manga_id
-    JOIN manga_genres g ON g.manga_id = p.manga_id
-    ${libJoin}
-    WHERE p.user_id = ?
-      AND json_array_length(p.completed_chapters) > 0
-      AND ${libFilter}
-    GROUP BY g.genre COLLATE NOCASE
-    ORDER BY chapters_read DESC, g.genre ASC
-    LIMIT 10
-  `).all(userId, ...libParams).map(r => ({
+  // Favorite Genres — ranking weighted by reading history, where a volume
+  // counts as 4 chapters. Shared with /api/home so both views agree. See
+  // `computeFavoriteGenres` for the weighting and the volume/chapter rule.
+  const favorite_genres = computeFavoriteGenres(db, {
+    userId, libJoin, libFilter, libParams, limit: 10,
+  }).map(r => ({
     genre: r.genre,
     chapters_read: r.chapters_read,
   }));
@@ -1195,10 +1240,12 @@ router.get('/stats', asyncWrapper(async (req, res) => {
       AND ${libFilter}
   `).get(userId, ...libParams);
 
-  // Popular manga — sorted by completed chapter count in SQL
+  // Popular manga — sorted by completed chapter count in SQL. Counts only
+  // chapters that still exist (see existingCompletedCountSql) so the number
+  // agrees with Favorite Genres / read-time and can't exceed the live total.
   const top_manga = db.prepare(`
     SELECT p.manga_id as id, m.title, m.cover_image,
-           json_array_length(p.completed_chapters) as chapters_read
+           ${existingCompletedCountSql('p')} as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
     ${libJoin}
@@ -1252,10 +1299,11 @@ router.get('/stats', asyncWrapper(async (req, res) => {
 // there to keep per-request cost ~0, not because any single query is slow.
 
 const HOME_TTL_MS = 30 * 1000;
-// Cache keyed by `min_score` since the per-genre ribbons are filtered by it
-// and a single global cache would otherwise serve one device's threshold to
-// another. 21 possible quantised score values × 30 s TTL keeps memory tiny.
-const _homeCache = new Map(); // key (minScore string) -> { payload, ts }
+// Cache keyed by `u:<userId>|<sha1(all home params)>` (built in the /home
+// handler): per-user because continue-reading / favourites / discover are
+// user-scoped, and per-param-hash so two clients with different Discover
+// filters never collide. The short TTL keeps memory tiny.
+const _homeCache = new Map(); // key -> { payload, ts }
 
 // Caller-tunable limits, bounded to protect the server from pathological
 // clients. The client only ever sends defaults right now; these exist so the
@@ -1348,11 +1396,11 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // param still gets today's behaviour.
   const discoverMinScore       = clampScore(req.query.discover_min_score, 0);
   const discoverExcludedGenres = parseCsvLower(req.query.discover_excluded_genres);
-  const discoverMinMatchCount  = clampInt(req.query.discover_min_match_count, 1, 1, 4);
+  const discoverMinMatchCount  = clampInt(req.query.discover_min_match_count, 1, 1, 6);
   const discoverLibraryIds     = parseCsvInt(req.query.discover_library_ids);
   const discoverSkipBookmarked = req.query.discover_skip_bookmarked === '1';
   const favoriteGenresOverride = parseCsv(req.query.favorite_genres);
-  const genreRibbonCount       = clampInt(req.query.genre_ribbon_count, 4, 1, 4);
+  const genreRibbonCount       = clampInt(req.query.genre_ribbon_count, 4, 1, 8);
   const recentWindowHours      = clampInt(req.query.recent_window_hours, 0, 0, 24 * 365);
 
   const db = getDb();
@@ -1388,7 +1436,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
            c.number AS cur_number, c.volume AS cur_volume, c.folder_name AS cur_folder,
            c.page_count AS cur_page_count,
            (SELECT COUNT(*) FROM chapters ch WHERE ch.manga_id = m.id) AS total_chapters,
-           json_array_length(p.completed_chapters) AS completed_count
+           ${existingCompletedCountSql('p')} AS completed_count
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
     LEFT JOIN libraries l ON l.id = m.library_id
@@ -1421,32 +1469,41 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // ── Favorite genres (scoped to visible libraries) ─────────────────────────
   // When the client passes a `favorite_genres` override (the user selected
   // Manual mode in Settings), skip the chapters-read derivation entirely and
-  // use the supplied list. Capped at 4 to match the auto-derivation limit.
+  // use the supplied list. Capped at 6 to match the manual picker limit.
+  //
+  // Otherwise derive the ranking from reading history via the shared
+  // `computeFavoriteGenres` helper — the same volume-weighted computation that
+  // powers Statistics → Favorite Genres — so Discover and the genre ribbons
+  // below stay consistent with the Statistics view. Scoped to all visible
+  // libraries (Home has no per-library switch); kept at 8 to bound how many
+  // genres feed Discover and the ribbons.
   let favoriteGenres;
   if (favoriteGenresOverride.length > 0) {
-    favoriteGenres = favoriteGenresOverride.slice(0, 4);
+    favoriteGenres = favoriteGenresOverride.slice(0, 6);
   } else {
-    const favoriteGenreRows = db.prepare(`
-      SELECT g.genre AS genre,
-             SUM(json_array_length(p.completed_chapters)) AS chapters_read
-      FROM progress p
-      JOIN manga m        ON m.id = p.manga_id
-      JOIN manga_genres g ON g.manga_id = p.manga_id
-      LEFT JOIN libraries l ON l.id = m.library_id
-      WHERE p.user_id = ?
-        AND json_array_length(p.completed_chapters) > 0
-        AND (m.library_id IS NULL OR l.show_in_all = 1)
-      GROUP BY g.genre COLLATE NOCASE
-      ORDER BY chapters_read DESC, g.genre ASC
-      LIMIT 4
-    `).all(userId);
-    favoriteGenres = favoriteGenreRows.map(r => r.genre);
+    favoriteGenres = computeFavoriteGenres(db, {
+      userId,
+      libJoin:   'LEFT JOIN libraries l ON l.id = m.library_id',
+      libFilter: '(m.library_id IS NULL OR l.show_in_all = 1)',
+      libParams: [],
+      limit:     8,
+    }).map(r => r.genre);
   }
+
+  // A min-match requirement higher than the number of favourite genres in play
+  // is unsatisfiable — match_count can never exceed favoriteGenres.length — and
+  // would silently empty Discover. Clamp to the available count so the filter
+  // degrades to "match as many favourites as you have" rather than returning
+  // nothing. The Settings UI caps the control in Manual mode, but this also
+  // covers Home forwarding a stale or cross-device pref, and any direct API
+  // caller. When favoriteGenres is empty the Discover block below is skipped
+  // entirely, so this is only consulted with at least one genre in play.
+  const effectiveMinMatchCount = Math.min(discoverMinMatchCount, favoriteGenres.length);
 
   // ── Discover New Series ──────────────────────────────────────────────────
   // Unread manga (no progress row, or a progress row with zero completed
   // chapters) tagged with at least one favorite genre. Ranked by match count
-  // so a manga matching 3 of the top 4 genres ranks above one matching 1.
+  // so a manga matching 3 of the top genres ranks above one matching 1.
   // Unrated AniList/MAL score sinks to the bottom within each match-count
   // tier so the user sees scored picks first.
   //
@@ -1493,9 +1550,9 @@ router.get('/home', asyncWrapper(async (req, res) => {
         )`;
       extraParams.push(userId);
     }
-    if (discoverMinMatchCount > 1) {
+    if (effectiveMinMatchCount > 1) {
       havingClause = ' HAVING match_count >= ?';
-      extraParams.push(discoverMinMatchCount);
+      extraParams.push(effectiveMinMatchCount);
     }
 
     discover_candidates = db.prepare(`
@@ -1560,7 +1617,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     created_at:      r.created_at,
   }));
 
-  // ── Top Manga per Favorite Genre (up to 4 ribbons) ───────────────────────
+  // ── Top Manga per Favorite Genre (up to 8 ribbons) ───────────────────────
   // Returns a *candidate pool* per genre. The client shuffles each pool with
   // the same seed that drives the Discover ribbon (XORed with a per-genre
   // hash so each ribbon rotates independently) and slices to the visible

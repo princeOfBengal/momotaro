@@ -53,6 +53,7 @@ async function doFlush() {
 
   let drained = 0;
   let failed  = 0;
+  let dropped = 0;
 
   for (const row of rows) {
     try {
@@ -64,10 +65,23 @@ async function doFlush() {
       }
       await clearOutboxEntry(row);
       drained++;
-    } catch {
-      failed++;
-      // Leave the row in place — the next reconnect will retry it.
+    } catch (err) {
+      // A 404 is the one status that means this replay can NEVER succeed: the
+      // chapter (or its manga) was deleted server-side after the write was
+      // queued offline, so the progress route now rejects it. Drop the row —
+      // leaving it would poison-pill the queue (retried on every reconnect,
+      // forever). Everything else is treated as transient and retried, on
+      // purpose: 401/403 (token needs refresh), 429/408 (throttled/timeout),
+      // 5xx, and network errors are all recoverable, and dropping an unsynced
+      // progress write on one of those would lose the user's reading position.
+      // `err.status` is attached by rawApi (undefined for network failures).
+      if (err && err.status === 404) {
+        try { await clearOutboxEntry(row); } catch { /* ignore */ }
+        dropped++;
+      } else {
+        failed++;
+      }
     }
   }
-  return { drained, failed };
+  return { drained, failed, dropped };
 }

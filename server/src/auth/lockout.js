@@ -56,7 +56,7 @@ function createLockoutStore({ table, keyColumn, settingKey }) {
     if (!key) return emptyStatus();
     const db = getDb();
     const row = db.prepare(
-      `SELECT failed_attempts, locked_until FROM ${table} WHERE ${keyColumn} = ?`
+      `SELECT failed_attempts, locked_until, updated_at FROM ${table} WHERE ${keyColumn} = ?`
     ).get(key);
     if (!row) return emptyStatus();
     const now = nowSec();
@@ -68,11 +68,16 @@ function createLockoutStore({ table, keyColumn, settingKey }) {
         failed_attempts: row.failed_attempts,
       };
     }
+    // Not currently locked. If the most recent failure is older than one
+    // lockout window, the counter has decayed (see recordFailure) — report a
+    // fresh allowance so the UI doesn't show a phantom "0 remaining" after the
+    // 24 h penalty has been served.
+    const decayed = (now - row.updated_at) >= LOCKOUT_DURATION_SEC;
     return {
       locked: false,
       locked_until: 0,
       seconds_remaining: 0,
-      failed_attempts: row.failed_attempts,
+      failed_attempts: decayed ? 0 : row.failed_attempts,
     };
   }
 
@@ -89,7 +94,7 @@ function createLockoutStore({ table, keyColumn, settingKey }) {
     }
 
     const row = db.prepare(
-      `SELECT failed_attempts, locked_until FROM ${table} WHERE ${keyColumn} = ?`
+      `SELECT failed_attempts, locked_until, updated_at FROM ${table} WHERE ${keyColumn} = ?`
     ).get(key);
 
     // Already locked — don't increment further; callers should check status()
@@ -102,7 +107,18 @@ function createLockoutStore({ table, keyColumn, settingKey }) {
       };
     }
 
-    const attempts = (row?.failed_attempts || 0) + 1;
+    // Decay: if the most recent failure is older than one lockout window, the
+    // counter starts fresh. A single rule serves two cases:
+    //   - a lockout whose 24 h penalty has elapsed — the device/IP regains the
+    //     full allowance instead of being re-locked on the next single mistake
+    //     (the previous bug: failed_attempts climbed from `max` forever), and
+    //   - a stale partial counter that never reached the cap (no perpetual
+    //     accumulation of failures spread across days).
+    // A sustained attacker keeps `updated_at` fresh, so brute-force protection
+    // is intact: they still get only `max` attempts per lockout window.
+    const expired = row && (now - row.updated_at) >= LOCKOUT_DURATION_SEC;
+    const priorAttempts = expired ? 0 : (row?.failed_attempts || 0);
+    const attempts = priorAttempts + 1;
     const lockedUntil = attempts >= max ? now + LOCKOUT_DURATION_SEC : 0;
 
     db.prepare(`

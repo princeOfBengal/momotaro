@@ -401,7 +401,8 @@ export default function HomepageSection() {
             <label className="setting-group-label">Library scope</label>
             <p className="rs-setting-hint">
               Restrict Discover to specific libraries. Leave every box checked to draw
-              from every library visible in <em>All Libraries</em>.
+              from every library visible in <em>All Libraries</em>. At least one library
+              stays selected — re-check all to use every library again.
             </p>
             {libraries === null ? (
               <div className="loading-center"><div className="spinner" /></div>
@@ -411,12 +412,19 @@ export default function HomepageSection() {
               <div className="hs-lib-checklist">
                 {libraries.map(lib => {
                   const checked = discoverLibIds.length === 0 || discoverLibIds.includes(lib.id);
+                  // The last remaining checked box can't be unchecked: an empty
+                  // array means "all" server-side, so dropping the final
+                  // library would silently re-check everything rather than
+                  // scope to none. To use every library again, re-check all.
+                  const isLastChecked = checked && discoverLibIds.length === 1 && discoverLibIds.includes(lib.id);
                   return (
                     <label key={lib.id} className="hs-lib-check">
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={isLastChecked}
                         onChange={() => {
+                          if (isLastChecked) return; // guard: keep at least one
                           // Treat an empty selection as "all" (server semantics
                           // match). Switch from implicit-all to explicit list
                           // on first unchecking.

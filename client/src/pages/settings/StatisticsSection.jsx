@@ -72,11 +72,16 @@ export default function StatisticsSection() {
   }, []);
 
   useEffect(() => {
+    // Guard against out-of-order responses: rapidly switching library pills
+    // fires overlapping getStats calls, and a slow earlier one could otherwise
+    // land after a faster later one and show the wrong scope's numbers.
+    let cancelled = false;
     setLoading(true);
     setError(false);
     api.getStats(selectedLib)
-      .then(data => { setStats(data); setLoading(false); })
-      .catch(() => { setError(true); setLoading(false); });
+      .then(data => { if (!cancelled) { setStats(data); setLoading(false); } })
+      .catch(() => { if (!cancelled) { setError(true); setLoading(false); } });
+    return () => { cancelled = true; };
   }, [selectedLib]);
 
   // Show the switcher only when more than one library exists — with a single
@@ -143,7 +148,7 @@ export default function StatisticsSection() {
                 <span className="stat-list-title">Popular Series</span>
                 <span className="stat-list-col-label">Read</span>
               </div>
-              {stats.top_manga.length === 0 ? (
+              {(stats.top_manga?.length ?? 0) === 0 ? (
                 <p className="stat-list-empty">No reading history yet.</p>
               ) : stats.top_manga.map((m, i) => (
                 <div key={m.id} className="stat-list-item">
@@ -166,7 +171,7 @@ export default function StatisticsSection() {
                 <span className="stat-list-title">Popular Genres</span>
                 <span className="stat-list-col-label">Series</span>
               </div>
-              {stats.top_genres.length === 0 ? (
+              {(stats.top_genres?.length ?? 0) === 0 ? (
                 <p className="stat-list-empty">No genre data found.</p>
               ) : stats.top_genres.map((g, i) => (
                 <div key={g.genre} className="stat-list-item">

@@ -9,6 +9,7 @@ import {
   PAGE_TRANSITION_OPTIONS,
   BG_COLOR_OPTIONS,
 } from '../constants/readerOptions';
+import '../styles/settingControls.css';
 import './ReaderControls.css';
 
 // In-reader toggle: same primitive as Settings, but it must swallow the click

@@ -139,6 +139,19 @@ img {
   margin-bottom: 8px;
 }
 
+/* Inline form-error pill. Shared by the Libraries page/section and the Settings
+ * admin forms (AdminAuthForms / Client Management / Port Forwarding); lives here
+ * so it resolves on every route regardless of which page-level stylesheet the
+ * caller pulled in. Keeps its legacy `lp-` name to avoid churning the markup. */
+.lp-form-error {
+  font-size: 12px;
+  color: #f44336;
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid rgba(244, 67, 54, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
 /* Navbar */
 .navbar {
   display: flex;

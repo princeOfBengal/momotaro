@@ -409,7 +409,7 @@ export default function SchedulingSection() {
       {schedules && schedules.length > 0 && (
         <>
           <p className="rs-setting-hint" style={{ marginBottom: 10 }}>
-            {schedules.length} scheduled {schedules.length === 1 ? 'manga' : 'manga'}.
+            {schedules.length} scheduled manga.
           </p>
           {schedules.map(s => (
             <ScheduleRow key={s.id} schedule={s} onChange={load} />

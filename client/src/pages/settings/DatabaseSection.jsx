@@ -4,7 +4,6 @@ import { appAlert, appConfirm } from '../../dialog/dialogService';
 import { useAdminTaskButton } from '../../hooks/useAdminTaskButton';
 import { formatNextRun } from '../../utils/format';
 import '../Settings.css';
-import '../../components/ReaderControls.css';
 
 const GB = 1024 * 1024 * 1024;
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];

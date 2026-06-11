@@ -14,8 +14,8 @@ export default function AccountSection() {
   const [history, setHistory] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  // Change-password form state. `pwMsg` is `{ type: 'ok' | 'err', text }`
-  // — same shape the Settings page uses elsewhere for inline status lines.
+  // Change-password form state. `pwMsg` is `{ type: 'success' | 'error', text }`
+  // — same vocabulary the Settings page uses elsewhere for inline status lines.
   const [currentPw, setCurrentPw] = useState('');
   const [newPw, setNewPw]         = useState('');
   const [confirmPw, setConfirmPw] = useState('');
@@ -50,11 +50,11 @@ export default function AccountSection() {
     e.preventDefault();
     setPwMsg(null);
     if (newPw.length < 8) {
-      setPwMsg({ type: 'err', text: 'New password must be at least 8 characters.' });
+      setPwMsg({ type: 'error', text: 'New password must be at least 8 characters.' });
       return;
     }
     if (newPw !== confirmPw) {
-      setPwMsg({ type: 'err', text: 'New passwords do not match.' });
+      setPwMsg({ type: 'error', text: 'New passwords do not match.' });
       return;
     }
     setPwSaving(true);
@@ -64,9 +64,9 @@ export default function AccountSection() {
       // already persisted, so the next request still authenticates.
       await api.changeUserPassword(currentPw, newPw);
       setCurrentPw(''); setNewPw(''); setConfirmPw('');
-      setPwMsg({ type: 'ok', text: 'Password updated. Other devices have been signed out.' });
+      setPwMsg({ type: 'success', text: 'Password updated. Other devices have been signed out.' });
     } catch (err) {
-      setPwMsg({ type: 'err', text: err.message || 'Failed to change password.' });
+      setPwMsg({ type: 'error', text: err.message || 'Failed to change password.' });
     } finally {
       setPwSaving(false);
     }
@@ -161,7 +161,7 @@ export default function AccountSection() {
               {pwMsg && (
                 <p
                   className="settings-hint"
-                  style={{ color: pwMsg.type === 'err' ? 'var(--danger, #c0392b)' : 'var(--text-primary)' }}
+                  style={{ color: pwMsg.type === 'error' ? 'var(--danger, #c0392b)' : 'var(--text-primary)' }}
                 >
                   {pwMsg.text}
                 </p>

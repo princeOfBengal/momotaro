@@ -10,8 +10,9 @@ import './GenreChipPicker.css';
  * Props:
  *   value     — string[] currently selected genres (case-insensitive equality)
  *   onChange  — (next: string[]) => void
- *   max       — optional selection cap. When reached, clicking a new chip
- *               unselects the oldest entry in `value` so the cap holds.
+ *   max       — optional selection cap. When reached, every unselected chip is
+ *               disabled so the cap holds; the user removes a selection (via the
+ *               × on a selected chip) to free a slot.
  *   mode      — 'exclude' | 'select' — purely cosmetic; toggles a CSS hook so
  *               excluded chips look "struck through" vs included chips look
  *               filled.
@@ -56,11 +57,11 @@ export default function GenreChipPicker({
       onChange(value.filter(g => g.toLowerCase() !== lower));
       return;
     }
-    let next = [...value, genre];
-    if (max && next.length > max) {
-      next = next.slice(next.length - max); // drop oldest to keep the cap
-    }
-    onChange(next);
+    // At the cap, unselected chips are disabled (see `disabled` below), so this
+    // only runs with a free slot. Guard anyway so a programmatic caller can't
+    // push past `max`.
+    if (max && value.length >= max) return;
+    onChange([...value, genre]);
   }
 
   if (allGenres === null && !error) {

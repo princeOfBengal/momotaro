@@ -1556,7 +1556,7 @@ function ScheduleEditor({ mangaId, hasUrls }) {
           {running ? 'Checking…' : 'Run check now'}
         </button>
 
-        {savedFlash && <span className="sp-status sp-status-ok">{savedFlash}</span>}
+        {savedFlash && <span className="sp-status sp-status-success">{savedFlash}</span>}
         {saveError && <span className="sp-status sp-status-error">{saveError}</span>}
       </div>
 

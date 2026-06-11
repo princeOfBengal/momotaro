@@ -1,9 +1,9 @@
 import React from 'react';
 
 // Generic on/off switch row used across Settings sections and the in-reader
-// settings panel. The `.setting-row*` and `.toggle-*` classes are defined in
-// both Settings.css and ReaderControls.css, so this primitive only emits the
-// classNames and lets whichever stylesheet is in scope style it.
+// settings panel. The `.setting-row*` and `.toggle-*` classes live in the
+// shared styles/settingControls.css, which both surfaces import (Settings.jsx
+// and ReaderControls.jsx), so this primitive only emits the classNames.
 //
 // `stopPropagation` is opt-in: the reader renders this over a background that
 // toggles the chrome on tap, so the switch must swallow the click there. The

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import ToggleRow from '../../components/ToggleRow';
 import { isAndroid } from '../../api/volumeButtons';
+import { useMountedRef } from '../../hooks/useMountedRef';
 import { useReaderSettings } from '../../hooks/useReaderSettings';
 import {
   READING_MODE_OPTIONS,
@@ -33,11 +34,12 @@ export default function ReadingSection() {
     volumeButtonReverse, setVolumeButtonReverse,
   } = useReaderSettings();
   const [resetHintsMsg, setResetHintsMsg]         = useState(null);
+  const mounted = useMountedRef();
 
   function handleResetHints() {
     try { localStorage.removeItem('reader_hintsSeen'); } catch (_) {}
     setResetHintsMsg('Hint will replay on the next chapter open.');
-    setTimeout(() => setResetHintsMsg(null), 3000);
+    setTimeout(() => { if (mounted.current) setResetHintsMsg(null); }, 3000);
   }
 
   return (

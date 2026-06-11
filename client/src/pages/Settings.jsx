@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import { useConnectivity } from '../context/ConnectivityContext';
 import OfflineLockedPanel from './settings/OfflineLockedPanel';
 import { AdminSetupForm, AdminLoginForm } from './settings/AdminAuthForms';
+import '../styles/settingControls.css';
 import './Settings.css';
 
 // ── Per-section lazy loading ─────────────────────────────────────────────────

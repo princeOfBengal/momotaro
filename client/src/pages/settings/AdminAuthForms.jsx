@@ -4,9 +4,10 @@ import '../Settings.css';
 
 // Shared between ClientManagementSection, PortForwardingSection, and the
 // AdminGuard wrapper. Same UX surface for the three first-run/login flows.
-// Imports Settings.css directly so its `.settings-card` / `.cm-*` /
-// `.lp-form-error` classes resolve even if a future caller doesn't
-// happen to have pulled Settings.css in their own import graph.
+// Imports Settings.css directly so its `.settings-card` / `.cm-*` classes
+// resolve even if a future caller doesn't happen to have pulled Settings.css
+// in their own import graph. `.lp-form-error` lives in the eager
+// styles/global.css, so it's available on every route.
 
 export function AdminSetupForm({ onDone }) {
   const [pw, setPw] = useState('');

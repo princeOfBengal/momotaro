@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../api/client';
+import { useMountedRef } from '../../hooks/useMountedRef';
 import '../Settings.css';
 
 // ── Section: Third Party Sourcing ─────────────────────────────────────────────
@@ -8,6 +9,15 @@ import '../Settings.css';
 // chapters can run concurrently, and how long to sleep between page fetches
 // inside one chapter. Both are saved server-side; the queue hot-reloads.
 
+// Bounds mirror the documented ranges (and the server's own clamp). HTML
+// min/max only constrains the spinner arrows — typed values can still exceed
+// them — so we clamp on save, matching DatabaseSection / PortForwardingSection.
+const CONCURRENCY_MIN = 1;
+const CONCURRENCY_MAX = 8;
+const PAGE_DELAY_MIN  = 0;
+const PAGE_DELAY_MAX  = 60_000;
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
 export default function ThirdPartySourcingSection() {
   const [concurrency, setConcurrency] = useState(1);
   const [pageDelay,   setPageDelay]   = useState(500);
@@ -15,6 +25,7 @@ export default function ThirdPartySourcingSection() {
   const [error,       setError]       = useState(null);
   const [saving,      setSaving]      = useState(false);
   const [loaded,      setLoaded]      = useState(false);
+  const mounted = useMountedRef();
 
   useEffect(() => {
     api.getSettings().then(s => {
@@ -32,13 +43,19 @@ export default function ThirdPartySourcingSection() {
     setSaving(true);
     setError(null);
     setSavedFlash(null);
+    // Clamp to the documented ranges before persisting, and reflect the
+    // clamped values back into the inputs so the user sees what was saved.
+    const safeConcurrency = clamp(concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX);
+    const safePageDelay   = clamp(pageDelay, PAGE_DELAY_MIN, PAGE_DELAY_MAX);
+    setConcurrency(safeConcurrency);
+    setPageDelay(safePageDelay);
     try {
       await api.saveSettings({
-        tps_max_concurrent_chapters: concurrency,
-        tps_page_delay_ms:           pageDelay,
+        tps_max_concurrent_chapters: safeConcurrency,
+        tps_page_delay_ms:           safePageDelay,
       });
       setSavedFlash('Saved.');
-      setTimeout(() => setSavedFlash(null), 1800);
+      setTimeout(() => { if (mounted.current) setSavedFlash(null); }, 1800);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -121,7 +138,7 @@ export default function ThirdPartySourcingSection() {
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
-            {savedFlash && <span className="sp-status sp-status-ok">{savedFlash}</span>}
+            {savedFlash && <span className="sp-status sp-status-success">{savedFlash}</span>}
             {error      && <span className="sp-status sp-status-error">{error}</span>}
           </div>
         </>

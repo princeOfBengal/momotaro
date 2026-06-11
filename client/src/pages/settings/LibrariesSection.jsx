@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../../api/client';
 import { appAlert, appConfirm } from '../../dialog/dialogService';
 import { useAdminTaskButton } from '../../hooks/useAdminTaskButton';
+import { useMountedRef } from '../../hooks/useMountedRef';
 import '../Settings.css';
 import '../Libraries.css';
 
@@ -91,6 +92,7 @@ export default function LibrariesSection() {
   const [resetting, setResetting] = useState(null); // lib.id being reset
   const [resetConfirm, setResetConfirm] = useState(null); // library object pending confirm
   const [resetStatus, setResetStatus] = useState(null); // { libId, message }
+  const mounted = useMountedRef();
 
   useEffect(() => {
     api.getLibraries().then(data => setLibraries(data)).catch(() => setLibraries([]));
@@ -151,7 +153,8 @@ export default function LibrariesSection() {
     try {
       await api.scanLibrary(lib.id);
       setTimeout(() => {
-        api.getLibraries().then(data => setLibraries(data)).catch(() => {});
+        if (!mounted.current) return; // left the section before the refetch
+        api.getLibraries().then(data => { if (mounted.current) setLibraries(data); }).catch(() => {});
         setScanning(s => s === lib.id ? null : s);
       }, 3000);
     } catch (err) {

@@ -10,6 +10,40 @@
   padding: 0 4px;
 }
 
+/* Pause / resume control, sits on the right of the header (the head uses
+   justify-content: space-between, so the title floats left and this floats
+   right). */
+.gallery-ribbon-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.gallery-ribbon-toggle:hover,
+.gallery-ribbon-toggle:focus-visible {
+  opacity: 1;
+  background: var(--accent);
+  color: #fff;
+}
+.gallery-ribbon-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.gallery-ribbon-toggle svg {
+  display: block;
+}
+
 .gallery-ribbon-viewport {
   overflow: hidden;
   border-radius: var(--radius);
@@ -43,26 +77,35 @@
   will-change: transform;
 }
 
-/* Pause states. hover + focus + `.is-paused` (touch / off-screen) all freeze
-   the animation without killing the keyframe state, so resuming picks up
-   exactly where it left off. */
-.gallery-ribbon:hover .gallery-ribbon-track,
-.gallery-ribbon:focus-within .gallery-ribbon-track,
+/* Pause states. hover + focus + `.is-paused` (touch / off-screen / app
+   backgrounded) all freeze the animation without killing the keyframe state, so
+   resuming picks up exactly where it left off. The hover/focus triggers are
+   scoped to the *viewport* (the scrolling tiles), NOT the whole section — the
+   header Pause/Resume button lives in the section, and scoping to `.gallery-
+   ribbon` froze the track while the cursor sat on (or keyboard focus held) that
+   button, making a "Resume" click appear to do nothing until the pointer left. */
+.gallery-ribbon-viewport:hover .gallery-ribbon-track,
+.gallery-ribbon-viewport:focus-within .gallery-ribbon-track,
 .gallery-ribbon.is-paused .gallery-ribbon-track {
   animation-play-state: paused;
 }
 
-/* Users who've requested reduced motion see a static, non-animated strip. */
-@media (prefers-reduced-motion: reduce) {
-  .gallery-ribbon-track {
-    animation: none;
-  }
-  .gallery-ribbon-viewport {
-    overflow-x: auto;
-    -webkit-mask-image: none;
-            mask-image: none;
-  }
+/* Release the permanently-promoted compositing layer once the ribbon is
+   paused. `will-change: transform` keeps a GPU backing texture allocated for
+   the track's whole lifetime; holding that while the app is backgrounded is
+   what let Android reclaim the WebView renderer and leave a grey screen on
+   return. When paused (incl. app-backgrounded via `.is-paused`) we let the
+   browser drop the layer; the `translate3d` keyframe re-promotes it on resume. */
+.gallery-ribbon.is-paused .gallery-ribbon-track {
+  will-change: auto;
 }
+
+/* NOTE: we intentionally do NOT freeze the ribbon under
+   `prefers-reduced-motion: reduce`. That query reports `reduce` spuriously on
+   the PWA (Android battery-saver / "remove animations") and on the Linux
+   AppImage (Chromium reads GTK's `gtk-enable-animations`), which froze the
+   rotation solid on exactly those platforms. The header Pause/Resume button is
+   the user-facing motion control instead (WCAG 2.2.2 "Pause, Stop, Hide"). */
 
 @keyframes gallery-ribbon-scroll {
   from { transform: translate3d(0, 0, 0); }

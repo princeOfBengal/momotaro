@@ -2008,11 +2008,19 @@
 
   /* Dropdown wraps are direct grid children of .detail-actions-secondary;
      their inner trigger button fills the cell so it looks identical to a
-     sibling .detail-action-btn. */
+     sibling .detail-action-btn. height: 100% makes the trigger stretch to
+     the full grid-row height — without it the button keeps its 60px
+     min-height while siblings with two-line labels ("Reset Progress",
+     "Download series") grow taller, leaving the Settings cog visibly
+     short and top-aligned in its cell. */
   .detail-settings-wrap,
   .rl-dropdown-wrap { min-width: 0; }
   .detail-settings-trigger,
-  .rl-dropdown-trigger { width: 100%; justify-content: center; }
+  .rl-dropdown-trigger { width: 100%; height: 100%; justify-content: center; }
+
+  /* Lists spans the full action row like the primary Continue Reading CTA,
+     leaving Reset / Download / Settings as a tidy row above it. */
+  .detail-actions-secondary .rl-dropdown-wrap { grid-column: 1 / -1; }
 
   /* Dropdown opens upward on mobile to avoid clipping at the bottom of the action row */
   .detail-settings-dropdown {

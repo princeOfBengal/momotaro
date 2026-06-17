@@ -9,6 +9,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "@capacitor/app": "^8.0.0",
     "@capacitor/network": "^8.0.0",
     "@tanstack/react-virtual": "^3.13.24",
     "idb": "^8.0.0",

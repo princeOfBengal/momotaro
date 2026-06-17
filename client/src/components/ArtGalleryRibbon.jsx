@@ -1,6 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useAppActive } from '../hooks/useAppActive';
 import './ArtGalleryRibbon.css';
+
+// User pause preference is shared across every ribbon (the Home strip and the
+// per-series strips on /art-gallery) and persisted so a motion-sensitive user
+// can stop it once and have it stick. We keep it in localStorage + an in-tab
+// custom event so toggling any one ribbon syncs the rest immediately.
+const PAUSE_KEY = 'momotaro_gallery_paused';
+const PAUSE_EVENT = 'momotaro:gallery-paused';
+
+function readPausedPref() {
+  try { return localStorage.getItem(PAUSE_KEY) === '1'; } catch { return false; }
+}
+function writePausedPref(v) {
+  try { localStorage.setItem(PAUSE_KEY, v ? '1' : '0'); } catch { /* private mode */ }
+  try { window.dispatchEvent(new CustomEvent(PAUSE_EVENT, { detail: v })); } catch { /* no-op */ }
+}
 
 // Auto-rotating horizontal ribbon for the Art Gallery section.
 //
@@ -14,8 +30,25 @@ import './ArtGalleryRibbon.css';
 // Touch devices pause via an onTouchStart handler and resume on touchend /
 // touchcancel, so a tap-to-read interaction doesn't scroll the tile out
 // from under the user. An IntersectionObserver short-circuits the animation
-// entirely when the ribbon is not on-screen, keeping a background tab's GPU
-// cost at zero.
+// when the ribbon is scrolled off-screen.
+//
+// IntersectionObserver only covers *in-page* off-screen — it does NOT fire when
+// the whole app is backgrounded (the element still intersects the layout
+// viewport). That gap mattered: on the Android WebView build, leaving this
+// infinite animation + its promoted GPU layer live in the background let the OS
+// reclaim the renderer, so returning to Home showed a blank grey screen. We now
+// also pause via `useAppActive` (Page Visibility + Capacitor App appStateChange)
+// so backgrounding freezes the compositor and releases the layer (see the CSS,
+// which drops `will-change` while `.is-paused`).
+//
+// A header Pause/Resume button gives explicit user control (and satisfies
+// WCAG 2.2.2 "Pause, Stop, Hide" for auto-moving content). We deliberately do
+// NOT auto-freeze under `prefers-reduced-motion`: that media query reports
+// `reduce` spuriously on the PWA (Android battery-saver / "remove animations")
+// and on the Linux AppImage (Chromium reads GTK's `gtk-enable-animations`,
+// which lightweight/GPU-disabled desktops leave off), which previously froze
+// the ribbon solid on exactly those platforms. The explicit, persisted control
+// replaces that blunt kill-switch.
 
 // Props:
 //   items     — gallery item objects (see /api/home or /api/gallery/all)
@@ -28,6 +61,10 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery', fullSiz
   const rootRef = useRef(null);
   const [inView, setInView]     = useState(false);
   const [touching, setTouching] = useState(false);
+  const [userPaused, setUserPaused] = useState(readPausedPref);
+  // False while the app is backgrounded or the document is hidden — freezes the
+  // animation so the WebView isn't holding a live GPU layer in the background.
+  const appActive = useAppActive();
 
   useEffect(() => {
     const el = rootRef.current;
@@ -42,15 +79,38 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery', fullSiz
     return () => io.disconnect();
   }, []);
 
+  // Keep every ribbon's button in sync when one of them toggles pause. The
+  // custom event covers sibling ribbons in this document; the `storage` event
+  // (fires only in *other* tabs/PWA windows, never the originating one) syncs
+  // across windows without double-firing the optimistic update.
+  useEffect(() => {
+    const onSync = e => setUserPaused(Boolean(e.detail));
+    const onStorage = e => { if (e.key === PAUSE_KEY) setUserPaused(e.newValue === '1'); };
+    window.addEventListener(PAUSE_EVENT, onSync);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(PAUSE_EVENT, onSync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
   if (!items || items.length === 0) return null;
 
   // Pick a duration proportional to item count so the per-tile dwell time is
   // constant regardless of how many bookmarks the user has.
   const durationSeconds = Math.max(20, items.length * 4);
 
-  // Pause when: touch-dragging, or not in view (don't burn GPU on an
-  // off-screen keyframe). Hover/focus pausing is handled in CSS.
-  const paused = touching || !inView;
+  // Pause when: the user paused it, touch-dragging, scrolled off-screen, or the
+  // app is backgrounded/hidden (don't burn GPU on an off-screen keyframe and
+  // don't strand a live GPU layer in the background). Hover/focus pausing is
+  // handled in CSS.
+  const paused = userPaused || touching || !inView || !appActive;
+
+  const togglePaused = () => {
+    const next = !userPaused;
+    setUserPaused(next);     // optimistic local update
+    writePausedPref(next);   // persist + broadcast to sibling ribbons
+  };
 
   return (
     <section
@@ -61,6 +121,30 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery', fullSiz
         {titleHref
           ? <Link to={titleHref} className="ribbon-title gallery-ribbon-title-link">{title}</Link>
           : <h2 className="ribbon-title">{title}</h2>}
+        <button
+          type="button"
+          className="gallery-ribbon-toggle"
+          onClick={togglePaused}
+          // Neutral name + `aria-pressed` carries the paused state, so the
+          // announced label stays accurate in both states ("Toggle art gallery
+          // rotation, pressed/not pressed") rather than naming one action while
+          // doing the other. `title` stays dynamic for the sighted hover tooltip.
+          aria-pressed={userPaused}
+          aria-label="Toggle art gallery rotation"
+          title={userPaused ? 'Resume rotation' : 'Pause rotation'}
+        >
+          {userPaused ? (
+            // Play / resume triangle
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <path d="M6 4.5v11a1 1 0 0 0 1.54.84l8.5-5.5a1 1 0 0 0 0-1.68l-8.5-5.5A1 1 0 0 0 6 4.5z" />
+            </svg>
+          ) : (
+            // Pause bars
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <path d="M6 3.5h3v13H6zM11 3.5h3v13h-3z" />
+            </svg>
+          )}
+        </button>
       </header>
       <div
         className="gallery-ribbon-viewport"

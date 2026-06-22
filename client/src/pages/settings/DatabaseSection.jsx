@@ -17,6 +17,7 @@ export default function DatabaseSection() {
   const [autoMode, setAutoMode]           = useState('off');
   const [autoDay, setAutoDay]             = useState(0);
   const [autoTime, setAutoTime]           = useState('03:00');
+  const [autoMaxAgeDays, setAutoMaxAgeDays] = useState(7);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsMsg, setSettingsMsg]     = useState(null); // { type, text }
 
@@ -99,6 +100,7 @@ export default function DatabaseSection() {
         setAutoMode(d.autoclear_mode);
         setAutoDay(d.autoclear_day);
         setAutoTime(d.autoclear_time);
+        setAutoMaxAgeDays(d.autoclear_max_age_days ?? 7);
       })
       .catch(() => {});
   }, []);
@@ -114,6 +116,14 @@ export default function DatabaseSection() {
 
     const limitBytes = Math.floor(gb * GB);
 
+    // Validate the age threshold the scheduled clear uses.
+    let maxAgeDays = parseInt(autoMaxAgeDays, 10);
+    if (autoMode !== 'off' && (!Number.isInteger(maxAgeDays) || maxAgeDays < 1)) {
+      setSettingsMsg({ type: 'error', text: 'Clear chapters not read in: enter a whole number of days (at least 1).' });
+      return;
+    }
+    if (!Number.isInteger(maxAgeDays) || maxAgeDays < 1) maxAgeDays = 7;
+
     setSavingSettings(true);
     try {
       const updated = await api.saveCbzCacheSettings({
@@ -121,6 +131,7 @@ export default function DatabaseSection() {
         autoclear_mode: autoMode,
         autoclear_day:  autoDay,
         autoclear_time: autoTime,
+        autoclear_max_age_days: maxAgeDays,
       });
       setCacheSettings(updated);
       // Re-sync the input in case the server canonicalized anything.
@@ -128,6 +139,7 @@ export default function DatabaseSection() {
       setAutoMode(updated.autoclear_mode);
       setAutoDay(updated.autoclear_day);
       setAutoTime(updated.autoclear_time);
+      setAutoMaxAgeDays(updated.autoclear_max_age_days ?? 7);
       // Current cache may have been trimmed if the new cap is lower.
       api.getCbzCacheSize().then(d => setCacheSize(d.size_bytes)).catch(() => {});
       setSettingsMsg({ type: 'success', text: 'Cache settings saved.' });
@@ -214,6 +226,7 @@ export default function DatabaseSection() {
         setAutoMode(d.autoclear_mode);
         setAutoDay(d.autoclear_day);
         setAutoTime(d.autoclear_time);
+        setAutoMaxAgeDays(d.autoclear_max_age_days ?? 7);
       }).catch(() => {});
     } catch (err) {
       setImportError(err.message);
@@ -261,10 +274,9 @@ export default function DatabaseSection() {
             <div className="setting-group">
               <label className="setting-group-label">Maximum cache size</label>
               <p className="rs-setting-hint">
-                When the cache reaches this size it auto-clears — every cached chapter is wiped
-                except the one that just triggered the overflow, so in-flight reads and batch
-                operations (like Regenerate Thumbnails) keep making progress. Minimum 0.1 GB.
-                Default is 20 GB.
+                When the cache exceeds this size, the least-recently-used chapters are evicted
+                until it's back under the limit. The chapter that triggered the overflow and any
+                in-flight reads are always kept. Minimum 0.1 GB. Default is 20 GB.
               </p>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 280 }}>
                 <input
@@ -285,8 +297,10 @@ export default function DatabaseSection() {
             <div className="setting-group">
               <label className="setting-group-label">Auto-clear schedule</label>
               <p className="rs-setting-hint">
-                Wipe the cache automatically on a schedule. Clearing removes every extracted
-                chapter — pages are re-extracted on next read.
+                On this schedule, chapters you haven't read within the chosen window are dropped
+                from the cache. Scheduled clears never interrupt a chapter you're currently
+                reading; pages are re-extracted on next read. (Use <strong>Clear Cache</strong>
+                above to wipe everything now.)
               </p>
               <div className="setting-options">
                 {[
@@ -328,6 +342,25 @@ export default function DatabaseSection() {
                   onChange={e => setAutoTime(e.target.value)}
                   style={{ maxWidth: 160 }}
                 />
+              </div>
+            )}
+
+            {autoMode !== 'off' && (
+              <div className="setting-group" style={{ marginTop: 12 }}>
+                <label className="setting-group-label">Clear chapters not read in</label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 280 }}>
+                  <input
+                    type="number"
+                    className="settings-input"
+                    min="1"
+                    max="3650"
+                    step="1"
+                    value={autoMaxAgeDays}
+                    onChange={e => setAutoMaxAgeDays(e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>days</span>
+                </div>
               </div>
             )}
 

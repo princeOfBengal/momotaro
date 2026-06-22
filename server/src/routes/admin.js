@@ -20,7 +20,9 @@ const router = express.Router();
 const CACHE_LIMIT_MIN_BYTES = 100 * 1024 * 1024;
 const CACHE_LIMIT_MAX_BYTES = 10 * 1024 * 1024 * 1024 * 1024;
 
-const VALID_AUTOCLEAR_MODES = new Set(['off', 'daily', 'weekly']);
+// Reuse the scheduler's valid-value set so the API and the scheduler can never
+// disagree on what's accepted.
+const VALID_AUTOCLEAR_MODES = cbzCacheSchedule.VALID_MODES;
 
 function upsertSetting(db, key, value) {
   db.prepare(
@@ -29,18 +31,13 @@ function upsertSetting(db, key, value) {
 }
 
 function readCacheSettings(db) {
-  const rows = db.prepare(`
-    SELECT key, value FROM settings
-    WHERE key IN (
-      'cbz_cache_limit_bytes',
-      'cbz_cache_autoclear_mode',
-      'cbz_cache_autoclear_day',
-      'cbz_cache_autoclear_time'
-    )
-  `).all();
-  const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
-  const parsedLimit = parseInt(map['cbz_cache_limit_bytes'] || '', 10);
-  const parsedDay   = parseInt(map['cbz_cache_autoclear_day']  || '0', 10);
+  const limitRow = db.prepare(
+    "SELECT value FROM settings WHERE key = 'cbz_cache_limit_bytes'"
+  ).pluck().get();
+  const parsedLimit = parseInt(limitRow || '', 10);
+  // Autoclear fields come from the scheduler's shared reader so the API reports
+  // exactly the schedule the scheduler will run.
+  const auto = cbzCacheSchedule.readAutoclearSettings(db);
   return {
     limit_bytes:   Number.isFinite(parsedLimit) && parsedLimit > 0
                      ? parsedLimit
@@ -48,19 +45,22 @@ function readCacheSettings(db) {
     limit_default_bytes: cbzCache.DEFAULT_CACHE_LIMIT_BYTES,
     limit_min_bytes:     CACHE_LIMIT_MIN_BYTES,
     limit_max_bytes:     CACHE_LIMIT_MAX_BYTES,
-    autoclear_mode: map['cbz_cache_autoclear_mode'] || 'off',
-    autoclear_day:  Number.isInteger(parsedDay) && parsedDay >= 0 && parsedDay <= 6 ? parsedDay : 0,
-    autoclear_time: map['cbz_cache_autoclear_time'] || '03:00',
-    next_run_at:    cbzCacheSchedule.getNextRunAt(),
+    autoclear_mode:         auto.mode,
+    autoclear_day:          auto.day,
+    autoclear_time:         auto.time,
+    autoclear_max_age_days: auto.max_age_days,
+    next_run_at:            cbzCacheSchedule.getNextRunAt(),
   };
 }
 
 // ── CBZ Cache ─────────────────────────────────────────────────────────────────
 // CBZ pages are extracted to disk on first access and served as plain files on
-// every subsequent hit. The cache is capped (default 20 GB) and auto-clears
-// when an extraction pushes it over the cap — every cached chapter is wiped
-// except the one that triggered the overflow, so the caller still gets a
-// working file. These endpoints expose the current size and a manual wipe.
+// every subsequent hit. The cache is capped (default 20 GB); when an extraction
+// pushes it over the cap, least-recently-used chapters are evicted until it's
+// back under (the chapter that triggered the overflow and any in-flight reads
+// are kept). A separate auto-clear schedule can additionally trim the cache on a
+// daily / weekly cadence (see cbzCacheSchedule.js). These endpoints expose the
+// current size, the cap + schedule settings, and a manual full wipe.
 
 // GET /api/admin/cbz-cache-size
 router.get('/admin/cbz-cache-size', asyncWrapper(async (req, res) => {
@@ -101,10 +101,12 @@ router.get('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
 
 // PUT /api/admin/cbz-cache-settings
 // Body (all fields optional — only provided fields are updated):
-//   limit_bytes:     positive integer, bounded by MIN/MAX above
-//   autoclear_mode:  'off' | 'daily' | 'weekly'
-//   autoclear_day:   0..6  (0 = Sunday)  — only meaningful when mode=weekly
-//   autoclear_time:  'HH:MM' 24-hour, server-local time
+//   limit_bytes:            positive integer, bounded by MIN/MAX above
+//   autoclear_mode:         'off' | 'daily' | 'weekly'   (cadence)
+//   autoclear_day:          0..6  (0 = Sunday)  — only meaningful when mode=weekly
+//   autoclear_time:         'HH:MM' 24-hour, server-local time
+//   autoclear_max_age_days: integer >= 1   — scheduled clears evict chapters not
+//                                            read within this many days
 router.put('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
   const db = getDb();
   const body = req.body || {};
@@ -151,6 +153,14 @@ router.put('/admin/cbz-cache-settings', asyncWrapper(async (req, res) => {
     // Canonicalise to zero-padded HH:MM.
     const canonical = `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     upsertSetting(db, 'cbz_cache_autoclear_time', canonical);
+  }
+
+  if (body.autoclear_max_age_days !== undefined) {
+    const d = parseInt(body.autoclear_max_age_days, 10);
+    if (!Number.isInteger(d) || d < 1 || d > 3650) {
+      return res.status(400).json({ error: 'autoclear_max_age_days must be an integer between 1 and 3650' });
+    }
+    upsertSetting(db, 'cbz_cache_autoclear_max_age_days', String(d));
   }
 
   cbzCacheSchedule.reschedule();

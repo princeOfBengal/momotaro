@@ -367,20 +367,22 @@ Read from environment variables via [server/src/config.js](../server/src/config.
 
 **Size cap:** runtime-configurable. Defaults to 20 GB (`DEFAULT_CACHE_LIMIT_BYTES = 20 × 1024³`) and is overridden at startup from the `cbz_cache_limit_bytes` row in the `settings` table if present. `setLimitBytes(n)` changes the cap live from the admin API — any chapters over the new cap are evicted immediately.
 
-**Eviction is LRU per-chapter** (insertion order of the in-memory `index` Map). When `totalBytes > cap`:
+**Eviction is LRU per-chapter.** The in-memory `index` Map is kept in **access** order, not merely insertion order: `touch()` re-inserts a directory at the tail on every cache hit (a chapter open or page serve both flow through `ensureChapterExtracted`), so iterating oldest→newest is true least-recently-used order and a frequently re-read chapter is never evicted ahead of a stale one. All eviction — the cap enforcer, the runtime cap change, and the scheduled clear — funnels through one primitive, `evictDownTo(targetBytes, { protectedDir, skipActive })`. When `totalBytes > cap`, `evictIfNeeded` calls it with `targetBytes = cap` and:
 
-- Iterate `index` from oldest to newest.
-- Skip the optional `protectedDir` (the chapter that just triggered the overflow — the caller still needs it).
-- Skip every directory in `activeExtractionDirs()` — chapters whose Phase 1 or Phase 2 is still running. Wiping an in-progress extraction would corrupt the caller's view of the cache.
-- Otherwise `rm -rf` the directory and remove it from the index, until total drops below cap.
+- Iterates `index` from oldest to newest.
+- Skips the optional `protectedDir` (the chapter that just triggered the overflow — the caller still needs it).
+- Skips every directory in `activeExtractionDirs()` — chapters whose Phase 1 or Phase 2 is still running. Wiping an in-progress extraction would corrupt the caller's view of the cache.
+- Otherwise `rm -rf` the directory and removes it from the index, until total drops to the target.
+
+`evictDownTo` is **synchronous by contract** (the loop never `await`s), so on the single JS thread it cannot interleave with a concurrent `wipe()` or extraction. Each `index` entry carries `{ size, atime }`; `atime` (last-access wall-clock ms, refreshed by `touch`) backs the scheduled age-based sweep — see [Auto-Clear Scheduler](#auto-clear-scheduler).
 
 Evicting at page granularity would leave partially-populated chapter directories behind, forcing re-extractions mid-read. Per-chapter eviction keeps the invariant that a directory is either fully present or entirely absent.
 
 **In-progress eviction guard (ordering invariant):** `ensureChapterExtracted` checks `chapterStates` (active extraction → wait on it) *before* the in-memory `index`/`.ready` probe. This ordering matters because in fast mode the dir is added to `index` at the start of Phase 1 but `.ready` isn't written until Phase 2 finishes — so for the entire Phase 2 window the dir is simultaneously "indexed" and "marker-less". The reader hammers `GET /api/pages/:id/image?fast=1` during exactly that window; if the index branch ran first it would read the missing marker as corruption and `evictChapterDir()` the directory Phase 2 is still extracting into, whose next write then fails with `ENOENT … <page>.tmp`. Checking `chapterStates` first routes those concurrent callers to await the in-flight extraction instead. (Full mode never exposed this: its pages-list call blocks until `.ready` exists, so page-image requests always arrive to a complete, marked directory.) Regression coverage: [server/test/cbzCacheRace.test.js](../server/test/cbzCacheRace.test.js).
 
-**Crash-safety:** each image file is written to `<target>.tmp` and renamed into place on `finish`. The `.ready` marker is the final step of a successful extraction — directories missing it on startup are assumed to be partial extractions from a crashed run and are deleted.
+**Crash-safety:** each image file is written to `<target>.tmp` and renamed into place on `finish`. The `.ready` marker is the final step of a successful extraction — directories missing it on startup are assumed to be partial extractions from a crashed run and are deleted. The marker is **not** empty: it carries JSON `{ v, size, pages }`, where `size` is the directory's real on-disk byte total (computed once, just before the marker is written, by a `dirSizeSync` that excludes the marker and any `.tmp` files). Pre-existing empty markers from before this change still parse — `readReadyMeta` returns a null `size` for them and the caller falls back to a disk walk.
 
-**Persistence across restarts:** `init(limitBytes?)` walks `CBZ_CACHE_DIR`, validates each subdirectory's `.ready` marker, and rebuilds the in-memory index from the files that remain. Warm cache survives a restart. [server/src/index.js](../server/src/index.js) reads the saved `cbz_cache_limit_bytes` row before calling `init()` so the rebuilt index is validated against the user's configured cap, not the 20 GB default. An immediate eviction pass runs if the rebuilt total exceeds the cap.
+**Persistence across restarts:** `init(limitBytes?)` walks `CBZ_CACHE_DIR`, and for each subdirectory reads its `.ready` marker via `readReadyMeta`. The persisted `size` rebuilds the in-memory index **without re-statting every page file** — a meaningful boot-time saving on a large warm cache (a 20 GB cache of ~150-page chapters would otherwise be hundreds of thousands of `statSync` calls). The marker's mtime seeds each entry's `atime` as a last-access proxy (true last-access isn't persisted, so a chapter extracted long ago but read daily can be swept on the first post-restart age-sweep, then re-extracted on next read — harmless). Directories whose marker is absent are treated as crashed partials and removed; empty/legacy markers fall back to `dirSizeSync`. [server/src/index.js](../server/src/index.js) reads the saved `cbz_cache_limit_bytes` row before calling `init()` so the rebuilt index is validated against the user's configured cap, not the 20 GB default. An immediate eviction pass runs if the rebuilt total exceeds the cap.
 
 ### Cancellation and orphan audit
 
@@ -408,15 +410,20 @@ Admin endpoints `GET /api/admin/cbz-cache-size`, `POST /api/admin/clear-cbz-cach
 
 ### Auto-Clear Scheduler
 
-Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cbzCacheSchedule.js). A single `setTimeout` fires the next scheduled wipe, then reschedules itself. Settings live in the same `settings` table as the size cap:
+Implemented in [server/src/scanner/cbzCacheSchedule.js](../server/src/scanner/cbzCacheSchedule.js). A single `setTimeout` fires the next scheduled clear, then reschedules itself. Settings live in the same `settings` table as the size cap:
 
 | Key | Values | Effect |
 | --- | --- | --- |
-| `cbz_cache_autoclear_mode` | `off` \| `daily` \| `weekly` | Schedule type. `off` disables the timer entirely. |
+| `cbz_cache_autoclear_mode` | `off` \| `daily` \| `weekly` | **Cadence.** `off` disables the timer entirely. |
 | `cbz_cache_autoclear_day` | `0..6` (0 = Sunday) | Day-of-week when mode is `weekly`. Ignored otherwise. |
 | `cbz_cache_autoclear_time` | `HH:MM` 24-hour, server local time | Time of day to fire. |
+| `cbz_cache_autoclear_max_age_days` | integer ≥ 1 (default 7) | Age cutoff: each run evicts chapters not read within this many days. |
 
-`reschedule()` is idempotent — it's called on startup and again every time a setting changes through the admin API. The timer is `.unref()`'d so a pending wake-up never blocks graceful shutdown. On fire, `cbzCache.wipe()` removes every extracted chapter directory and the scheduler computes the next occurrence in server local time. When a daily/weekly window would already be in the past for today, the scheduler rolls forward to the next valid day.
+**The scheduled clear is always an age sweep.** Unlike the manual *Clear Cache* button (which calls `cbzCache.wipe()` — aborting in-flight extractions and rejecting open page waiters), every *scheduled* run calls `cbzCache.sweepOlderThan(max_age_days)`: it evicts chapters whose `atime` is older than the cutoff and skips any chapter with an in-flight extraction. So it **never** interrupts a chapter the user is actively reading, and it reclaims genuinely-cold disk while preserving the warm cache — there is no cold-start re-extraction storm after each run, and no scheduled full wipe. (Continuous disk bounding is already handled by the size-cap LRU eviction; the schedule exists only to drop chapters that have gone *cold*, which the cap can't express.)
+
+The settings are read through a single shared `readAutoclearSettings(db)` helper that both the scheduler and the admin route (`GET`/`PUT /api/admin/cbz-cache-settings`) call, so the API can never report a schedule the scheduler wouldn't run. Invalid/missing values coerce to the defaults above.
+
+`reschedule()` is idempotent — it's called on startup and again every time a setting changes through the admin API. The timer is `.unref()`'d so a pending wake-up never blocks graceful shutdown. On fire, the age sweep runs (`max_age_days` is re-read live at fire time, so a change that landed since the timer was armed — including via config import — takes effect), then the scheduler computes the next occurrence in server local time. When a daily/weekly window would already be in the past for today, the scheduler rolls forward to the next valid day. (Weekly's maximum delay is 7 days, well under Node's ~24.8-day `setTimeout` ceiling, so there is no timer overflow.)
 
 ## Local Metadata
 

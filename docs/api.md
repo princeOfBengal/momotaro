@@ -1298,7 +1298,7 @@ which is acceptable.
 { "size_bytes": 1374389534, "limit_bytes": 21474836480 }
 ```
 
-`size_bytes` is the total disk usage under `CBZ_CACHE_DIR`; `limit_bytes` is the active cap — user-configurable from Settings → Database → CBZ Cache. When an extraction pushes `size_bytes` over `limit_bytes`, the cache auto-clears: every cached chapter directory is wiped except the one that triggered the overflow, so the in-flight read (or batch operation like `POST /api/admin/regenerate-thumbnails`) keeps making progress. See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
+`size_bytes` is the total disk usage under `CBZ_CACHE_DIR`; `limit_bytes` is the active cap — user-configurable from Settings → Database → CBZ Cache. When an extraction pushes `size_bytes` over `limit_bytes`, the cache evicts least-recently-used chapter directories until it is back under the cap, skipping the chapter that triggered the overflow and any directory with an in-flight extraction (so the in-flight read — or a batch operation like `POST /api/admin/regenerate-thumbnails` — keeps making progress). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache).
 
 **`POST /api/admin/clear-cbz-cache` response `data` shape:**
 
@@ -1312,32 +1312,35 @@ which is acceptable.
 
 ```json
 {
-  "limit_bytes":         21474836480,
-  "limit_default_bytes": 21474836480,
-  "limit_min_bytes":     104857600,
-  "limit_max_bytes":     10995116277760,
-  "autoclear_mode":      "off",
-  "autoclear_day":       0,
-  "autoclear_time":      "03:00",
-  "next_run_at":         null
+  "limit_bytes":            21474836480,
+  "limit_default_bytes":    21474836480,
+  "limit_min_bytes":        104857600,
+  "limit_max_bytes":        10995116277760,
+  "autoclear_mode":         "off",
+  "autoclear_day":          0,
+  "autoclear_time":         "03:00",
+  "autoclear_max_age_days": 7,
+  "next_run_at":            null
 }
 ```
 
 - `limit_bytes` — active cap. Persisted in the `settings` table as `cbz_cache_limit_bytes`.
 - `limit_default_bytes` / `limit_min_bytes` / `limit_max_bytes` — 20 GB / 100 MB / 10 TB respectively. The UI uses these to validate user input.
-- `autoclear_mode` — `'off'`, `'daily'`, or `'weekly'`.
+- `autoclear_mode` — `'off'`, `'daily'`, or `'weekly'` — the **cadence**.
 - `autoclear_day` — `0..6` with `0 = Sunday`. Ignored when `autoclear_mode !== 'weekly'`.
 - `autoclear_time` — `HH:MM` 24-hour, **server local time**.
-- `next_run_at` — ISO-8601 timestamp of the next scheduled wipe, or `null` when `autoclear_mode === 'off'`.
+- `autoclear_max_age_days` — integer ≥ 1 (default 7). Each scheduled run is an **age sweep**: it evicts chapters not accessed within this many days, skipping any chapter with an in-flight extraction — so a scheduled run never aborts a chapter the user is reading and never discards the warm cache wholesale. The destructive full wipe is reserved for the manual `POST /api/admin/clear-cbz-cache`.
+- `next_run_at` — ISO-8601 timestamp of the next scheduled run, or `null` when `autoclear_mode === 'off'`.
 
 **`PUT /api/admin/cbz-cache-settings`** body — every field is optional; only provided fields are updated. Returns the same shape as GET after applying changes.
 
 ```json
 {
-  "limit_bytes":    10737418240,
-  "autoclear_mode": "weekly",
-  "autoclear_day":  0,
-  "autoclear_time": "03:00"
+  "limit_bytes":            10737418240,
+  "autoclear_mode":         "weekly",
+  "autoclear_day":          0,
+  "autoclear_time":         "03:00",
+  "autoclear_max_age_days": 7
 }
 ```
 

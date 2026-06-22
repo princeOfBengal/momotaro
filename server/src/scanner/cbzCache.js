@@ -67,7 +67,10 @@ const READY_MARKER = '.ready';
 
 // LRU: iteration order of a Map is insertion order, so re-inserting on touch
 // moves a key to the tail (most recent). Key = absolute chapter-dir path.
-const index = new Map();    // chapterDir -> { size }
+// `atime` is the wall-clock ms of the most recent access (open / page serve);
+// it backs the scheduled age-based sweep. On a cold start it is seeded from the
+// `.ready` marker's mtime (extraction-completion time) as a proxy — see init().
+const index = new Map();    // chapterDir -> { size, atime }
 let totalBytes = 0;
 
 // Per-chapter extraction state. Keyed by chapterDir so concurrent Phase-1
@@ -116,17 +119,18 @@ function parseChapterIdFromDirName(name) {
 function touch(chapterDir) {
   const meta = index.get(chapterDir);
   if (!meta) return;
+  meta.atime = Date.now();
   index.delete(chapterDir);
   index.set(chapterDir, meta);
 }
 
-function addToIndex(chapterDir, size) {
+function addToIndex(chapterDir, size, atime = Date.now()) {
   const existing = index.get(chapterDir);
   if (existing) {
     totalBytes -= existing.size;
     index.delete(chapterDir);
   }
-  index.set(chapterDir, { size });
+  index.set(chapterDir, { size, atime });
   totalBytes += size;
   evictIfNeeded(chapterDir);
 }
@@ -160,36 +164,73 @@ function activeExtractionDirs() {
   return out;
 }
 
-// Auto-clear: when the cache hits its size cap, evict cached chapter
-// directories starting with the least-recently-used. The optional
-// `protectedDir` keeps a specific chapter on disk — the one that just
-// triggered the overflow — so the caller that drove the addition (a reader
-// opening a chapter, the regenerate-thumbnails loop) still gets a working
-// file. Any directory currently in `chapterStates` (Phase 1 still in flight,
-// Phase 2 still running) is also skipped — clobbering an in-progress
-// extraction would corrupt the caller's view of the cache.
-function evictIfNeeded(protectedDir = null) {
-  if (totalBytes <= cacheLimitBytes) return;
-  const active = activeExtractionDirs();
-  let evicted = 0;
-  let evictedBytes = 0;
+// Core eviction primitive: evict least-recently-used chapter directories until
+// `totalBytes` drops to `targetBytes` (or there is nothing left to evict).
+// Used by the cap enforcer (evictIfNeeded) and, through it, the runtime cap
+// change (setLimitBytes). The scheduled clear uses sweepOlderThan instead.
+//
+//   - `protectedDir` keeps a specific chapter on disk — the one that just
+//     triggered an overflow — so the caller that drove the addition (a reader
+//     opening a chapter, the regenerate-thumbnails loop) still gets a working
+//     file.
+//   - When `skipActive` (default), any directory currently in `chapterStates`
+//     (Phase 1 in flight, Phase 2 still running) is skipped — clobbering an
+//     in-progress extraction would corrupt the caller's view of the cache and
+//     break the running worker's writes. This is what lets the scheduled clear
+//     run without ever aborting a chapter the user is actively reading.
+//
+// Synchronous by contract: the loop never awaits, so on the single JS thread it
+// cannot interleave with a concurrent wipe() or extraction.
+function evictDownTo(targetBytes, { protectedDir = null, skipActive = true } = {}) {
+  let removed = 0;
+  let freed = 0;
+  if (totalBytes <= targetBytes) return { removed, freed };
+  const active = skipActive ? activeExtractionDirs() : new Set();
   // Iterate insertion-order (oldest first) so we evict LRU.
   for (const [chapterDir, meta] of Array.from(index)) {
-    if (totalBytes <= cacheLimitBytes) break;
+    if (totalBytes <= targetBytes) break;
     if (chapterDir === protectedDir) continue;
     if (active.has(chapterDir)) continue;
     evictChapterDir(chapterDir);
-    evicted++;
-    evictedBytes += meta.size;
+    removed++;
+    freed += meta.size;
   }
-  if (evicted > 0) {
-    const freedGb = (evictedBytes / 1024 / 1024 / 1024).toFixed(2);
+  return { removed, freed };
+}
+
+// Enforce the configured cap. No-op until the cache is over the limit.
+function evictIfNeeded(protectedDir = null) {
+  if (totalBytes <= cacheLimitBytes) return;
+  const { removed, freed } = evictDownTo(cacheLimitBytes, { protectedDir });
+  if (removed > 0) {
+    const freedGb = (freed / 1024 / 1024 / 1024).toFixed(2);
     const limGb   = (cacheLimitBytes / 1024 / 1024 / 1024).toFixed(2);
     console.log(
-      `[CBZ Cache] Cap reached (${limGb} GB) — evicted ${evicted} chapter` +
-      `${evicted === 1 ? '' : 's'} (${freedGb} GB freed)`
+      `[CBZ Cache] Cap reached (${limGb} GB) — evicted ${removed} chapter` +
+      `${removed === 1 ? '' : 's'} (${freedGb} GB freed)`
     );
   }
+}
+
+// Evict chapters not accessed within `maxAgeMs`, skipping in-flight reads.
+// Backs the scheduled age-based clear — the only kind of scheduled clear. Unlike
+// wipe() (which aborts active extractions and rejects open page waiters), this is
+// non-destructive to anyone actively reading. Returns { removed, freed }.
+function sweepOlderThan(maxAgeMs) {
+  const ms = Number(maxAgeMs);
+  if (!Number.isFinite(ms) || ms < 0) return { removed: 0, freed: 0 };
+  const cutoff = Date.now() - ms;
+  const active = activeExtractionDirs();
+  let removed = 0;
+  let freed = 0;
+  for (const [chapterDir, meta] of Array.from(index)) {
+    if (active.has(chapterDir)) continue;
+    if (meta.atime > cutoff) continue;
+    evictChapterDir(chapterDir);
+    removed++;
+    freed += meta.size;
+  }
+  return { removed, freed };
 }
 
 /**
@@ -230,9 +271,37 @@ function dirSizeSync(dir) {
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
   for (const e of entries) {
     if (!e.isFile()) continue;
+    // Exclude bookkeeping files so the live size matches the value persisted in
+    // the `.ready` marker (which is written after — and therefore excludes —
+    // itself). `.tmp` files are transient half-written extracts.
+    if (e.name === READY_MARKER || e.name.endsWith('.tmp')) continue;
     try { total += fs.statSync(path.join(dir, e.name)).size; } catch { /* ignore */ }
   }
   return total;
+}
+
+// Read the `.ready` marker for a completed chapter dir. Markers written since
+// #4 carry JSON `{ v, size, pages }`; pre-#4 markers are empty. Returns the
+// persisted `size` (or null when empty/legacy/unreadable) plus the marker's
+// mtime — used as the LRU `atime` proxy on a cold start, since true last-access
+// isn't persisted. Returns null only when the marker is ABSENT (a partial
+// extraction from a crashed run). Callers fall back to dirSizeSync() whenever
+// `size` is null, so empty markers still load.
+function readReadyMeta(dir) {
+  let stat;
+  try { stat = fs.statSync(path.join(dir, READY_MARKER)); }
+  catch { return null; } // no marker → not a complete extraction
+  let size = null;
+  let pages = null;
+  try {
+    const raw = fs.readFileSync(path.join(dir, READY_MARKER), 'utf8');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Number.isFinite(parsed.size))  size  = parsed.size;
+      if (parsed && Number.isFinite(parsed.pages)) pages = parsed.pages;
+    }
+  } catch { /* empty or legacy marker — size stays null, caller falls back */ }
+  return { size, pages, mtimeMs: stat.mtimeMs };
 }
 
 // ── Central-directory planning ────────────────────────────────────────────
@@ -729,6 +798,20 @@ async function runPhase2({ state, cbzPath, baseStat }) {
       if (!state.extracted.has(plannedFilenames[i])) remaining.add(i);
     }
 
+    // Track real decompressed bytes so the cache index converges to the true
+    // on-disk size rather than the compressed-archive estimate (which under-
+    // counts for PNG-heavy archives). Seed from the prefix files already on disk
+    // from Phase 1, then add each page's actual extracted size; reserve an
+    // average-per-page estimate for *each* page still pending (perPage ×
+    // remaining), so the running total stays ≈ the archive size throughout and
+    // lands exactly on the real size once `remaining` empties.
+    const perPageEstimate = approxPerPage(baseStat.size, entries.length);
+    let bytesSoFar = dirSizeSync(chapterDir);
+    const reconcileReserved = () => {
+      updateIndexSize(chapterDir, bytesSoFar + perPageEstimate * remaining.size);
+    };
+    reconcileReserved();
+
     while (remaining.size > 0) {
       if (signal.aborted) throw makeChapterRemovedError();
 
@@ -762,7 +845,7 @@ async function runPhase2({ state, cbzPath, baseStat }) {
       }
 
       try {
-        await extractOneEntry(zip, entries[i], chapterDir, cacheFilename);
+        bytesSoFar += await extractOneEntry(zip, entries[i], chapterDir, cacheFilename);
       } catch (e) {
         if (isChapterRemovedError(e) || signal.aborted) throw e;
         // Single-page failure (corrupt entry / read-write error). Record it so
@@ -797,22 +880,25 @@ async function runPhase2({ state, cbzPath, baseStat }) {
         catch { /* synchronous throw — ignore */ }
       }
 
-      // Update the reserved-size estimate every page so the index stays
-      // close to reality during long Phase 2 runs.
-      try {
-        const sz = fs.statSync(target).size;
-        const existing = index.get(chapterDir);
-        if (existing) updateIndexSize(chapterDir, existing.size + sz - approxPerPage(baseStat.size, entries.length));
-      } catch { /* ignore */ }
+      // Re-reserve from the running real-bytes total + estimate for the rest,
+      // so the index stays close to reality during long Phase 2 runs and lands
+      // exactly on the real size once `remaining` empties.
+      reconcileReserved();
     }
 
     if (signal.aborted) throw makeChapterRemovedError();
 
-    // Write the .ready marker last so a crash leaves the dir unrecoverable.
-    await fsp.writeFile(path.join(chapterDir, READY_MARKER), '');
+    // Compute the real on-disk size BEFORE writing `.ready` so the marker can
+    // carry it (and so dirSizeSync — which skips the marker — agrees with the
+    // persisted value). The marker is still the crash-safety sentinel written
+    // last; a crash before it lands leaves the dir unrecoverable as before.
+    const realSize = dirSizeSync(chapterDir);
+    await fsp.writeFile(
+      path.join(chapterDir, READY_MARKER),
+      JSON.stringify({ v: 1, size: realSize, pages: entries.length }),
+    );
 
     // Reconcile reserved size with reality.
-    const realSize = dirSizeSync(chapterDir);
     updateIndexSize(chapterDir, realSize);
     evictIfNeeded(chapterDir);
   } catch (err) {
@@ -956,13 +1042,18 @@ async function ensureChapterExtracted(chapterId, cbzPath, opts = {}) {
     }
   }
 
-  // On-disk hit from a previous run that init() hasn't walked yet.
-  try {
-    await fsp.access(readyPath);
-    const size = dirSizeSync(dir);
-    addToIndex(dir, size);
-    return { dir, plannedPages: null, freshlyExtracted: false, mode, extracting: false };
-  } catch { /* need to extract */ }
+  // On-disk hit from a previous run that init() hasn't walked yet. This is an
+  // active access (a caller is opening the chapter right now), so let `atime`
+  // default to now — the marker mtime is only the right seed for init()'s
+  // passive boot-time rebuild.
+  {
+    const readyMeta = readReadyMeta(dir);
+    if (readyMeta) {
+      const size = Number.isFinite(readyMeta.size) ? readyMeta.size : dirSizeSync(dir);
+      addToIndex(dir, size);
+      return { dir, plannedPages: null, freshlyExtracted: false, mode, extracting: false };
+    }
+  }
 
   if (mode === 'full') {
     return runFullExtract({ chapterId, cbzPath, stat, dir });
@@ -999,8 +1090,11 @@ async function runFullExtract({ chapterId, cbzPath, stat, dir }) {
         notifyPageReady(state, plannedPages[i].cacheFilename);
       }
 
-      await fsp.writeFile(path.join(dir, READY_MARKER), '');
       const realSize = dirSizeSync(dir);
+      await fsp.writeFile(
+        path.join(dir, READY_MARKER),
+        JSON.stringify({ v: 1, size: realSize, pages: entries.length }),
+      );
       updateIndexSize(dir, realSize);
       evictIfNeeded(dir);
       return { plannedPages };
@@ -1259,8 +1353,9 @@ function init(limitBytes) {
   for (const dirEnt of chapterDirs) {
     if (!dirEnt.isDirectory()) continue;
     const full = path.join(root, dirEnt.name);
-    const ready = path.join(full, READY_MARKER);
-    if (!fs.existsSync(ready)) {
+    const meta = readReadyMeta(full);
+    if (!meta) {
+      // No `.ready` marker → partial extraction from a crashed run.
       try { fs.rmSync(full, { recursive: true, force: true }); } catch { /* ignore */ }
       continue;
     }
@@ -1272,8 +1367,12 @@ function init(limitBytes) {
         }
       }
     } catch { /* ignore */ }
-    const size = dirSizeSync(full);
-    index.set(full, { size });
+    // Trust the size persisted in the marker (#4) to avoid a per-page statSync
+    // walk of the whole cache at boot; fall back to a disk walk for empty/legacy
+    // markers. `atime` seeds from the marker's mtime (completion time) as a
+    // last-access proxy — see the `index` comment.
+    const size = Number.isFinite(meta.size) ? meta.size : dirSizeSync(full);
+    index.set(full, { size, atime: meta.mtimeMs });
     totalBytes += size;
   }
 
@@ -1324,6 +1423,7 @@ module.exports = {
   auditOrphans,
   init,
   wipe,
+  sweepOlderThan,
   stats,
   setLimitBytes,
   DEFAULT_CACHE_LIMIT_BYTES,

@@ -10,49 +10,134 @@ function isImage(filename) {
   return IMAGE_EXTS.has(path.extname(filename).toLowerCase());
 }
 
+// A single number, optionally fractional (chapter 23.5).
+const NUM = '(\\d+(?:\\.\\d+)?)';
+
+// Separators that can sit between the two numbers of a span. Covers hyphen,
+// en-dash (–), em-dash (—), tilde (Japanese-style range), the word
+// "to", and the discrete joiners & + , — these last three express one file
+// holding two non-adjacent numbers ("Yamada v17 & 18"). They are matched
+// BEFORE the underscore/whitespace normalisation strips anything, which is why
+// parseChapterInfo deliberately keeps & + , in the working string.
+const RANGE_SEP = '\\s*(?:-|\\u2013|\\u2014|~|to|&|\\+|,)\\s*';
+
+const VOL_PREFIX = '(?:volumes?|vols?|v)';
+const CH_PREFIX  = '(?:chapters?|chs?|c)';
+
+// Range patterns are tried before the single-number patterns on each axis. The
+// optional repeated prefix on the second number accepts "v17-v18" / "Ch.10-Ch.12".
+//
+// The trailing `(?: SEP NUM )+` matches the WHOLE chained run, not just the
+// first pair — so "Vol 1,2,3,4,5" / "v17 & 18 & 19" are consumed entirely
+// (group 1 = first number, group 2 = the LAST number, since a repeated capture
+// group keeps its final iteration). Without this, the volume match would eat
+// only "Vol 1,2" and the leftover ",3,4,5" would leak into the CHAPTER axis via
+// the bare-number fallback, fabricating a phantom chapter range.
+const VOL_RANGE_RE  = new RegExp(`\\b${VOL_PREFIX}\\.?\\s*${NUM}(?:${RANGE_SEP}(?:${VOL_PREFIX}\\.?\\s*)?${NUM})+\\b`, 'i');
+const VOL_SINGLE_RE = new RegExp(`\\b${VOL_PREFIX}\\.?\\s*${NUM}\\b`, 'i');
+const CH_RANGE_RE   = new RegExp(`\\b${CH_PREFIX}\\.?\\s*${NUM}(?:${RANGE_SEP}(?:${CH_PREFIX}\\.?\\s*)?${NUM})+\\b`, 'i');
+const CH_SINGLE_RE  = new RegExp(`\\b${CH_PREFIX}\\.?\\s*${NUM}\\b`, 'i');
+const BARE_RANGE_RE = new RegExp(`\\b${NUM}(?:${RANGE_SEP}${NUM})+\\b`, 'g');
+const BARE_NUM_RE   = /\b(\d+(?:\.\d+)?)\b/g;
+
+// Reject absurd spans that almost certainly come from a mis-parse ("c1-9999").
+// Both the scheduler's covered-set expansion and the statistics weighting
+// multiply by the span, so an unbounded value would poison them.
+const MAX_VOLUME_SPAN  = 50;
+const MAX_CHAPTER_SPAN = 100;
+
+function isYear(n) {
+  return Number.isInteger(n) && n >= 1900 && n <= 2099;
+}
+
+// Validate a [start, end] pair as a real ascending span within the cap.
+// Returns { value, end } or null (caller then treats it as a single number).
+function resolveSpan(startStr, endStr, maxSpan) {
+  const s = parseFloat(startStr);
+  const e = parseFloat(endStr);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return null;
+  if (e <= s) return null;
+  if (e - s > maxSpan) return null;
+  return { value: s, end: e };
+}
+
 /**
- * Parse chapter and volume numbers from a folder/file name.
- * Returns { chapter: float|null, volume: float|null }.
+ * Parse chapter and volume numbers from a folder/file name. A single file or
+ * folder can span a RANGE of chapters and/or volumes; the name reflects it
+ * (e.g. "Yamada-kun v17-18.cbz" holds volumes 17–18).
  *
- * Handles messy real-world names like:
- *   "Vol. 03 Ch. 023.5 - Some Title [Group]"  → { volume: 3, chapter: 23.5 }
- *   "[Fansub] Vol.02 Ch.012 Extra Text"        → { volume: 2, chapter: 12 }
- *   "Chapter 23.5"                             → { volume: null, chapter: 23.5 }
- *   "001"                                      → { volume: null, chapter: 1 }
+ * Returns { chapter, chapterEnd, volume, volumeEnd } — the `*End` fields are
+ * null unless a range was detected, in which case `chapter`/`volume` hold the
+ * START and `chapterEnd`/`volumeEnd` the END (inclusive).
+ *
+ * Examples:
+ *   "Vol. 03 Ch. 023.5 - Title [Group]" → { volume: 3,  volumeEnd: null, chapter: 23.5, chapterEnd: null }
+ *   "Yamada-kun v17-18"                 → { volume: 17, volumeEnd: 18,   chapter: null, chapterEnd: null }
+ *   "Vol. 1-2 Ch. 5-12"                 → { volume: 1,  volumeEnd: 2,    chapter: 5,    chapterEnd: 12   }
+ *   "v17 & 18"                          → { volume: 17, volumeEnd: 18,   chapter: null, chapterEnd: null }
+ *   "001-005"                           → { volume: null, volumeEnd: null, chapter: 1,  chapterEnd: 5    }
  */
 function parseChapterInfo(name) {
   // Strip only known archive/image extensions — NOT path.extname() which incorrectly
   // treats e.g. ".13 - Title" as an extension for folder names like "Ch.13 - Title".
   let base = path.basename(name).replace(/\.(cbz|zip|7z|rar|pdf|jpg|jpeg|png|webp|gif|avif)$/i, '');
   base = base.replace(/\[.*?\]/g, ' ');
-  base = base.replace(/[_&+]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Normalise underscores, but KEEP & + , — the range patterns consume them as
+  // discrete joiners. Collapsing them to spaces here (the old behaviour) would
+  // make "v17 & 18" indistinguishable from a stray title number.
+  base = base.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
 
-  let volume = null;
-  let chapter = null;
+  let volume = null, volumeEnd = null;
+  let chapter = null, chapterEnd = null;
 
-  const volMatch = base.match(/\b(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)\b/i);
+  // ── Volume (range first, else single) ────────────────────────────────────
+  let volMatch = base.match(VOL_RANGE_RE);
+  let span = volMatch ? resolveSpan(volMatch[1], volMatch[2], MAX_VOLUME_SPAN) : null;
+  if (span) {
+    volume = span.value;
+    volumeEnd = span.end;
+  } else {
+    volMatch = base.match(VOL_SINGLE_RE);
+    if (volMatch) volume = parseFloat(volMatch[1]);
+  }
   if (volMatch) {
-    volume = parseFloat(volMatch[1]);
+    // Remove the matched volume text so its digits can't be re-read as a chapter.
     base = (base.slice(0, volMatch.index) + base.slice(volMatch.index + volMatch[0].length))
       .replace(/\s+/g, ' ').trim();
   }
 
-  const chMatch = base.match(/\b(?:ch(?:apter)?|c)\.?\s*(\d+(?:\.\d+)?)\b/i);
-  if (chMatch) {
-    chapter = parseFloat(chMatch[1]);
+  // ── Chapter (range first, else single) ───────────────────────────────────
+  let chMatch = base.match(CH_RANGE_RE);
+  span = chMatch ? resolveSpan(chMatch[1], chMatch[2], MAX_CHAPTER_SPAN) : null;
+  if (span) {
+    chapter = span.value;
+    chapterEnd = span.end;
+  } else {
+    chMatch = base.match(CH_SINGLE_RE);
+    if (chMatch) chapter = parseFloat(chMatch[1]);
   }
 
+  // ── Fallback: no explicit "Ch" prefix found ──────────────────────────────
   if (chapter === null) {
-    const numRe = /\b(\d+(?:\.\d+)?)\b/g;
-    let numMatch;
-    while ((numMatch = numRe.exec(base)) !== null) {
-      const n = parseFloat(numMatch[1]);
-      const isYear = Number.isInteger(n) && n >= 1900 && n <= 2099;
-      if (!isYear) { chapter = n; break; }
+    // Bare numeric range ("001-005"), rejecting year–year spans ("2017-2018").
+    BARE_RANGE_RE.lastIndex = 0;
+    let m;
+    while ((m = BARE_RANGE_RE.exec(base)) !== null) {
+      if (isYear(parseFloat(m[1])) || isYear(parseFloat(m[2]))) continue;
+      const sp = resolveSpan(m[1], m[2], MAX_CHAPTER_SPAN);
+      if (sp) { chapter = sp.value; chapterEnd = sp.end; break; }
+    }
+    // Else the first standalone number that isn't a 4-digit year.
+    if (chapter === null) {
+      BARE_NUM_RE.lastIndex = 0;
+      while ((m = BARE_NUM_RE.exec(base)) !== null) {
+        const n = parseFloat(m[1]);
+        if (!isYear(n)) { chapter = n; break; }
+      }
     }
   }
 
-  return { chapter, volume };
+  return { chapter, chapterEnd, volume, volumeEnd };
 }
 
 function parseChapterNumber(name) {

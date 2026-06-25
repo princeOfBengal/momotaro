@@ -1,6 +1,7 @@
 const { getDb } = require('../db/database');
 const { getSource } = require('../sources');
 const downloader = require('../downloader/queue');
+const { expandChapterRange } = require('../utils');
 
 // Per-manga auto-check scheduler.
 //
@@ -89,10 +90,13 @@ function chapterNumbersEqual(a, b) {
 }
 
 /**
- * Read the local chapter set for a manga as a sorted list of numeric
- * chapter values. `chapters.number` is populated by the scanner via
- * `parseChapterInfo` ([scanner/chapterParser.js]), which already handles
- * Chapter 1, ch 01, c01, ch.1, etc. — so we don't need to re-parse here.
+ * Read the local chapter set for a manga as a flat list of numeric chapter
+ * values. `chapters.number` / `chapters.number_end` are populated by the
+ * scanner via `parseChapterInfo` ([scanner/chapterParser.js]), which handles
+ * Chapter 1, ch 01, c01, ch.1, AND multi-chapter ranges (Ch 10-12) — so we
+ * don't re-parse here, only expand each row's span into the chapters it covers
+ * (a "Ch 10-12" file contributes 10, 11, 12) so bundled chapters aren't
+ * re-downloaded.
  *
  * Volume-only entries (number IS NULL) are excluded from the comparison
  * set; they're impossible to dedupe against numbered remote rows without
@@ -101,9 +105,10 @@ function chapterNumbersEqual(a, b) {
  * catches duplicates at the filesystem level.
  */
 function localChapterNumbers(db, mangaId) {
-  return db.prepare(
-    `SELECT number FROM chapters WHERE manga_id = ? AND number IS NOT NULL`
-  ).all(mangaId).map(r => Number(r.number));
+  const rows = db.prepare(
+    `SELECT number, number_end FROM chapters WHERE manga_id = ? AND number IS NOT NULL`
+  ).all(mangaId);
+  return rows.flatMap(r => expandChapterRange(r.number, r.number_end));
 }
 
 function isMissing(localNums, remoteNumber) {

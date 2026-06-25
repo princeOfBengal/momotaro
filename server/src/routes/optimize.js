@@ -16,17 +16,74 @@ function isImage(f) { return IMAGE_EXTS.has(path.extname(f).toLowerCase()); }
 function naturalSort(a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }); }
 
 /**
- * Build a clean, standard chapter name from parsed info.
- * Examples: { volume: 3, chapter: 15 } → "Vol 3 Ch 15"
- *           { volume: null, chapter: 23.5 } → "Ch 23.5"
- *           { volume: 2, chapter: null } → "Vol 2"
+ * Render one axis of a span: "15" for a single number, "17-18" for a range.
+ */
+function fmtSpan(start, end) {
+  return end != null && end !== start ? `${start}-${end}` : `${start}`;
+}
+
+/**
+ * Build a clean, standard chapter name from parsed info. Range-aware: a single
+ * file can span multiple chapters/volumes.
+ * Examples: { volume: 3, chapter: 15 }                       → "Vol 3 Ch 15"
+ *           { volume: 17, volumeEnd: 18 }                    → "Vol 17-18"
+ *           { chapter: 10, chapterEnd: 12 }                  → "Ch 10-12"
+ *           { volume: 1, volumeEnd: 2, chapter: 5, chapterEnd: 12 } → "Vol 1-2 Ch 5-12"
  * Returns null if neither is present.
  */
-function buildStandardName({ chapter, volume }) {
-  if (volume !== null && chapter !== null) return `Vol ${volume} Ch ${chapter}`;
-  if (chapter !== null) return `Ch ${chapter}`;
-  if (volume !== null) return `Vol ${volume}`;
+function buildStandardName({ chapter, chapterEnd, volume, volumeEnd }) {
+  const v = volume  !== null ? `Vol ${fmtSpan(volume, volumeEnd)}`  : null;
+  const c = chapter !== null ? `Ch ${fmtSpan(chapter, chapterEnd)}` : null;
+  if (v && c) return `${v} ${c}`;
+  if (c) return c;
+  if (v) return v;
   return null;
+}
+
+// ── Progress reconciliation across a standardizing rename ────────────────────
+//
+// Renaming a chapter file changes its folder_name, so the incremental scanner
+// deletes the old chapters row and inserts a new one with a fresh id. That id
+// churn would otherwise orphan read-state: `progress.completed_chapters` (a JSON
+// blob of chapter ids, untouched by the delete) keeps pointing at the dead id,
+// and `progress.current_chapter_id` is wiped to NULL by its ON DELETE SET NULL.
+//
+// The parsed span tuple (number/number_end/volume/volume_end) is INVARIANT
+// across a standardizing rename — "Yamada v17-18" and "Vol 17-18" both parse to
+// volume 17–18 — so we map old id → new id by matching that tuple within the
+// manga and rewrite every user's progress row.
+
+function snapshotChapterTuples(db, mangaId) {
+  return db.prepare(
+    'SELECT id, number, number_end, volume, volume_end FROM chapters WHERE manga_id = ?'
+  ).all(mangaId);
+}
+
+function tupleKey(r) {
+  return `${r.number}|${r.number_end}|${r.volume}|${r.volume_end}`;
+}
+
+// old id → new id, only for tuples that are unique on BOTH sides (ambiguous
+// duplicates are left alone — safer to under-reconcile than to mis-map).
+function buildIdRemap(oldRows, newRows) {
+  const tally = (rows) => {
+    const m = new Map();
+    for (const r of rows) m.set(tupleKey(r), (m.get(tupleKey(r)) || 0) + 1);
+    return m;
+  };
+  const oldCounts = tally(oldRows);
+  const newCounts = tally(newRows);
+  const newByKey = new Map(newRows.map(r => [tupleKey(r), r.id]));
+
+  const remap = new Map();
+  for (const r of oldRows) {
+    const k = tupleKey(r);
+    if (oldCounts.get(k) === 1 && newCounts.get(k) === 1) {
+      const newId = newByKey.get(k);
+      if (newId != null && newId !== r.id) remap.set(r.id, newId);
+    }
+  }
+  return remap;
 }
 
 /**
@@ -102,6 +159,7 @@ function sevenZipToCbz(sevenZipPath, destCbzPath) {
  * with standardized names, then rescans the manga directory.
  */
 async function performOptimize(manga) {
+  const db = getDb();
   const summary = { renamed: 0, converted: 0, skipped: [], errors: [] };
 
   let entries;
@@ -109,6 +167,16 @@ async function performOptimize(manga) {
     entries = fs.readdirSync(manga.path);
   } catch (err) {
     throw new Error('Could not read directory: ' + err.message);
+  }
+
+  // Snapshot read-state BEFORE the renames churn chapter ids. `current_chapter_id`
+  // is captured here because its ON DELETE SET NULL wipes it during the rescan;
+  // `completed_chapters` is a JSON blob the delete doesn't touch, so it's re-read
+  // fresh afterwards (which also avoids clobbering a concurrent read mid-optimize).
+  const oldChapters = snapshotChapterTuples(db, manga.id);
+  const preCurrent = new Map(); // user_id → current_chapter_id at snapshot time
+  for (const p of db.prepare('SELECT user_id, current_chapter_id FROM progress WHERE manga_id = ?').all(manga.id)) {
+    preCurrent.set(p.user_id, p.current_chapter_id);
   }
 
   // Collect all recognized chapter/volume entries with parsed info
@@ -190,6 +258,39 @@ async function performOptimize(manga) {
     await scanMangaDirectory(manga.path, manga.folder_name, manga.library_id, { source: 'optimize' });
   } catch (err) {
     console.error('[Optimize] Rescan error:', err.message);
+  }
+
+  // Carry read-state across the rename-induced id churn (see buildIdRemap).
+  try {
+    const newChapters = snapshotChapterTuples(db, manga.id);
+    const remap = buildIdRemap(oldChapters, newChapters);
+    if (remap.size > 0) {
+      const liveIds = new Set(newChapters.map(c => c.id));
+      const remapId = (id) => (id == null ? null : (remap.get(id) ?? id));
+      const rows = db.prepare(
+        'SELECT user_id, current_chapter_id, completed_chapters FROM progress WHERE manga_id = ?'
+      ).all(manga.id);
+      const upd = db.prepare(
+        'UPDATE progress SET current_chapter_id = ?, completed_chapters = ? WHERE manga_id = ? AND user_id = ?'
+      );
+      db.transaction(() => {
+        for (const p of rows) {
+          let completed;
+          try { completed = JSON.parse(p.completed_chapters || '[]'); } catch { completed = []; }
+          completed = [...new Set(completed.map(remapId).filter(id => liveIds.has(id)))];
+          // current_chapter_id was nulled by the delete — restore from the
+          // pre-rename snapshot only if nothing re-set it in the meantime.
+          let current = p.current_chapter_id;
+          if (current == null) {
+            const restored = remapId(preCurrent.get(p.user_id));
+            current = (restored != null && liveIds.has(restored)) ? restored : null;
+          }
+          upd.run(current, JSON.stringify(completed), manga.id, p.user_id);
+        }
+      })();
+    }
+  } catch (err) {
+    console.warn('[Optimize] Progress reconciliation failed:', err.message);
   }
 
   return summary;

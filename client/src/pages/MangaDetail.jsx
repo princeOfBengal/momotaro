@@ -17,6 +17,7 @@ import {
 import { getJobForChapter, listJobs, getOfflineChapter, listOfflineChaptersForManga } from '../api/offlineDb';
 import { isAvailable as offlineStorageAvailable } from '../api/offlineStorage';
 import { getResume, clearResume } from '../utils/readingProgress';
+import { fmtSpan } from '../utils/format';
 import { appAlert, appConfirm, ensureAdminAccess } from '../dialog/dialogService';
 import './MangaDetail.css';
 
@@ -36,13 +37,11 @@ const CHAPTER_JUMP_THRESHOLD = 30;
 // volume and number are unknown (manga ripped without metadata).
 function formatChapterLabel(ch, trackVolumes) {
   if (!ch) return '—';
-  if (ch.volume != null && ch.number != null) {
-    return `Vol. ${ch.volume} Ch. ${ch.number}`;
-  }
-  if (ch.volume != null) return `Volume ${ch.volume}`;
-  if (ch.number != null) {
-    return `${trackVolumes ? 'Volume' : 'Chapter'} ${ch.number}`;
-  }
+  const v = ch.volume != null ? fmtSpan(ch.volume, ch.volume_end) : null;
+  const n = ch.number != null ? fmtSpan(ch.number, ch.number_end) : null;
+  if (v != null && n != null) return `Vol. ${v} Ch. ${n}`;
+  if (v != null) return `Volume ${v}`;
+  if (n != null) return `${trackVolumes ? 'Volume' : 'Chapter'} ${n}`;
   return ch.folder_name || '—';
 }
 
@@ -2098,8 +2097,8 @@ export default function MangaDetail() {
   // subtitle — that shadow was the cause of "Vol. undefined Ch.
   // undefined" labels on the chapter list in 1.12.1.
   function formatGalleryItemLabel(item) {
-    const vol = item.chapter_volume;
-    const num = item.chapter_number;
+    const vol = item.chapter_volume != null ? fmtSpan(item.chapter_volume, item.chapter_volume_end) : null;
+    const num = item.chapter_number != null ? fmtSpan(item.chapter_number, item.chapter_number_end) : null;
     if (vol != null && num != null) return `Vol. ${vol} Ch. ${num}`;
     if (vol != null)                return `Volume ${vol}`;
     if (num != null)                return (manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`);
@@ -2391,9 +2390,10 @@ export default function MangaDetail() {
     const q = deferredChapterFilter.trim().toLowerCase();
     return displayChapters.filter(ch => {
       // Match on number, volume, title, or folder_name — the same fields
-      // formatChapterLabel inspects, plus the title for free-form names.
-      const num    = ch.number != null ? String(ch.number) : '';
-      const vol    = ch.volume != null ? String(ch.volume) : '';
+      // formatChapterLabel inspects, plus the title for free-form names. Spans
+      // ("17-18") let a filter for either the start or end number match.
+      const num    = ch.number != null ? fmtSpan(ch.number, ch.number_end) : '';
+      const vol    = ch.volume != null ? fmtSpan(ch.volume, ch.volume_end) : '';
       const title  = (ch.title || '').toLowerCase();
       const folder = (ch.folder_name || '').toLowerCase();
       return num.includes(q) || vol.includes(q) || title.includes(q) || folder.includes(q);

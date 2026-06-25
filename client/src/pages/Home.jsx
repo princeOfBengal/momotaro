@@ -7,6 +7,7 @@ import { useUserPref, usePreferences } from '../context/PreferencesContext';
 // MangaCard is also statically imported by Library, so it lives in the main
 // chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
+import { fmtSpan } from '../utils/format';
 import './Library.css';
 import './Home.css';
 
@@ -180,12 +181,13 @@ function CoverImg({ src, alt, eager = false }) {
 
 const ContinueReadingTile = memo(function ContinueReadingTile({ manga, eager }) {
   const track = manga.track_volumes ? 'Volume' : 'Chapter';
-  const label = manga.current_chapter
-    ? (manga.current_chapter.number != null
-        ? `${track} ${manga.current_chapter.number}`
-        : (manga.current_chapter.volume != null
-            ? `Volume ${manga.current_chapter.volume}`
-            : manga.current_chapter.folder_name || '—'))
+  const cc = manga.current_chapter;
+  const label = cc
+    ? (cc.number != null
+        ? `${track} ${fmtSpan(cc.number, cc.number_end)}`
+        : (cc.volume != null
+            ? `Volume ${fmtSpan(cc.volume, cc.volume_end)}`
+            : cc.folder_name || '—'))
     : '—';
   const pct = manga.total_chapters > 0
     ? Math.min(100, Math.round((manga.completed_count / manga.total_chapters) * 100))
@@ -245,11 +247,12 @@ const MangaTile = memo(function MangaTile({ manga, sub, eager }) {
 function ResumeHero({ manga }) {
   if (!manga || !manga.current_chapter_id) return null;
   const track = manga.track_volumes ? 'Volume' : 'Chapter';
-  const label = manga.current_chapter?.number != null
-    ? `${track} ${manga.current_chapter.number}`
-    : (manga.current_chapter?.volume != null
-        ? `Volume ${manga.current_chapter.volume}`
-        : manga.current_chapter?.folder_name || '—');
+  const cc = manga.current_chapter;
+  const label = cc?.number != null
+    ? `${track} ${fmtSpan(cc.number, cc.number_end)}`
+    : (cc?.volume != null
+        ? `Volume ${fmtSpan(cc.volume, cc.volume_end)}`
+        : cc?.folder_name || '—');
   const page = manga.current_page ? Number(manga.current_page) : 0;
   const pageCount = manga.current_chapter?.page_count || 0;
   const pct = pageCount > 0

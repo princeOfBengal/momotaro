@@ -309,7 +309,7 @@ This endpoint is computed **on demand** (not from the cached scan-time columns) 
 - `file_count` — number of chapter rows for the manga (a chapter folder counts as 1, a single CBZ counts as 1), via `COUNT(*)` on `chapters`.
 - `size_mb` — recursive on-disk size of `manga.path`, computed by an iterative `readdir`/`stat` walk at request time (returns 0 if the folder is missing).
 - `track_volumes` — the manga's flag, so the client knows which axis to display.
-- `missing_chapters` / `missing_volumes` — **gap detection**. Each chapter is bucketed into the integer floor of its `number` / `volume` (so `5.5` still covers chapter 5); the response lists the integers in `[1, max]` with no chapter assigned. Shape: `{ count, numbers, max, truncated }`, where `numbers` is capped at 500 entries and `truncated` is true when `count` exceeds the cap. Both axes are always returned so the client can re-render if the `track_volumes` toggle changes without another round-trip.
+- `missing_chapters` / `missing_volumes` — **gap detection**. Each chapter is bucketed into the integer floor of its `number` / `volume` (so `5.5` still covers chapter 5); the response lists the integers in `[1, max]` with no chapter assigned. **Multi-chapter / multi-volume files are expanded** (via `expandChapterRange`) so a `Ch 10-12` file marks 10, 11, 12 present and a `v17-18` file marks 17, 18 — otherwise the bundled middle/end numbers would be falsely reported missing (and `max` understated). Shape: `{ count, numbers, max, truncated }`, where `numbers` is capped at 500 entries and `truncated` is true when `count` exceeds the cap. Both axes are always returned so the client can re-render if the `track_volumes` toggle changes without another round-trip. (`file_count` stays a per-file count — a range file is one file on disk.)
 
 ### `GET /api/manga/:id/thumbnail-options` response
 
@@ -1109,7 +1109,20 @@ The combined effect is that under typical usage the Browse By Genre page costs *
 **`top_genres` vs `favorite_genres`:**
 
 - `top_genres` counts how many **series** are tagged with each genre (the library's genre inventory).
-- `favorite_genres` ranks genres by **reading history**, weighting volumes more heavily than chapters. Every read item contributes to each of that manga's genres: a file/folder labeled as a **volume** counts as **4 chapters** (a volume typically holds at least four chapters), while one labeled as a **chapter**, one labeled as **both** volume and chapter, or one with only a bare number counts as **1**. Volume-vs-chapter is read from the scanned `chapters.volume` / `chapters.number` labels. So a reader who has finished 40 chapters of a 3-genre series adds 40 to each of those three genres; one drama volume adds 4 to Drama. Only manga with at least one completed chapter contribute. Titles with no metadata (and therefore no genres) are naturally excluded. Top 10 returned; ties break on genre name ascending. The same volume-weighted computation drives `/api/home`'s Discover and per-genre ribbons, so both views agree.
+- `favorite_genres` ranks genres by **reading history**, weighting reads in **chapter-equivalents** (the unit `readWeightSql` produces). Every read item contributes its weight to each of that manga's genres: a single **chapter** = **1**; a **chapter range** (`Ch 10-12`) = its span (**3**); a single **volume** = **4** (a volume averages ~4 chapters); a **volume range** (`v17-18`) = `4 ×` the span (**8**); a file labeled with **both** a volume and a single chapter counts as **1** (the chapter axis dominates). So a reader who finished 40 chapters of a 3-genre series adds 40 to each of those three genres; one drama volume adds 4 to Drama, and a `v17-18` drama omnibus adds 8. Only manga with at least one completed chapter contribute. Titles with no metadata (and therefore no genres) are naturally excluded. Top 10 returned; ties break on genre name ascending. The same weighted computation drives `/api/home`'s Discover and per-genre ribbons, so both views agree.
+
+**Chapter-equivalent weighting (multi-chapter / multi-volume files):** the same
+weighting also drives two other figures, so the whole Statistics page speaks one
+unit:
+
+- `total_chapters` is the library inventory in **chapter-equivalents** — a `v17-18`
+  file counts as 8, a `Vol 3` folder as 4, a `Ch 10-12` file as 3 — deliberately
+  **not** the raw per-file chapter list shown on MangaDetail.
+- `top_manga` (Popular Series) is ranked and counted by **chapter-equivalents read**,
+  so a reader of volume-based series ranks alongside one reading single chapters.
+  The displayed count keeps the `{n} ch` label and can exceed a series' literal
+  file count. (Home's "continue reading" `completed_count` stays a literal chapter
+  count that can never exceed the manga's live total — it is _not_ weighted.)
 
 Genre aggregation and read-time estimation are computed entirely in SQL against the normalised `manga_genres` table, not by walking JSON blobs. `total_size_bytes` is a single `SUM(manga.bytes_on_disk)` over the cached per-manga column written by the scanner; it no longer walks the filesystem. See [scanner.md](./scanner.md#cached-disk-usage-columns).
 

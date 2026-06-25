@@ -85,8 +85,10 @@ One row per chapter folder or CBZ file.
 | `folder_name` | TEXT | Bare file/folder name |
 | `path` | TEXT | Absolute path |
 | `type` | TEXT | `folder` or `cbz` |
-| `number` | REAL | Parsed chapter number (null if volume-only) |
-| `volume` | REAL | Parsed volume number (null if chapter-only) |
+| `number` | REAL | Parsed chapter number — the **start** of a chapter range (null if volume-only) |
+| `number_end` | REAL | Inclusive **end** chapter when the file spans a range (`Ch 10-12`); null for a single chapter. See [scanner.md § Chapter/Volume Name Parsing](./scanner.md#chaptervolume-name-parsing). |
+| `volume` | REAL | Parsed volume number — the **start** of a volume range (null if chapter-only) |
+| `volume_end` | REAL | Inclusive **end** volume when the file spans a range (`v17-18`); null for a single volume. |
 | `title` | TEXT | Optional chapter title |
 | `page_count` | INTEGER | |
 | `file_mtime` | INTEGER | Unix timestamp (seconds) of the chapter file/folder at last scan — used to skip re-processing unchanged chapters |
@@ -497,6 +499,8 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `libraries` | `show_in_all` | Multi-library "All Libraries" filter |
 | `libraries` | `last_scan_mtime_ms` | Startup-scan root-mtime shortcut |
 | `chapters` | `volume` | Volume-level chapter tracking |
+| `chapters` | `number_end` | Multi-chapter range support (`Ch 10-12`) |
+| `chapters` | `volume_end` | Multi-volume range support (`v17-18`) |
 | `chapters` | `file_mtime` | Incremental scan optimisation |
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |

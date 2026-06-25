@@ -8,7 +8,9 @@ const SELECT_ITEM_SQL = `
   SELECT g.id, g.manga_id, g.chapter_id, g.page_id, g.created_at,
          p.page_index,
          c.number       AS chapter_number,
+         c.number_end   AS chapter_number_end,
          c.volume       AS chapter_volume,
+         c.volume_end   AS chapter_volume_end,
          c.folder_name  AS chapter_folder_name,
          c.title        AS chapter_title
   FROM art_gallery g
@@ -28,7 +30,9 @@ router.get('/gallery/all', asyncWrapper(async (req, res) => {
            ag.chapter_id,
            c.folder_name AS chapter_folder_name,
            c.number AS chapter_number,
+           c.number_end AS chapter_number_end,
            c.volume AS chapter_volume,
+           c.volume_end AS chapter_volume_end,
            c.title  AS chapter_title,
            ag.page_id, p.page_index, p.width, p.height,
            ag.created_at

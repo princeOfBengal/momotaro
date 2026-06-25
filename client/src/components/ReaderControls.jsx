@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { isAndroid } from '../api/volumeButtons';
 import ToggleRow from './ToggleRow';
 import { useActionStatus } from '../hooks/useActionStatus';
+import { fmtSpan } from '../utils/format';
 import {
   READING_MODE_OPTIONS,
   ORIENTATION_OPTIONS,
@@ -112,15 +113,18 @@ export default function ReaderControls({
 
   const backUrl = mangaId ? `/manga/${mangaId}` : '/';
   const unitLabel = manga?.track_volumes ? 'Volume' : 'Chapter';
-  const chapterTitle = chapter
-    ? (chapter.volume !== null && chapter.number !== null)
-        ? `Vol. ${chapter.volume} Ch. ${chapter.number}`
-        : chapter.volume !== null
-          ? `Volume ${chapter.volume}`
-          : chapter.number !== null
-            ? `${unitLabel} ${chapter.number}`
-            : chapter.folder_name
-    : '';
+  // Range-aware: a chapter file can span multiple chapters/volumes (e.g. v17-18).
+  const volSpan = chapter && chapter.volume != null ? fmtSpan(chapter.volume, chapter.volume_end) : null;
+  const numSpan = chapter && chapter.number != null ? fmtSpan(chapter.number, chapter.number_end) : null;
+  const chapterTitle = !chapter
+    ? ''
+    : (volSpan != null && numSpan != null)
+        ? `Vol. ${volSpan} Ch. ${numSpan}`
+        : volSpan != null
+          ? `Volume ${volSpan}`
+          : numSpan != null
+            ? `${unitLabel} ${numSpan}`
+            : chapter.folder_name;
 
   return (
     <>

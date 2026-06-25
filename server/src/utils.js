@@ -134,6 +134,30 @@ function computeMissingSequence(values) {
 }
 
 /**
+ * Aggregate a manga's per-source ratings into the single 0–10 `score` value the
+ * library / homepage sort and the grid cards read. Simple unweighted mean of
+ * every non-null per-source rating, rounded to one decimal (matching the
+ * `.toFixed(1)` display everywhere). Returns `null` when no source has a rating.
+ *
+ * Sources: AniList / MAL / MangaUpdates community ratings (the chips on the
+ * detail page) plus `local_score` — a generic hand-authored / ComicInfo score
+ * that feeds the average but is never shown as its own chip. Doujinshi has no
+ * rating, so it has no column here.
+ *
+ * Accepts the manga row directly; only the four `*_score` keys are read, so the
+ * full `SELECT *` row can be passed without picking fields first.
+ */
+function computeAggregateScore(row) {
+  if (!row) return null;
+  const parts = [row.anilist_score, row.mal_score, row.mangaupdates_score, row.local_score]
+    .map(v => (v == null ? null : Number(v)))
+    .filter(v => v != null && Number.isFinite(v));
+  if (parts.length === 0) return null;
+  const mean = parts.reduce((a, b) => a + b, 0) / parts.length;
+  return Math.round(mean * 10) / 10;
+}
+
+/**
  * Read a row from the `settings` key/value table. Returns `null` when the row
  * is missing OR its value is the empty string (the schema default) — several
  * call sites compare with `=== '1'`, so the "" → null collapse keeps "unset"
@@ -156,5 +180,5 @@ function setSetting(db, key, value) {
 module.exports = {
   safeJsonParse, csvEscape, formatUnix, getSetting, setSetting,
   naturalSort, compareByBasename, expandChapterRange, readWeightSql,
-  computeMissingSequence,
+  computeMissingSequence, computeAggregateScore,
 };

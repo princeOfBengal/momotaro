@@ -6,6 +6,7 @@ const { parseChapterInfo, getChapterPages, detectChapterType } = require('./chap
 const { generateThumbnail } = require('./thumbnailGenerator');
 const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
+const { computeAggregateScore } = require('../utils');
 const { reinforceAllCovers } = require('./coverResolver');
 const { enforceMetadataPriorityForLibrary } = require('../routes/metadata');
 const cbzCache = require('./cbzCache');
@@ -429,23 +430,46 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
   // re-scan; or use Break Linkage in the UI.
   const localMeta = findLocalMetadata(mangaPath);
   if (localMeta) {
+    // Merge the sidecar's per-source ratings over whatever the row already
+    // has (a provider value from the file wins; otherwise the existing column
+    // is preserved), then recompute the average `score` from the merge so
+    // local metadata and provider linkages coexist on the same row.
+    const cur = db.prepare(
+      'SELECT anilist_score, mal_score, mangaupdates_score, local_score FROM manga WHERE id = ?'
+    ).get(mangaId) || {};
+    const s = localMeta.scores || {};
+    const merged = {
+      anilist_score:      s.anilist      ?? cur.anilist_score      ?? null,
+      mal_score:          s.myanimelist  ?? cur.mal_score          ?? null,
+      mangaupdates_score: s.mangaupdates ?? cur.mangaupdates_score ?? null,
+      local_score:        s.local        ?? cur.local_score        ?? null,
+    };
+
     db.prepare(`
       UPDATE manga SET
-        title           = COALESCE(?, title),
-        description     = COALESCE(?, description),
-        genres          = ?,
-        year            = COALESCE(?, year),
-        score           = COALESCE(?, score),
-        author          = COALESCE(?, author),
-        metadata_source = 'local',
-        updated_at      = unixepoch()
+        title              = COALESCE(?, title),
+        description        = COALESCE(?, description),
+        genres             = ?,
+        year               = COALESCE(?, year),
+        anilist_score      = ?,
+        mal_score          = ?,
+        mangaupdates_score = ?,
+        local_score        = ?,
+        score              = ?,
+        author             = COALESCE(?, author),
+        metadata_source    = 'local',
+        updated_at         = unixepoch()
       WHERE id = ?
     `).run(
       localMeta.title,
       localMeta.description,
       JSON.stringify(localMeta.genres),
       localMeta.year,
-      localMeta.score,
+      merged.anilist_score,
+      merged.mal_score,
+      merged.mangaupdates_score,
+      merged.local_score,
+      computeAggregateScore(merged),
       localMeta.author,
       mangaId
     );

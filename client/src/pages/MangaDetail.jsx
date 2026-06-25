@@ -2665,7 +2665,33 @@ export default function MangaDetail() {
             <div className="detail-meta">
               {manga.status && <span className={`detail-status status-${manga.status.toLowerCase()}`}>{manga.status}</span>}
               {manga.year && <span className="detail-year">{manga.year}</span>}
-              {manga.score && <span className="detail-score">★ {manga.score.toFixed(1)}</span>}
+              {/* Every provider rating the manga has, shown side by side. Falls
+                  back to the single averaged score when there's no per-source
+                  breakdown (e.g. a manga whose only rating came from a local
+                  metadata.json / ComicInfo file). */}
+              {(() => {
+                const RATING_SOURCES = [
+                  { key: 'anilist_score',      label: 'AniList' },
+                  { key: 'mal_score',          label: 'MAL' },
+                  { key: 'mangaupdates_score', label: 'MangaUpdates' },
+                ];
+                const present = RATING_SOURCES.filter(s => manga[s.key] != null);
+                if (present.length > 0) {
+                  return (
+                    <span className="detail-ratings">
+                      {present.map(s => (
+                        <span key={s.key} className="detail-rating-chip" title={`${s.label} rating`}>
+                          <span className="detail-rating-source">{s.label}</span>
+                          {' '}★ {Number(manga[s.key]).toFixed(1)}
+                        </span>
+                      ))}
+                    </span>
+                  );
+                }
+                return manga.score != null
+                  ? <span className="detail-score">★ {manga.score.toFixed(1)}</span>
+                  : null;
+              })()}
               {hasMetadata && (
                 <span className="detail-source">
                   {manga.metadata_source === 'local'

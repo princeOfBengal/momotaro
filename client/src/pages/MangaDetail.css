@@ -324,6 +324,32 @@
   font-weight: 600;
 }
 
+/* Every available provider rating, shown side by side (AniList / MAL / …). */
+.detail-ratings {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.detail-rating-chip {
+  font-size: 13px;
+  color: #ffd700;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 215, 0, 0.1);
+}
+
+.detail-rating-source {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
 .detail-genres {
   display: flex;
   flex-wrap: wrap;

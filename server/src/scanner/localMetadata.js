@@ -3,6 +3,15 @@ const path = require('path');
 
 const IMAGE_EXTS = /\.(jpe?g|png|webp|avif|gif)$/i;
 
+// Coerce a raw rating to a 0–10 number, dividing by 10 when it looks like a
+// 0–100 scale. Returns null for non-positive / unparseable values.
+function score10(v, { assume100 = false } = {}) {
+  const n = parseFloat(v);
+  if (isNaN(n) || n <= 0) return null;
+  if (assume100) return Math.min(10, n / 10);
+  return n > 10 ? Math.min(10, n / 10) : Math.min(10, n);
+}
+
 /**
  * Find the first usable metadata JSON file in a directory.
  *
@@ -155,12 +164,11 @@ function normalizeComicInfo(tags) {
     if (n >= 1900 && n <= 2100) year = n;
   }
 
-  // CommunityRating is 0–5 in the ComicInfo spec; scale to our 0–10.
-  let score = null;
+  // CommunityRating is 0–5 in the ComicInfo spec; scale to our 0–10. It's a
+  // generic hand-authored rating with no provider attribution → `local`.
+  const scores = { anilist: null, myanimelist: null, mangaupdates: null, local: null };
   const cr = parseFloat(tags.CommunityRating);
-  if (!isNaN(cr) && cr > 0) {
-    score = Math.min(10, cr * 2);
-  }
+  if (!isNaN(cr) && cr > 0) scores.local = Math.min(10, cr * 2);
 
   const author =
     str(tags.Writer) ||
@@ -171,7 +179,7 @@ function normalizeComicInfo(tags) {
 
   if (!title && genres.length === 0 && !description) return null;
 
-  return { title, description, genres, year, score, author };
+  return { title, description, genres, year, scores, author };
 }
 
 /**
@@ -220,14 +228,22 @@ function normalizeLocalMeta(raw) {
     }
   }
 
-  // Score / rating (0–10 scale normalisation)
-  let score = null;
-  for (const key of ['score', 'Score', 'rating', 'Rating']) {
-    const v = parseFloat(raw[key]);
-    if (!isNaN(v) && v > 0) {
-      // If the value looks like a 0–100 scale, divide by 10
-      score = v > 10 ? Math.min(10, v / 10) : Math.min(10, v);
-      break;
+  // Ratings. A `ratings` object is what Momotaro's own export writes
+  // (`{ anilist, myanimelist, mangaupdates }`), so re-importing an exported
+  // sidecar round-trips every provider rating into its column. When present we
+  // ignore the top-level `score` (it's our exported average — re-deriving it
+  // from the object avoids double-counting it as a generic local rating).
+  const scores = { anilist: null, myanimelist: null, mangaupdates: null, local: null };
+  if (raw.ratings && typeof raw.ratings === 'object') {
+    scores.anilist      = score10(raw.ratings.anilist);
+    scores.myanimelist  = score10(raw.ratings.myanimelist ?? raw.ratings.mal);
+    scores.mangaupdates = score10(raw.ratings.mangaupdates);
+  } else {
+    // Generic single score/rating (0–10 or 0–100) → treated as a `local`
+    // rating: it feeds the average but is never shown as a provider chip.
+    for (const key of ['score', 'Score', 'rating', 'Rating']) {
+      const s = score10(raw[key]);
+      if (s != null) { scores.local = s; break; }
     }
   }
 
@@ -243,7 +259,7 @@ function normalizeLocalMeta(raw) {
 
   if (!title && genres.length === 0 && !description) return null;
 
-  return { title, description, genres, year, score, author };
+  return { title, description, genres, year, scores, author };
 }
 
 /**
@@ -272,19 +288,17 @@ function normalizeScraperMeta(raw) {
     if (n >= 1900 && n <= 2100) year = n;
   }
 
-  // Score: anilist_score is 0–100; the *_rating fields look like 0–10.
-  let score = null;
-  const anilistScore = parseFloat(raw.anilist_score);
-  if (!isNaN(anilistScore) && anilistScore > 0) {
-    score = Math.min(10, anilistScore / 10);
-  } else {
-    for (const key of ['mangaupdates_bayesian_rating', 'mangaupdates_rating', 'animeplanet_rating']) {
-      const v = parseFloat(raw[key]);
-      if (!isNaN(v) && v > 0) {
-        score = v > 10 ? Math.min(10, v / 10) : Math.min(10, v);
-        break;
-      }
-    }
+  // Per-source ratings. `anilist_score` is 0–100; the `*_rating` fields look
+  // like 0–10. Each maps to its own column so the detail page can show them
+  // side by side. AnimePlanet has no column of its own, so a lone AnimePlanet
+  // rating folds into `local` (feeds the average, no chip).
+  const scores = { anilist: null, myanimelist: null, mangaupdates: null, local: null };
+  scores.anilist     = score10(raw.anilist_score, { assume100: true });
+  scores.myanimelist = score10(raw.mal_score ?? raw.myanimelist_score);
+  scores.mangaupdates =
+    score10(raw.mangaupdates_bayesian_rating) ?? score10(raw.mangaupdates_rating);
+  if (scores.anilist == null && scores.mangaupdates == null && scores.myanimelist == null) {
+    scores.local = score10(raw.animeplanet_rating);
   }
 
   let author = null;
@@ -295,7 +309,7 @@ function normalizeScraperMeta(raw) {
 
   if (!title && genres.length === 0 && !description) return null;
 
-  return { title, description, genres, year, score, author };
+  return { title, description, genres, year, scores, author };
 }
 
 /** Return a trimmed non-empty string, or null. */

@@ -209,6 +209,16 @@ function migrate(db) {
   addColumnIfMissing(db, 'manga',     'mal_cover',         'TEXT');
   addColumnIfMissing(db, 'manga',     'mangaupdates_cover','TEXT');
   addColumnIfMissing(db, 'manga',     'doujinshi_cover',   'TEXT');
+  // Per-source ratings. The single `score` column now holds the *average* of
+  // these (see computeAggregateScore + backfillPerSourceScores); each source
+  // keeps its own value so the detail page can show every rating side by side
+  // and an export can carry them all. `local_score` is the generic
+  // hand-authored / ComicInfo rating — it feeds the average but never gets a
+  // chip. Doujinshi has no community rating, so it has no column.
+  addColumnIfMissing(db, 'manga',     'anilist_score',      'REAL');
+  addColumnIfMissing(db, 'manga',     'mal_score',          'REAL');
+  addColumnIfMissing(db, 'manga',     'mangaupdates_score', 'REAL');
+  addColumnIfMissing(db, 'manga',     'local_score',        'REAL');
   // 1 when the user manually picked a cover via the Thumbnail Picker; the
   // priority-driven Reset Thumbnails op leaves these manga alone unless the
   // operator runs the explicit reset (which clears the flag back to 0).
@@ -224,6 +234,7 @@ function migrate(db) {
 
   migrateSearchIndex(db);
   backfillDoujinshiCover(db);
+  backfillPerSourceScores(db);
   createDownloadJobsTable(db);
   createMangaSourceUrlsTable(db);
   createMangaSchedulesTable(db);
@@ -834,6 +845,106 @@ function backfillDoujinshiCover(db) {
   if (changes > 0) {
     console.log(`[DB] Backfilled doujinshi_cover for ${changes} legacy doujinshi-displayed manga.`);
   }
+}
+
+/**
+ * One-time backfill of the per-source rating columns introduced alongside the
+ * "show every rating" feature. Before this, the single `score` column held the
+ * *displayed* source's rating; now `score` is the average of the per-source
+ * columns, so every existing row needs its per-source columns seeded or the
+ * average (and therefore rating-sort order) would change / go NULL.
+ *
+ * Idempotent via a `settings` marker so it runs exactly once. Best-effort and
+ * offline — it never pings an upstream. Two passes per manga:
+ *
+ *   1. Cache enrichment: for each linkage (anilist / mal / mangaupdates) read
+ *      the on-disk normalized record at data/metadata-cache/<source>/<id>.json
+ *      and copy its `score` into the matching column when present. This is what
+ *      lets a manga that was linked to several sources show every chip right
+ *      after the upgrade without a re-fetch.
+ *   2. Baseline guarantee: if the column matching the row's *displayed* source
+ *      is still NULL, seed it from the current `score` (provider →
+ *      <provider>_score; local / none → local_score). This guarantees the
+ *      recomputed average equals the old `score`, so no row loses its rating
+ *      and rating-sort order is preserved.
+ *
+ * Finally `score` is recomputed from the seeded columns. `cache.js` only pulls
+ * in config + fs, so requiring it here creates no circular load.
+ */
+function backfillPerSourceScores(db) {
+  const { getSetting, setSetting, computeAggregateScore } = require('../utils');
+  if (getSetting(db, 'ratings_per_source_migrated') === '1') return;
+
+  let getCached;
+  try { ({ getCached } = require('../metadata/cache')); } catch { getCached = () => null; }
+
+  const rows = db.prepare(`
+    SELECT id, score, metadata_source, anilist_id, mal_id, mangaupdates_id,
+           anilist_score, mal_score, mangaupdates_score, local_score
+    FROM manga
+  `).all();
+
+  const update = db.prepare(`
+    UPDATE manga SET
+      anilist_score      = ?,
+      mal_score          = ?,
+      mangaupdates_score = ?,
+      local_score        = ?,
+      score              = ?
+    WHERE id = ?
+  `);
+
+  const PROVIDER_SOURCES = new Set(['anilist', 'myanimelist', 'mangaupdates']);
+
+  const readCacheScore = (source, id) => {
+    if (id === null || id === undefined) return null;
+    try {
+      const rec = getCached(source, Number(id));
+      const s = rec?.score;
+      return (s != null && Number.isFinite(Number(s))) ? Number(s) : null;
+    } catch { return null; }
+  };
+
+  let touched = 0;
+  const tx = db.transaction(() => {
+    for (const m of rows) {
+      const next = {
+        anilist_score:      m.anilist_score      ?? readCacheScore('anilist',      m.anilist_id),
+        mal_score:          m.mal_score          ?? readCacheScore('myanimelist',  m.mal_id),
+        mangaupdates_score: m.mangaupdates_score ?? readCacheScore('mangaupdates', m.mangaupdates_id),
+        local_score:        m.local_score        ?? null,
+      };
+
+      // Baseline: seed the displayed source's column from the legacy `score`
+      // when nothing filled it above, so the average never drops a rating.
+      if (m.score != null) {
+        if (PROVIDER_SOURCES.has(m.metadata_source)) {
+          const col = m.metadata_source === 'anilist'      ? 'anilist_score'
+                    : m.metadata_source === 'myanimelist'  ? 'mal_score'
+                    : 'mangaupdates_score';
+          if (next[col] == null) next[col] = Number(m.score);
+        } else if (next.local_score == null
+                   && next.anilist_score == null
+                   && next.mal_score == null
+                   && next.mangaupdates_score == null) {
+          // 'local' / 'none' rows (or anything else) keep their score as the
+          // generic local rating so local-only manga don't lose their value.
+          next.local_score = Number(m.score);
+        }
+      }
+
+      const aggregate = computeAggregateScore(next);
+      update.run(
+        next.anilist_score, next.mal_score, next.mangaupdates_score, next.local_score,
+        aggregate, m.id,
+      );
+      touched++;
+    }
+  });
+  tx();
+
+  setSetting(db, 'ratings_per_source_migrated', '1');
+  console.log(`[DB] Backfilled per-source rating columns for ${touched} manga.`);
 }
 
 /**

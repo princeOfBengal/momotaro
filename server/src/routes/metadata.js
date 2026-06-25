@@ -18,7 +18,7 @@ const { getUserAniList } = require('./settings');
 const { requireAdmin } = require('../middleware/auth');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { reinforceActiveCover } = require('../scanner/coverResolver');
-const { safeJsonParse, getSetting } = require('../utils');
+const { safeJsonParse, getSetting, computeAggregateScore } = require('../utils');
 const cbzCache = require('../scanner/cbzCache');
 const config = require('../config');
 
@@ -134,22 +134,39 @@ function applyMetadataToDb(db, manga, result, source) {
   const muId           = source === 'mangaupdates' ? (result.mangaupdates_id ?? null) : null;
   const doujinshiId    = source === 'doujinshi'    ? (result.doujinshi_id    ?? null) : null;
 
+  // Per-source ratings are stored independently of which source is displayed
+  // — same decoupling as the per-source cover columns. The incoming source's
+  // rating always overwrites its own column; the others (and the generic
+  // local_score) carry over from the row. `score` is then the average of all
+  // non-null per-source ratings, so it stays correct regardless of display
+  // priority. Doujinshi has no rating column, so it only triggers a recompute.
+  const nextScores = {
+    anilist_score:      source === 'anilist'      ? (result.score ?? null) : (manga.anilist_score ?? null),
+    mal_score:          source === 'myanimelist'  ? (result.score ?? null) : (manga.mal_score ?? null),
+    mangaupdates_score: source === 'mangaupdates' ? (result.score ?? null) : (manga.mangaupdates_score ?? null),
+    local_score:        manga.local_score ?? null,
+  };
+  const aggregateScore = computeAggregateScore(nextScores);
+
   if (overwriteDisplay) {
     db.prepare(`
       UPDATE manga SET
-        title           = ?,
-        description     = ?,
-        status          = ?,
-        year            = ?,
-        genres          = ?,
-        score           = ?,
-        author          = ?,
-        anilist_id      = COALESCE(?, anilist_id),
-        mal_id          = COALESCE(?, mal_id),
-        mangaupdates_id = COALESCE(?, mangaupdates_id),
-        doujinshi_id    = COALESCE(?, doujinshi_id),
-        metadata_source = ?,
-        updated_at      = unixepoch()
+        title              = ?,
+        description        = ?,
+        status             = ?,
+        year               = ?,
+        genres             = ?,
+        anilist_score      = ?,
+        mal_score          = ?,
+        mangaupdates_score = ?,
+        score              = ?,
+        author             = ?,
+        anilist_id         = COALESCE(?, anilist_id),
+        mal_id             = COALESCE(?, mal_id),
+        mangaupdates_id    = COALESCE(?, mangaupdates_id),
+        doujinshi_id       = COALESCE(?, doujinshi_id),
+        metadata_source    = ?,
+        updated_at         = unixepoch()
       WHERE id = ?
     `).run(
       result.title,
@@ -157,7 +174,8 @@ function applyMetadataToDb(db, manga, result, source) {
       result.status,
       result.year,
       JSON.stringify(result.genres ?? []),
-      result.score,
+      nextScores.anilist_score, nextScores.mal_score, nextScores.mangaupdates_score,
+      aggregateScore,
       result.author ?? null,
       anilistId, malId, muId, doujinshiId,
       source,
@@ -166,16 +184,38 @@ function applyMetadataToDb(db, manga, result, source) {
   } else {
     db.prepare(`
       UPDATE manga SET
-        anilist_id      = COALESCE(?, anilist_id),
-        mal_id          = COALESCE(?, mal_id),
-        mangaupdates_id = COALESCE(?, mangaupdates_id),
-        doujinshi_id    = COALESCE(?, doujinshi_id),
-        updated_at      = unixepoch()
+        anilist_score      = ?,
+        mal_score          = ?,
+        mangaupdates_score = ?,
+        score              = ?,
+        anilist_id         = COALESCE(?, anilist_id),
+        mal_id             = COALESCE(?, mal_id),
+        mangaupdates_id    = COALESCE(?, mangaupdates_id),
+        doujinshi_id       = COALESCE(?, doujinshi_id),
+        updated_at         = unixepoch()
       WHERE id = ?
-    `).run(anilistId, malId, muId, doujinshiId, manga.id);
+    `).run(
+      nextScores.anilist_score, nextScores.mal_score, nextScores.mangaupdates_score,
+      aggregateScore,
+      anilistId, malId, muId, doujinshiId, manga.id
+    );
   }
 
   return overwriteDisplay;
+}
+
+/**
+ * Recompute and persist a manga's average `score` from its current per-source
+ * rating columns. Used on paths that change a rating column without going
+ * through `applyMetadataToDb` (e.g. breaking a non-displayed source's linkage).
+ */
+function recomputeAggregateScore(db, mangaId) {
+  const row = db.prepare(
+    'SELECT anilist_score, mal_score, mangaupdates_score, local_score FROM manga WHERE id = ?'
+  ).get(mangaId);
+  if (!row) return;
+  db.prepare('UPDATE manga SET score = ?, updated_at = unixepoch() WHERE id = ?')
+    .run(computeAggregateScore(row), mangaId);
 }
 
 /**
@@ -756,7 +796,8 @@ router.post('/libraries/:id/bulk-metadata', requireAdmin, asyncWrapper(async (re
 
   const allManga = db.prepare(
     `SELECT id, title, metadata_source, anilist_id, mal_id, mangaupdates_id, doujinshi_id,
-            anilist_cover, mal_cover, mangaupdates_cover
+            anilist_cover, mal_cover, mangaupdates_cover,
+            anilist_score, mal_score, mangaupdates_score, local_score
      FROM manga WHERE library_id = ?`
   ).all(library.id);
   const totalCount = allManga.length;
@@ -1055,13 +1096,24 @@ function buildExportPayload(manga, remote) {
   const author          = remote?.author          ?? manga.author;
   const description     = remote?.description     ?? manga.description;
   const year            = remote?.year            ?? manga.year;
-  const score           = remote?.score           ?? manga.score;
+  // Top-level `score` is always the stored average of every available rating
+  // (NOT the single exported source's score), so the importer keeps the same
+  // aggregate. The per-source breakdown rides in `ratings` below.
+  const score           = manga.score;
   const status          = remote?.status          ?? manga.status;
   const anilist_id      = remote?.anilist_id      ?? manga.anilist_id;
   const mal_id          = remote?.mal_id          ?? manga.mal_id;
   const mangaupdates_id = remote?.mangaupdates_id ?? manga.mangaupdates_id;
   const doujinshi_id    = remote?.doujinshi_id    ?? manga.doujinshi_id;
   const metadata_source = remote?.source          ?? manga.metadata_source;
+
+  // Every provider rating the manga has, regardless of which source is being
+  // exported — exporting AniList metadata still carries the MAL rating, etc.
+  // Read straight off the DB columns, which the apply path keeps authoritative.
+  const ratings = {};
+  if (manga.anilist_score      != null) ratings.anilist      = manga.anilist_score;
+  if (manga.mal_score          != null) ratings.myanimelist  = manga.mal_score;
+  if (manga.mangaupdates_score != null) ratings.mangaupdates = manga.mangaupdates_score;
 
   return {
     title,
@@ -1070,6 +1122,7 @@ function buildExportPayload(manga, remote) {
     ...(genres && genres.length ? { genres } : {}),
     ...(year   ? { year }   : {}),
     ...(score  ? { score }  : {}),
+    ...(Object.keys(ratings).length ? { ratings } : {}),
     ...(status ? { status } : {}),
     ...(anilist_id      ? { anilist_id }      : {}),
     ...(mal_id          ? { mal_id }          : {}),
@@ -1332,25 +1385,28 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
 
   const { source } = req.body || {};
   const SOURCE_MAP = {
-    anilist:      { idField: 'anilist_id',      coverField: 'anilist_cover'      },
-    myanimelist:  { idField: 'mal_id',          coverField: 'mal_cover'          },
-    mangaupdates: { idField: 'mangaupdates_id', coverField: 'mangaupdates_cover' },
-    doujinshi:    { idField: 'doujinshi_id',    coverField: null                 },
+    anilist:      { idField: 'anilist_id',      coverField: 'anilist_cover',      scoreField: 'anilist_score'      },
+    myanimelist:  { idField: 'mal_id',          coverField: 'mal_cover',          scoreField: 'mal_score'          },
+    mangaupdates: { idField: 'mangaupdates_id', coverField: 'mangaupdates_cover', scoreField: 'mangaupdates_score' },
+    doujinshi:    { idField: 'doujinshi_id',    coverField: null,                 scoreField: null                 },
   };
 
   if (source !== undefined) {
     if (!SOURCE_MAP[source]) return res.status(400).json({ error: 'Invalid source' });
-    const { idField, coverField } = SOURCE_MAP[source];
+    const { idField, coverField, scoreField } = SOURCE_MAP[source];
     const fullReset = manga.metadata_source === source;
 
     if (fullReset) {
-      // Step 1: NULL the broken source's ID/cover and put the row in the
-      // 'none' state. This commits unconditionally so the linkage really is
-      // broken even if every fallback fetch below fails.
+      // Step 1: NULL the broken source's ID/cover/rating and put the row in
+      // the 'none' state. This commits unconditionally so the linkage really
+      // is broken even if every fallback fetch below fails. Other sources'
+      // rating columns are left intact so the fallback's average can still
+      // include them.
       db.prepare(`
         UPDATE manga SET
           ${idField}                     = NULL,
           ${coverField ? `${coverField} = NULL,` : ''}
+          ${scoreField ? `${scoreField} = NULL,` : ''}
           metadata_source                = 'none',
           description                    = NULL,
           status                         = NULL,
@@ -1366,16 +1422,27 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
       // Step 2: try the next-priority remaining linkage. The helper reads
       // the post-reset row, so candidate IDs reflect the NULL we just
       // wrote, and any fetch that succeeds overwrites display fields
-      // because metadata_source='none' has the lowest priority.
+      // (and recomputes the average score from the surviving rating
+      // columns) because metadata_source='none' has the lowest priority.
       await applyFallbackMetadata(db, manga.id, source);
+
+      // Step 1 left `score` NULL but kept the other sources' rating columns.
+      // If the fallback applied, it already recomputed `score`; if it didn't
+      // (no other linkage, or the lookup failed), recompute here so a surviving
+      // rating column can't leave a chip showing while the sort score is NULL.
+      recomputeAggregateScore(db, manga.id);
     } else {
+      // Breaking a non-displayed source: drop its linkage/cover/rating, then
+      // recompute the average from whatever rating columns survive.
       db.prepare(`
         UPDATE manga SET
           ${idField}                     = NULL,
           ${coverField ? `${coverField} = NULL,` : ''}
+          ${scoreField ? `${scoreField} = NULL,` : ''}
           updated_at                     = unixepoch()
         WHERE id = ?
       `).run(manga.id);
+      recomputeAggregateScore(db, manga.id);
     }
   } else {
     db.prepare(`
@@ -1390,6 +1457,10 @@ router.post('/manga/:id/reset-metadata', asyncWrapper(async (req, res) => {
         year                           = NULL,
         genres                         = NULL,
         score                          = NULL,
+        anilist_score                  = NULL,
+        mal_score                      = NULL,
+        mangaupdates_score             = NULL,
+        local_score                    = NULL,
         author                         = NULL,
         last_metadata_fetch_attempt_at = NULL,
         updated_at                     = unixepoch()
@@ -1483,6 +1554,10 @@ router.post('/libraries/:id/reset-metadata', requireAdmin, asyncWrapper(async (r
       year                           = NULL,
       genres                         = NULL,
       score                          = NULL,
+      anilist_score                  = NULL,
+      mal_score                      = NULL,
+      mangaupdates_score             = NULL,
+      local_score                    = NULL,
       author                         = NULL,
       last_metadata_fetch_attempt_at = NULL,
       updated_at                     = unixepoch()

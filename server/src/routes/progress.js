@@ -277,34 +277,49 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
 
   const trackVolumes = manga.track_volumes === 1;
 
-  // AniList progress = the HIGHEST chapter (or volume) number the user has read,
+  // AniList progress = the HIGHEST chapter/volume number the user has read,
   // i.e. MAX over completed chapters — NOT a contiguous 1..N count. This is
   // intentional: marking a later chapter complete reports that number even if
   // earlier chapters are still unmarked. Do not "fix" this into a contiguous
   // walk. `completedChapters` is an array of chapter IDs, not numbers.
+  //
+  // A single file can span a RANGE (e.g. "v17-18"), so report the END of the
+  // range via COALESCE(*_end, *) — finishing v17-18 must push volume 18, not 17.
   const placeholders = completedChapters.map(() => '?').join(',');
-  const col = trackVolumes ? 'volume' : 'number';
-  const { maxVal } = db.prepare(
-    `SELECT MAX(CAST(${col} AS REAL)) AS maxVal FROM chapters WHERE id IN (${placeholders}) AND ${col} IS NOT NULL`
+  const { maxChapter, maxVolume } = db.prepare(
+    `SELECT MAX(COALESCE(number_end, number)) AS maxChapter,
+            MAX(COALESCE(volume_end, volume)) AS maxVolume
+       FROM chapters WHERE id IN (${placeholders})`
   ).get(...completedChapters);
 
-  let highestNumber;
-  if (maxVal != null) {
-    highestNumber = Math.floor(maxVal);
-  } else {
-    // No numbered entries — fall back to count
-    highestNumber = completedChapters.length;
+  let highestChapter = maxChapter != null ? Math.floor(maxChapter) : null;
+  let highestVolume  = maxVolume  != null ? Math.floor(maxVolume)  : null;
+
+  // No numbered entries on EITHER axis (e.g. untitled "001", "002" folders that
+  // somehow parsed to nothing) — fall back to a count on the primary axis.
+  if (highestChapter == null && highestVolume == null) {
+    if (trackVolumes) highestVolume = completedChapters.length;
+    else              highestChapter = completedChapters.length;
   }
 
   const totalChapters = db.prepare('SELECT COUNT(*) FROM chapters WHERE manga_id = ?').pluck().get(mangaId);
   const status = totalChapters > 0 && completedChapters.length >= totalChapters ? 'COMPLETED' : 'CURRENT';
 
-  const progressArg = trackVolumes
-    ? { volumes: highestNumber }
-    : { chapters: highestNumber };
+  // Send BOTH axes when known — AniList stores chapter and volume progress
+  // independently, so a combined "Vol 17-18 Ch 150-160" read keeps both fields
+  // accurate in one mutation. track_volumes only governs the COMPLETED
+  // threshold and the count-fallback axis above, not which fields are sent.
+  const progressArg = {};
+  if (highestChapter != null) progressArg.chapters = highestChapter;
+  if (highestVolume  != null) progressArg.volumes  = highestVolume;
+  if (progressArg.chapters == null && progressArg.volumes == null) return;
 
   await saveMediaListEntry(token, manga.anilist_id, status, progressArg);
-  console.log(`[AniList Sync] ${manga.anilist_id} → ${status}, ${trackVolumes ? 'volumeProgress' : 'chapterProgress'}=${highestNumber}`);
+  console.log(
+    `[AniList Sync] ${manga.anilist_id} → ${status}` +
+    (progressArg.chapters != null ? `, chapters=${progressArg.chapters}` : '') +
+    (progressArg.volumes  != null ? `, volumes=${progressArg.volumes}`   : '')
+  );
 }
 
 module.exports = router;

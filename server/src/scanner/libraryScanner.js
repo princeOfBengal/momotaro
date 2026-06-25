@@ -507,7 +507,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
       currentMtime = Math.floor(fs.statSync(chapterPath).mtimeMs / 1000);
     } catch { /* non-critical */ }
 
-    const { chapter: number, volume } = parseChapterInfo(name);
+    const { chapter: number, chapterEnd: numberEnd, volume, volumeEnd } = parseChapterInfo(name);
 
     const existingChapter = db.prepare(
       'SELECT id, file_mtime, page_count FROM chapters WHERE manga_id = ? AND folder_name = ?'
@@ -518,14 +518,14 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
 
     if (!existingChapter) {
       const r = db.prepare(`
-        INSERT INTO chapters (manga_id, folder_name, path, type, number, volume, title, file_mtime)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(mangaId, name, chapterPath, type, number, volume, null, currentMtime);
+        INSERT INTO chapters (manga_id, folder_name, path, type, number, number_end, volume, volume_end, title, file_mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(mangaId, name, chapterPath, type, number, numberEnd, volume, volumeEnd, null, currentMtime);
       chapterId = r.lastInsertRowid;
     } else {
       chapterId = existingChapter.id;
-      db.prepare('UPDATE chapters SET path = ?, type = ?, number = ?, volume = ? WHERE id = ?')
-        .run(chapterPath, type, number, volume, chapterId);
+      db.prepare('UPDATE chapters SET path = ?, type = ?, number = ?, number_end = ?, volume = ?, volume_end = ? WHERE id = ?')
+        .run(chapterPath, type, number, numberEnd, volume, volumeEnd, chapterId);
 
       if (
         currentMtime !== null &&

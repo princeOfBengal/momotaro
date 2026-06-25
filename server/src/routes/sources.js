@@ -7,6 +7,7 @@ const { parseUrl, buildUrl } = require('../sources/urlParser');
 const downloader = require('../downloader/queue');
 const scheduler = require('../scheduler');
 const { cleanTitle } = require('../scanner/libraryScanner');
+const { expandChapterRange } = require('../utils');
 
 const router = express.Router();
 
@@ -102,9 +103,11 @@ router.get('/sources/:source/series/:id/chapters', asyncWrapper(async (req, res)
   let existingChapterNumbers = new Set();
   if (req.query.manga_id) {
     const rows = db.prepare(
-      `SELECT number FROM chapters WHERE manga_id = ? AND number IS NOT NULL`
+      `SELECT number, number_end FROM chapters WHERE manga_id = ? AND number IS NOT NULL`
     ).all(req.query.manga_id);
-    existingChapterNumbers = new Set(rows.map(r => Number(r.number)));
+    // Expand multi-chapter files (Ch 10-12) so every bundled chapter reads as
+    // already in the library, not just the range's start.
+    existingChapterNumbers = new Set(rows.flatMap(r => expandChapterRange(r.number, r.number_end)));
   }
 
   const annotated = chapters.map(ch => ({

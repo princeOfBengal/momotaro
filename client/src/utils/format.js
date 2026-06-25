@@ -26,6 +26,14 @@ export function formatNextRun(iso) {
   }
 }
 
+// Render one axis of a chapter/volume span: "15" for a single number, "17-18"
+// for a range (a single file/folder can cover multiple chapters or volumes).
+// `end` is null/undefined for a single value, so old data without range columns
+// gracefully renders the start alone.
+export function fmtSpan(start, end) {
+  return end != null && end !== start ? `${start}-${end}` : `${start}`;
+}
+
 export function formatBytes(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

@@ -10,7 +10,7 @@ const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { requireAdmin } = require('../middleware/auth');
 const genresCache = require('../genresCache');
 const cbzCache = require('../scanner/cbzCache');
-const { safeJsonParse, csvEscape, formatUnix } = require('../utils');
+const { safeJsonParse, csvEscape, formatUnix, readWeightSql, expandChapterRange, computeMissingSequence } = require('../utils');
 
 const router = express.Router();
 
@@ -782,7 +782,7 @@ router.get('/manga/:id/offline-package', asyncWrapper(async (req, res) => {
   // stale-copy detector (see client/src/api/downloader.js,
   // `isChapterStale`) can compare against it without branching.
   const chapters = db.prepare(
-    `SELECT id, manga_id, number, volume, title, folder_name, page_count, type,
+    `SELECT id, manga_id, number, number_end, volume, volume_end, title, folder_name, page_count, type,
             file_mtime AS updated_at
      FROM chapters
      WHERE manga_id = ?
@@ -972,15 +972,19 @@ router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
 
   // Gaps in the 1..max integer sequence. We bucket each chapter into the
   // integer floor of its `number` / `volume` (so 5.5 still covers chapter 5)
-  // and report the integers in [1, max] with no chapter assigned. `track_volumes`
-  // decides which axis the client will display, but we ship both so the
-  // client can re-render without another round-trip if the toggle changes.
+  // and report the integers in [1, max] with no chapter assigned. A single
+  // file can span a RANGE (Ch 10-12, v17-18), so each row is expanded into
+  // every chapter/volume it covers — otherwise 11, 12 and 18 would be reported
+  // missing even though they're bundled inside a multi-chapter/volume file.
+  // `track_volumes` decides which axis the client will display, but we ship
+  // both so the client can re-render without another round-trip if the toggle
+  // changes.
   const rows = db.prepare(
-    'SELECT number, volume FROM chapters WHERE manga_id = ?'
+    'SELECT number, number_end, volume, volume_end FROM chapters WHERE manga_id = ?'
   ).all(manga.id);
 
-  const missingChapters = computeMissingSequence(rows.map(r => r.number));
-  const missingVolumes  = computeMissingSequence(rows.map(r => r.volume));
+  const missingChapters = computeMissingSequence(rows.flatMap(r => expandChapterRange(r.number, r.number_end)));
+  const missingVolumes  = computeMissingSequence(rows.flatMap(r => expandChapterRange(r.volume, r.volume_end)));
 
   res.json({
     data: {
@@ -993,30 +997,6 @@ router.get('/manga/:id/info', asyncWrapper(async (req, res) => {
     },
   });
 }));
-
-const MISSING_LIST_CAP = 500;
-
-function computeMissingSequence(values) {
-  const present = new Set();
-  let max = 0;
-  for (const v of values) {
-    if (v == null || !Number.isFinite(v)) continue;
-    const n = Math.floor(v);
-    if (n >= 1) {
-      present.add(n);
-      if (n > max) max = n;
-    }
-  }
-  let count = 0;
-  const numbers = [];
-  for (let i = 1; i <= max; i++) {
-    if (!present.has(i)) {
-      count++;
-      if (numbers.length < MISSING_LIST_CAP) numbers.push(i);
-    }
-  }
-  return { count, numbers, max, truncated: count > numbers.length };
-}
 
 async function computeFolderSize(rootPath) {
   let total = 0;
@@ -1062,6 +1042,16 @@ router.get('/genres', asyncWrapper(async (req, res) => {
   res.json({ data: genresCache.getPayload() });
 }));
 
+// SUM of chapter-equivalents over a progress row's completed chapters that still
+// exist on disk — the volume/range-weighted twin of existingCompletedCountSql,
+// used for Popular Series ranking. `pAlias` is the progress-row alias in scope.
+function weightedCompletedCountSql(pAlias) {
+  return `(SELECT COALESCE(SUM(${readWeightSql('c')}), 0)
+             FROM json_each(${pAlias}.completed_chapters) je
+             JOIN chapters c ON c.id = CAST(je.value AS INTEGER)
+            WHERE c.manga_id = ${pAlias}.manga_id)`;
+}
+
 // ── Favorite genres (shared) ───────────────────────────────────────────────────
 //
 // Ranking of genres weighted by reading history, used by BOTH `/api/stats`
@@ -1069,18 +1059,16 @@ router.get('/genres', asyncWrapper(async (req, res) => {
 // Discover and the per-genre ribbons). Keeping it in one place guarantees the
 // two views stay consistent.
 //
-// Weighting: each completed chapter contributes to every genre tagged on its
-// manga. A file/folder labeled as a *volume* counts as 4 chapters (a volume
-// typically holds at least four chapters); a file labeled as a *chapter*, one
-// labeled as *both* volume and chapter, or one with only a bare number counts
-// as 1. Volume-vs-chapter is read from `chapters.volume` / `chapters.number`,
-// both populated at scan time by `parseChapterInfo`.
+// Weighting: each completed chapter contributes its chapter-equivalent weight
+// (see `readWeightSql`) to every genre tagged on its manga — so a completed
+// volume adds 4, a v17-18 file adds 8, a Ch 10-12 file adds 3, a single
+// chapter adds 1.
 //
 // Each completed chapter ID is expanded via `json_each` and joined to
 // `chapters`, mirroring the estimated-read-time query — so chapter IDs that no
 // longer exist (chapter deleted since it was marked read) drop out, since an
-// absent chapter can't be classified as a volume or chapter. Manga with no
-// completed chapters yield no rows and so never contribute.
+// absent chapter has no weight. Manga with no completed chapters yield no rows
+// and so never contribute.
 //
 // `libJoin` / `libFilter` / `libParams` are the same library-scoping fragments
 // the stats route already builds; pass the all-visible-libraries variant for
@@ -1088,7 +1076,7 @@ router.get('/genres', asyncWrapper(async (req, res) => {
 function computeFavoriteGenres(db, { userId, libJoin, libFilter, libParams, limit }) {
   return db.prepare(`
     SELECT g.genre as genre,
-           SUM(CASE WHEN c.volume IS NOT NULL AND c.number IS NULL THEN 4 ELSE 1 END) as chapters_read
+           SUM(${readWeightSql('c')}) as chapters_read
     FROM progress p, json_each(p.completed_chapters) je
     JOIN chapters c     ON c.id = CAST(je.value AS INTEGER)
     JOIN manga m        ON m.id = p.manga_id
@@ -1111,9 +1099,10 @@ function computeFavoriteGenres(db, { userId, libJoin, libFilter, libParams, limi
 // total. `pAlias` is the progress-row alias in scope at the call site. Returns a
 // scalar-subquery SQL fragment with no bound params.
 //
-// Note this is deliberately NOT volume-weighted: `computeFavoriteGenres` counts
-// a volume as 4 chapters for genre ranking, but raw "chapters read" totals
-// (Popular Manga, Home progress) report actual chapter counts.
+// Note this is deliberately NOT volume/range-weighted (unlike
+// `weightedCompletedCountSql`, used for Popular Series ranking, and
+// `computeFavoriteGenres`). It backs Home's "continue reading" progress, where
+// the count must be literal chapters and can never exceed a manga's live total.
 function existingCompletedCountSql(pAlias) {
   return `(SELECT COUNT(*)
              FROM json_each(${pAlias}.completed_chapters) je
@@ -1180,8 +1169,12 @@ router.get('/stats', asyncWrapper(async (req, res) => {
     WHERE ${libFilter}
   `).get(...libParams);
 
+  // Total Chapters reports chapter-EQUIVALENTS, not raw file rows: a volume
+  // counts as 4, a v17-18 file as 8, a Ch 10-12 file as 3 (see readWeightSql).
+  // This keeps the inventory tile in the same unit as the reading stats below;
+  // it deliberately diverges from the per-file chapter list on MangaDetail.
   const { total_chapters } = db.prepare(`
-    SELECT COUNT(*) as total_chapters
+    SELECT COALESCE(SUM(${readWeightSql('c')}), 0) as total_chapters
     FROM chapters c
     JOIN manga m ON m.id = c.manga_id
     ${libJoin}
@@ -1240,12 +1233,13 @@ router.get('/stats', asyncWrapper(async (req, res) => {
       AND ${libFilter}
   `).get(userId, ...libParams);
 
-  // Popular manga — sorted by completed chapter count in SQL. Counts only
-  // chapters that still exist (see existingCompletedCountSql) so the number
-  // agrees with Favorite Genres / read-time and can't exceed the live total.
+  // Popular Series — ranked by chapter-EQUIVALENTS read (volume = 4, ranges
+  // expanded; see weightedCompletedCountSql), so a reader of volume-based
+  // series ranks alongside one reading single chapters. Counts only chapters
+  // that still exist, so a deleted chapter drops out of both value and order.
   const top_manga = db.prepare(`
     SELECT p.manga_id as id, m.title, m.cover_image,
-           ${existingCompletedCountSql('p')} as chapters_read
+           ${weightedCompletedCountSql('p')} as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
     ${libJoin}
@@ -1433,7 +1427,9 @@ router.get('/home', asyncWrapper(async (req, res) => {
   const continueReadingRows = db.prepare(`
     SELECT m.id, m.title, m.cover_image, m.track_volumes,
            p.current_chapter_id, p.current_page, p.last_read_at,
-           c.number AS cur_number, c.volume AS cur_volume, c.folder_name AS cur_folder,
+           c.number AS cur_number, c.number_end AS cur_number_end,
+           c.volume AS cur_volume, c.volume_end AS cur_volume_end,
+           c.folder_name AS cur_folder,
            c.page_count AS cur_page_count,
            (SELECT COUNT(*) FROM chapters ch WHERE ch.manga_id = m.id) AS total_chapters,
            ${existingCompletedCountSql('p')} AS completed_count
@@ -1457,7 +1453,9 @@ router.get('/home', asyncWrapper(async (req, res) => {
       id:          r.current_chapter_id,
       folder_name: r.cur_folder,
       number:      r.cur_number,
+      number_end:  r.cur_number_end,
       volume:      r.cur_volume,
+      volume_end:  r.cur_volume_end,
       page_count:  r.cur_page_count,
     } : null,
     current_page:      r.current_page,

@@ -143,13 +143,25 @@ Logic in [server/src/routes/progress.js](../server/src/routes/progress.js) → `
 1. Look up `anilist_token` and `anilist_user_id` from `user_anilist_sessions` for the owning `user_id` — skip if that user hasn't linked AniList
 2. Check `manga.anilist_id` — skip if no AniList match
 3. Skip if `completedChapters` is empty
-4. Determine tracking mode from `manga.track_volumes`:
-   - `track_volumes = 1` → query `chapters.volume` column → report as volume progress
-   - `track_volumes = 0` → query `chapters.number` column → report as chapter progress
-5. Report the **highest** completed chapter/volume number — `MAX` over completed chapters, `Math.floor`'d. This is intentional and **not** a contiguous 1..N count: marking a later chapter complete reports that number even if earlier chapters are still unmarked (AniList progress is a single "furthest read" integer, so this matches how AniList models it). Do not "fix" it into a contiguous walk.
-6. Fall back to `completedChapters.length` if no numbered entries exist
+4. Compute the **highest** completed chapter AND volume in one query —
+   `MAX(COALESCE(number_end, number))` and `MAX(COALESCE(volume_end, volume))`.
+   The `COALESCE(*_end, *)` is what makes **multi-chapter / multi-volume files**
+   report correctly: finishing a `v17-18.cbz` pushes volume **18** (the end of
+   the range), not 17. This is intentionally the *furthest read* integer, **not**
+   a contiguous 1..N count — marking a later chapter complete reports that number
+   even if earlier ones are unmarked, matching how AniList models progress. Do
+   not "fix" it into a contiguous walk.
+5. **Send both axes when known.** AniList stores chapter (`progress`) and volume
+   (`progressVolumes`) progress independently, so a combined `Vol 17-18 Ch
+   150-160` read writes both fields accurate in a single `saveMediaListEntry`
+   mutation: `{ chapters: 160, volumes: 18 }`. `track_volumes` no longer decides
+   *which* field is sent — it only governs the COMPLETED threshold and the
+   count-fallback axis (step 6).
+6. If **neither** axis has a numbered entry, fall back to `completedChapters.length`
+   on the primary axis (`volumes` when `track_volumes = 1`, else `chapters`).
 7. Determine status: `COMPLETED` if `completedChapters.length >= totalChapters`, else `CURRENT`
-8. Call `saveMediaListEntry(token, anilistId, status, { chapters: N })` or `{ volumes: N }`
+8. Call `saveMediaListEntry(token, anilistId, status, progressArg)` where
+   `progressArg` carries whichever of `{ chapters, volumes }` are non-null.
 
 ## Rate Limiting
 
@@ -189,5 +201,5 @@ All media queries use the shared `MEDIA_FIELDS` fragment which includes `staff` 
 
 When set to `1`, this flag affects:
 - **UI labels**: "Volume 1" instead of "Chapter 1" in MangaDetail and the reader
-- **Progress sync**: volume numbers are reported to AniList (`{ volumes: N }`) instead of chapter numbers (`{ chapters: N }`)
+- **Progress sync**: governs the COMPLETED-status threshold and the count-fallback axis. Both `progress` and `progressVolumes` are sent to AniList whenever the data exists (see [Progress Sync](#progress-sync)); `track_volumes` no longer toggles which field is written.
 - **Chapter display**: chapter entries show `Volume N` if only a volume number is parsed

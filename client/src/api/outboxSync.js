@@ -26,19 +26,35 @@ let _flushPromise = null;
 let _lastFlushAt  = 0;
 
 export async function flushOutbox({ minIntervalMs = 5_000 } = {}) {
-  // Coalesce: if a flush is in-flight, return it. If one finished very
-  // recently and the *current* user has nothing pending, skip.
+  // Coalesce: if a flush is in-flight, return it. The in-flight promise is
+  // assigned SYNCHRONOUSLY below — before the first `await` — so two callers
+  // firing back-to-back (e.g. an `online` event alongside a visibility change)
+  // can't both pass this guard and start parallel drains. The rate-limit
+  // short-circuit lives inside the started task for the same reason: doing its
+  // `await listOutboxForUser` out here, ahead of the assignment, was the gap
+  // that let a second caller slip through.
   if (_flushPromise) return _flushPromise;
-  if (Date.now() - _lastFlushAt < minIntervalMs) {
-    const userId = getActiveUserIdSync();
-    const rows = await listOutboxForUser(userId);
-    if (rows.length === 0) return { drained: 0, failed: 0 };
-  }
 
-  _flushPromise = doFlush().finally(() => {
-    _flushPromise = null;
-    _lastFlushAt  = Date.now();
-  });
+  const run = (async () => {
+    // If one finished very recently and the *current* user has nothing
+    // pending, skip the round-trip. A no-op skip deliberately does NOT bump
+    // _lastFlushAt — only a real drain does — so a burst of skips can't push
+    // the next genuine flush past the window.
+    if (Date.now() - _lastFlushAt < minIntervalMs) {
+      const userId = getActiveUserIdSync();
+      let rows = [];
+      try { rows = await listOutboxForUser(userId); }
+      catch { /* IDB hiccup — fall through to a full drain attempt */ }
+      if (rows.length === 0) return { drained: 0, failed: 0 };
+    }
+    try {
+      return await doFlush();
+    } finally {
+      _lastFlushAt = Date.now();
+    }
+  })();
+
+  _flushPromise = run.finally(() => { _flushPromise = null; });
   return _flushPromise;
 }
 

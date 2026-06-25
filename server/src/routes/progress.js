@@ -286,11 +286,20 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
   // A single file can span a RANGE (e.g. "v17-18"), so report the END of the
   // range via COALESCE(*_end, *) — finishing v17-18 must push volume 18, not 17.
   const placeholders = completedChapters.map(() => '?').join(',');
-  const { maxChapter, maxVolume } = db.prepare(
+  // `completed_chapters` is an array of chapter IDs that can include chapters
+  // since deleted from disk. Count and aggregate only those that STILL exist
+  // (and belong to this manga), so a stale id can neither inflate the progress
+  // number nor trip the COMPLETED check below. This matches the
+  // existing-only basis the stats / Home queries already use in library.js.
+  const { maxChapter, maxVolume, completedExisting } = db.prepare(
     `SELECT MAX(COALESCE(number_end, number)) AS maxChapter,
-            MAX(COALESCE(volume_end, volume)) AS maxVolume
-       FROM chapters WHERE id IN (${placeholders})`
-  ).get(...completedChapters);
+            MAX(COALESCE(volume_end, volume)) AS maxVolume,
+            COUNT(*)                          AS completedExisting
+       FROM chapters WHERE id IN (${placeholders}) AND manga_id = ?`
+  ).get(...completedChapters, mangaId);
+
+  // Every completed id references a deleted chapter — nothing real to report.
+  if (!completedExisting) return;
 
   let highestChapter = maxChapter != null ? Math.floor(maxChapter) : null;
   let highestVolume  = maxVolume  != null ? Math.floor(maxVolume)  : null;
@@ -298,12 +307,14 @@ async function syncToAniList(db, mangaId, completedChapters, momotaroUserId) {
   // No numbered entries on EITHER axis (e.g. untitled "001", "002" folders that
   // somehow parsed to nothing) — fall back to a count on the primary axis.
   if (highestChapter == null && highestVolume == null) {
-    if (trackVolumes) highestVolume = completedChapters.length;
-    else              highestChapter = completedChapters.length;
+    if (trackVolumes) highestVolume = completedExisting;
+    else              highestChapter = completedExisting;
   }
 
   const totalChapters = db.prepare('SELECT COUNT(*) FROM chapters WHERE manga_id = ?').pluck().get(mangaId);
-  const status = totalChapters > 0 && completedChapters.length >= totalChapters ? 'COMPLETED' : 'CURRENT';
+  // completedExisting ⊆ the manga's live chapters, so this can never exceed
+  // totalChapters and falsely flag COMPLETED when chapters were deleted.
+  const status = totalChapters > 0 && completedExisting >= totalChapters ? 'COMPLETED' : 'CURRENT';
 
   // Send BOTH axes when known — AniList stores chapter and volume progress
   // independently, so a combined "Vol 17-18 Ch 150-160" read keeps both fields

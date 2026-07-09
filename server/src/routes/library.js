@@ -33,6 +33,7 @@ const LIBRARY_LIST_COLUMNS = [
   'm.score',
   'm.status',
   'm.cover_image',
+  'm.cover_updated_at',
   'm.updated_at',
 ].join(', ');
 
@@ -48,7 +49,7 @@ function toListingRow(m) {
     status:      m.status,
     cover_image: m.cover_image,
     updated_at:  m.updated_at,
-    cover_url:   m.cover_image ? thumbnailUrl(m.cover_image) : null,
+    cover_url:   m.cover_image ? thumbnailUrl(m.cover_image, m.cover_updated_at) : null,
   };
 }
 
@@ -744,7 +745,7 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
     data: {
       ...manga,
       genres: safeJsonParse(manga.genres, []),
-      cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image) : null,
+      cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image, manga.cover_updated_at) : null,
       chapters,
       progress: progress
         ? { ...progress, completed_chapters: safeJsonParse(progress.completed_chapters, []) }
@@ -794,7 +795,7 @@ router.get('/manga/:id/offline-package', asyncWrapper(async (req, res) => {
       manga: {
         ...manga,
         genres:    safeJsonParse(manga.genres, []),
-        cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image) : null,
+        cover_url: manga.cover_image ? thumbnailUrl(manga.cover_image, manga.cover_updated_at) : null,
       },
       chapters,
       // Server-side timestamp the client can persist alongside the local
@@ -1238,7 +1239,7 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   // series ranks alongside one reading single chapters. Counts only chapters
   // that still exist, so a deleted chapter drops out of both value and order.
   const top_manga = db.prepare(`
-    SELECT p.manga_id as id, m.title, m.cover_image,
+    SELECT p.manga_id as id, m.title, m.cover_image, m.cover_updated_at,
            ${weightedCompletedCountSql('p')} as chapters_read
     FROM progress p
     JOIN manga m ON m.id = p.manga_id
@@ -1250,7 +1251,7 @@ router.get('/stats', asyncWrapper(async (req, res) => {
   `).all(userId, ...libParams).map(r => ({
     id: r.id,
     title: r.title,
-    cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
+    cover_url: r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
     chapters_read: r.chapters_read,
   }));
 
@@ -1298,6 +1299,22 @@ const HOME_TTL_MS = 30 * 1000;
 // user-scoped, and per-param-hash so two clients with different Discover
 // filters never collide. The short TTL keeps memory tiny.
 const _homeCache = new Map(); // key -> { payload, ts }
+
+// Periodic eviction for the TTL caches that have no size cap (_homeCache and
+// _statsCache only check expiry on read, so entries for departed users /
+// param-hashes would otherwise sit in memory for the process lifetime; the
+// listing caches near the top of this file are already LRU-capped). Each
+// cache is swept against its own TTL. `.unref()` so the timer never holds up
+// shutdown.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _homeCache) {
+    if (now - v.ts >= HOME_TTL_MS) _homeCache.delete(k);
+  }
+  for (const [k, v] of _statsCache) {
+    if (now - v.ts >= STATS_TTL_MS) _statsCache.delete(k);
+  }
+}, 60 * 1000).unref();
 
 // Caller-tunable limits, bounded to protect the server from pathological
 // clients. The client only ever sends defaults right now; these exist so the
@@ -1425,7 +1442,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // Manga the user has opened, most-recent first. Joined to chapters so the
   // UI can show the label of the current chapter without a follow-up fetch.
   const continueReadingRows = db.prepare(`
-    SELECT m.id, m.title, m.cover_image, m.track_volumes,
+    SELECT m.id, m.title, m.cover_image, m.cover_updated_at, m.track_volumes,
            p.current_chapter_id, p.current_page, p.last_read_at,
            c.number AS cur_number, c.number_end AS cur_number_end,
            c.volume AS cur_volume, c.volume_end AS cur_volume_end,
@@ -1446,7 +1463,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   const continue_reading = continueReadingRows.map(r => ({
     id:                r.id,
     title:             r.title,
-    cover_url:         r.cover_image ? thumbnailUrl(r.cover_image) : null,
+    cover_url:         r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
     track_volumes:     r.track_volumes,
     current_chapter_id: r.current_chapter_id,
     current_chapter: r.current_chapter_id ? {
@@ -1554,7 +1571,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     }
 
     discover_candidates = db.prepare(`
-      SELECT m.id, m.title, m.cover_image, m.score,
+      SELECT m.id, m.title, m.cover_image, m.cover_updated_at, m.score,
              COUNT(DISTINCT g.genre COLLATE NOCASE) AS match_count
       FROM manga m
       JOIN manga_genres g ON g.manga_id = m.id
@@ -1573,7 +1590,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     `).all(userId, ...favoriteGenres, ...extraParams, limDiscover).map(r => ({
       id:          r.id,
       title:       r.title,
-      cover_url:   r.cover_image ? thumbnailUrl(r.cover_image) : null,
+      cover_url:   r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
       score:       r.score,
       match_count: r.match_count,
     }));
@@ -1623,7 +1640,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // ordered by id rather than score — randomisation happens client-side, so
   // the server only needs a deterministic, threshold-filtered candidate set.
   const topByGenreStmt = db.prepare(`
-    SELECT m.id, m.title, m.cover_image, m.score
+    SELECT m.id, m.title, m.cover_image, m.cover_updated_at, m.score
     FROM manga m
     JOIN manga_genres g ON g.manga_id = m.id
     LEFT JOIN libraries l ON l.id = m.library_id
@@ -1640,7 +1657,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     manga: topByGenreStmt.all(genre, minScore, limRibbon).map(r => ({
       id:        r.id,
       title:     r.title,
-      cover_url: r.cover_image ? thumbnailUrl(r.cover_image) : null,
+      cover_url: r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
       score:     r.score,
     })),
   })).filter(r => r.manga.length > 0);
@@ -1651,7 +1668,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // `recentWindowHours = 0` (default) keeps today's unbounded behaviour; a
   // positive value caps the ribbon to "added in the last N hours."
   const recentlyAddedRows = db.prepare(`
-    SELECT m.id, m.title, m.cover_image, m.score, m.created_at
+    SELECT m.id, m.title, m.cover_image, m.cover_updated_at, m.score, m.created_at
     FROM manga m
     LEFT JOIN libraries l ON l.id = m.library_id
     WHERE (m.library_id IS NULL OR l.show_in_all = 1)
@@ -1662,7 +1679,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   const recently_added = recentlyAddedRows.map(r => ({
     id:         r.id,
     title:      r.title,
-    cover_url:  r.cover_image ? thumbnailUrl(r.cover_image) : null,
+    cover_url:  r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
     score:      r.score,
     created_at: r.created_at,
   }));

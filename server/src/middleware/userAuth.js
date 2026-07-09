@@ -80,6 +80,11 @@ function resolveUser(req, _res, next) {
 
 function requireUser(req, res, next) {
   if (req.user) return next();
+  // NOTE: the client's UserContext matches this exact error string to decide
+  // whether a 401 from /api/users/me means "session dead — clear the stored
+  // user token" (vs. the device-gate 401s from middleware/auth.js, which must
+  // NOT clear it). If this message changes, update
+  // client/src/context/UserContext.jsx to match.
   return res.status(401).json({ error: 'User authentication required' });
 }
 

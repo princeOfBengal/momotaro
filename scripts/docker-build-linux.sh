@@ -16,7 +16,11 @@ echo "==> node $(node -v) / npm $(npm -v)"
 echo "==> client: install + web build + cap sync"
 cd /project/client
 npm ci
-npm run build
+# build:app = vite build WITHOUT the brotli precompression step. The .br
+# siblings only matter when the Node server serves dist/ over HTTP — the
+# Electron shell reads files by exact path and would just package ~200 KiB
+# of dead weight.
+npm run build:app
 npx cap sync @capacitor-community/electron
 
 echo "==> electron: install + tsc"

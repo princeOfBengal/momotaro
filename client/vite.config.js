@@ -191,6 +191,21 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // React runtime in its own chunk: it only changes on dependency
+        // upgrades, so routine app releases leave the vendor chunk's hash —
+        // and every client's HTTP-cached / SW-precached copy — untouched.
+        // Pairs with the immutable `assets/` cache headers set by
+        // server/src/index.js: returning visitors re-download only the app
+        // code that actually changed.
+        manualChunks: {
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:3000',

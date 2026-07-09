@@ -101,10 +101,12 @@ Every manga row stores up to five candidate cover filenames — one per third-pa
 | `mal_cover` | MyAnimeList | `<mangaId>_mal.webp` |
 | `mangaupdates_cover` | MangaUpdates | `<mangaId>_mu.webp` |
 | `doujinshi_cover` | Doujinshi.info | `<mangaId>_dj.webp` (legacy `<mangaId>_cover.webp` is backfilled — see [database.md](./database.md#migrations)) |
-| `original_cover` | Scanner | `<mangaId>_original.webp` (set once on first scan, never overwritten) |
+| `original_cover` | Scanner | `<mangaId>_original.webp` (set on first scan; re-persisted only by the library-wide Reset Metadata action when it regenerates a cover from the first page) |
 | `cover_image` | — | Always `<mangaId>.webp`, the active file content for serving |
 
-Each `*_cover` column points at an immutable archive of that source's image. The visible `<mangaId>.webp` is a copy of one of those archives, chosen by the priority resolver in [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js):
+Because `<mangaId>.webp` is a stable filename whose **content** changes, the manga row also carries `cover_updated_at` (unix ms, bumped on every byte change to the active file). Every server-built `cover_url` appends it as `?v=<cover_updated_at>`, so the URL changes exactly when the image does — which is what allows the `/thumbnails` route to serve `Cache-Control: private, max-age=31536000, immutable`. Rows that predate the column serve unversioned URLs until their first post-upgrade cover change.
+
+Each `*_cover` column points at an archive of that source's image under a **stable filename whose bytes are refreshed** whenever that source's metadata is re-fetched (`fetchAndStoreCover` overwrites the file in place). Client surfaces that render these archives directly (the thumbnail-picker previews) must cache-bust accordingly — the immutable `/thumbnails` cache headers are keyed to the *active* cover's `?v=` version only. The visible `<mangaId>.webp` is a copy of one of those archives, chosen by the priority resolver in [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js):
 
 ```text
 anilist_cover > mal_cover > mangaupdates_cover > doujinshi_cover > original_cover
@@ -133,6 +135,8 @@ The active cover is re-aligned to the priority order by `reinforceAllCovers` in 
    ```
 
 **Neither pings any upstream** — the resolver only re-uses cover files already on disk from earlier metadata fetches. To re-align a user-picked manga back to the priority order, the user explicitly runs Reset Thumbnails from Settings → Database.
+
+**Byte-compare before copy.** `reinforceActiveCover` compares the picked source file against the current active file (size check, then full byte compare) and skips both the copy and the `cover_updated_at` bump when they're identical. This matters because the post-scan pass runs over *every* manga on *every* scan: without the check, each scan would rewrite every active cover and invalidate every client's cached cover URL. The `?v=` version therefore only moves when the visible image genuinely changes.
 
 ## End-of-scan metadata priority enforcement
 

@@ -20,6 +20,25 @@ const COVER_PRIORITY_FIELDS = [
 ];
 
 /**
+ * Byte-equality check for two thumbnail files. Used to decide whether a
+ * reinforce actually changes the active cover: the post-scan pass calls
+ * reinforceActiveCover for every manga, and blindly copying + bumping
+ * `cover_updated_at` there would invalidate every cover URL on every scan.
+ * Thumbnails are ~20–40 KB WebPs, so the size check short-circuits almost
+ * every real change and the full compare is cheap for the rest.
+ * Any stat/read failure (dest missing, unreadable) reports "not equal" so
+ * the caller falls through to the copy.
+ */
+function filesEqual(a, b) {
+  try {
+    if (fs.statSync(a).size !== fs.statSync(b).size) return false;
+    return fs.readFileSync(a).equals(fs.readFileSync(b));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Walk the priority list and return the first source-specific filename
  * that (a) is recorded on the manga row and (b) actually exists on disk.
  * Returns null when nothing usable is available.
@@ -70,26 +89,45 @@ function reinforceActiveCover(db, mangaId, { force = false } = {}) {
   if (!pick) return { changed: false, reason: 'no_source' };
 
   const activeName = `${mangaId}.webp`;
-  try {
-    ensureShardDir(activeName);
-    fs.copyFileSync(thumbnailPath(pick.filename), thumbnailPath(activeName));
-  } catch (err) {
-    console.warn(`[Cover] Reinforce failed for manga ${mangaId} (target=${pick.filename}): ${err.message}`);
-    return { changed: false, reason: 'copy_failed' };
+  // Only copy (and version-bump) when the pick's bytes differ from the
+  // current active file. The steady-state post-scan reinforce is a no-op
+  // for almost every manga, so this both skips the pointless copy and keeps
+  // cover URLs stable across scans.
+  const bytesChanged = !filesEqual(thumbnailPath(pick.filename), thumbnailPath(activeName));
+  if (bytesChanged) {
+    try {
+      ensureShardDir(activeName);
+      fs.copyFileSync(thumbnailPath(pick.filename), thumbnailPath(activeName));
+    } catch (err) {
+      console.warn(`[Cover] Reinforce failed for manga ${mangaId} (target=${pick.filename}): ${err.message}`);
+      return { changed: false, reason: 'copy_failed' };
+    }
   }
 
-  // Always normalise cover_image to the active filename. The file content
-  // changes, but the DB pointer stays canonical so other parts of the app
-  // (URL builder, cache-bust query) only have to deal with one name.
+  // Always normalise cover_image to the active filename — the DB pointer
+  // stays canonical so other parts of the app (URL builder, cache-bust
+  // query) only have to deal with one name. `cover_updated_at` is bumped
+  // only when the file's bytes actually changed; it feeds the `?v=` cache
+  // key on cover_url, so a content-neutral pointer fix must not invalidate
+  // every client's cached image.
+  const now = Date.now();
   if (force) {
-    db.prepare('UPDATE manga SET cover_image = ?, cover_user_set = 0 WHERE id = ?')
-      .run(activeName, mangaId);
+    if (bytesChanged) {
+      db.prepare('UPDATE manga SET cover_image = ?, cover_user_set = 0, cover_updated_at = ? WHERE id = ?')
+        .run(activeName, now, mangaId);
+    } else {
+      db.prepare('UPDATE manga SET cover_image = ?, cover_user_set = 0 WHERE id = ?')
+        .run(activeName, mangaId);
+    }
+  } else if (bytesChanged) {
+    db.prepare('UPDATE manga SET cover_image = ?, cover_updated_at = ? WHERE id = ?')
+      .run(activeName, now, mangaId);
   } else if (row.cover_image !== activeName) {
     db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
       .run(activeName, mangaId);
   }
 
-  return { changed: true, source: pick.field };
+  return { changed: true, source: pick.field, bytes_changed: bytesChanged };
 }
 
 /**

@@ -17,10 +17,12 @@ function getServerUrl() {
 function setServerUrl(url) {
   if (url) localStorage.setItem(SERVER_URL_KEY, url.replace(/\/+$/, ''));
   else     localStorage.removeItem(SERVER_URL_KEY);
+  invalidateGateState(); // a different server invalidates any cached gate verdict
 }
 
 function clearServerUrl() {
   localStorage.removeItem(SERVER_URL_KEY);
+  invalidateGateState();
 }
 
 function generateUUID() {
@@ -39,6 +41,45 @@ function getDeviceId() {
   return id;
 }
 
+// ── Gate state (FirstLaunchGate fast path) ──────────────────────────────────
+// `momotaro_gate_ok = '1'` records that the last auth-status probe was a
+// clean allow. FirstLaunchGate reads it to render the app immediately on
+// return visits while the probe revalidates in the background. It MUST be
+// invalidated on every auth transition — otherwise a logout could leave a
+// stale optimistic allow, or a fresh login could loop on a cached
+// `user_required` verdict. Every token/server-url setter below funnels
+// through `invalidateGateState()` to guarantee that.
+export const GATE_OK_KEY = 'momotaro_gate_ok';
+
+// TTL cache for GET /api/admin/auth-status, consumed by FirstLaunchGate via
+// `api.getAuthStatusCached()`. The gate's effect re-runs on every route
+// change; without this each navigation issued a fresh probe that competed
+// with the destination page's real data fetch. 60 s is short enough that a
+// revocation is noticed promptly, long enough to absorb a browsing session's
+// navigations. Admin surfaces (RequireAdminAccess, Settings sections) keep
+// calling the uncached `getAuthStatus` — they need live `logged_in` state.
+const AUTH_STATUS_TTL_MS = 60 * 1000;
+let _authStatusCache = { ts: 0, promise: null };
+
+function invalidateGateState() {
+  _authStatusCache = { ts: 0, promise: null };
+  try { localStorage.removeItem(GATE_OK_KEY); } catch (_) { /* storage disabled */ }
+}
+
+// The `browse-data` service-worker cache (StaleWhileRevalidate over
+// /api/home, /api/library, …) is keyed by URL only — request headers are
+// ignored — so per-user payloads cached under account A would be served to
+// account B for one paint after a switch on the same device. Dropping the
+// cache on user-token transitions closes that window; Workbox recreates the
+// cache lazily on the next fetch.
+function clearPerUserSwCaches() {
+  try {
+    if (typeof caches !== 'undefined' && caches?.delete) {
+      caches.delete('browse-data').catch(() => {});
+    }
+  } catch (_) { /* Cache API unavailable (older WebView) — non-fatal */ }
+}
+
 // ── Admin session token ─────────────────────────────────────────────────────
 // Set by POST /api/admin/setup or /api/admin/login. Stored in localStorage so
 // the admin stays signed in across page reloads. Sent on every request via
@@ -53,10 +94,12 @@ function getAdminToken() {
 function setAdminToken(token) {
   if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
   else       localStorage.removeItem(ADMIN_TOKEN_KEY);
+  invalidateGateState(); // admin session satisfies the gate — verdict changed
 }
 
 function clearAdminToken() {
   localStorage.removeItem(ADMIN_TOKEN_KEY);
+  invalidateGateState();
 }
 
 // ── Paired-client token ─────────────────────────────────────────────────────
@@ -74,10 +117,12 @@ function getClientToken() {
 function setClientToken(token) {
   if (token) localStorage.setItem(CLIENT_TOKEN_KEY, token);
   else       localStorage.removeItem(CLIENT_TOKEN_KEY);
+  invalidateGateState(); // pairing state changed — re-probe before next allow
 }
 
 function clearClientToken() {
   localStorage.removeItem(CLIENT_TOKEN_KEY);
+  invalidateGateState();
 }
 
 // ── User session token ───────────────────────────────────────────────────────
@@ -96,11 +141,15 @@ function getUserToken() {
 function setUserToken(token) {
   if (token) localStorage.setItem(USER_TOKEN_KEY, token);
   else       localStorage.removeItem(USER_TOKEN_KEY);
+  invalidateGateState(); // login / account switch — re-probe before next allow
+  clearPerUserSwCaches(); // don't serve the previous account's cached browse data
 }
 
 function clearUserToken() {
   localStorage.removeItem(USER_TOKEN_KEY);
   localStorage.removeItem(ACTIVE_USER_KEY);
+  invalidateGateState();
+  clearPerUserSwCaches();
 }
 
 function getActiveUserId() {
@@ -795,6 +844,28 @@ const _rawApi = {
   // `setAdminToken` so subsequent requests in the same browser session pick
   // it up via the `X-Admin-Token` header.
   getAuthStatus: () => apiFetch('/api/admin/auth-status'),
+
+  // TTL-cached variant for FirstLaunchGate. Returns the in-flight/settled
+  // probe promise while it's fresh, so per-navigation gate re-evaluations
+  // don't each hit the network. Failures are evicted immediately — a
+  // transient outage must not suppress retries for the whole TTL window.
+  // Any token or server-url change invalidates the cache synchronously
+  // (see invalidateGateState), so a just-logged-in user is re-probed rather
+  // than bounced by a stale `user_required` verdict.
+  getAuthStatusCached: () => {
+    const now = Date.now();
+    if (_authStatusCache.promise && (now - _authStatusCache.ts) < AUTH_STATUS_TTL_MS) {
+      return _authStatusCache.promise;
+    }
+    const p = apiFetch('/api/admin/auth-status').catch(err => {
+      if (_authStatusCache.promise === p) {
+        _authStatusCache = { ts: 0, promise: null };
+      }
+      throw err;
+    });
+    _authStatusCache = { ts: now, promise: p };
+    return p;
+  },
 
   // ── User accounts (login / register / logout / me) ─────────────────────
   // login & register persist the returned session token (and the active user

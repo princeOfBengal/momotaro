@@ -67,8 +67,9 @@ One row per manga folder.
 | `mal_cover` | TEXT | Filename of the MyAnimeList-sourced thumbnail, e.g. `5_mal.webp` |
 | `mangaupdates_cover` | TEXT | Filename of the MangaUpdates-sourced thumbnail, e.g. `5_mu.webp` |
 | `doujinshi_cover` | TEXT | Filename of the Doujinshi.info-sourced thumbnail, e.g. `5_dj.webp` (legacy installs see `5_cover.webp`, backfilled by `backfillDoujinshiCover`) |
-| `original_cover` | TEXT | Filename of the first-ever scan-generated thumbnail, e.g. `5_original.webp` — set once and never overwritten; final fallback in the cover priority |
+| `original_cover` | TEXT | Filename of the scan-generated thumbnail, e.g. `5_original.webp` — set on first scan and re-persisted only by the library-wide Reset Metadata action; final fallback in the cover priority |
 | `cover_user_set` | INTEGER | 1 when the user manually picked the active cover via `POST /api/manga/:id/set-thumbnail`. **Sticky across library scans** — the post-scan reinforcement pass (`reinforceAllCovers(force=false)`) skips manga with this flag set. Only the explicit Reset Thumbnails admin action (`POST /api/admin/reset-thumbnails`, `force=true`) clears it. Default 0. |
+| `cover_updated_at` | INTEGER | Unix **ms** of the last time the active cover file's *bytes* changed. Baked into every server-built `cover_url` as a `?v=` cache-buster, which is what lets `/thumbnails` be served with immutable cache headers. Bumped by every active-cover write path (reinforcement on byte change, set-thumbnail, regenerate-thumbnails, reset-metadata, first scan-time generation). NULL on rows whose cover predates the column — those URLs stay unversioned until the first post-upgrade cover change. |
 | `last_metadata_fetch_attempt_at` | INTEGER | Unix timestamp of the last bulk-pull attempt (any source) — used to skip recently-tried no-match titles |
 | `bytes_on_disk` | INTEGER | Cached rollup of `SUM(chapters.bytes_on_disk)`. Refreshed per-manga by the watcher / optimize paths, and via one grouped `UPDATE … FROM (SELECT … GROUP BY manga_id)` at the end of each `scanLibrary` run. Lets `/api/stats` and `/api/manga/:id/info` answer without walking the library. |
 | `file_count` | INTEGER | Cached rollup of `SUM(chapters.file_count)` — total image pages across all chapters. |
@@ -521,6 +522,7 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `manga` | `doujinshi_cover` | Doujinshi.info thumbnail filename (legacy installs are backfilled — see below) |
 | `manga` | `original_cover` | First-ever scan-generated thumbnail filename |
 | `manga` | `cover_user_set` | Manual-pick flag — see [scanner.md § Cover priority](./scanner.md#cover-priority) |
+| `manga` | `cover_updated_at` | Cover-content version for the `?v=` thumbnail cache-buster |
 | `manga` | `last_metadata_fetch_attempt_at` | Bulk-pull retry cooldown |
 | `chapters` | `bytes_on_disk` | Cached disk-usage column (see [scanner.md](./scanner.md#cached-disk-usage-columns)) |
 | `chapters` | `file_count` | Cached file-count column |

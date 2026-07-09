@@ -77,10 +77,16 @@ async function loadTrimmedIcon() {
   return { data, info };
 }
 
+// Palette quantization cuts these PNGs to a fraction of full RGBA size with
+// no visible loss on flat-color artwork. logo.png and icon-512.png are part
+// of the service worker's precache manifest, so every byte here is paid by
+// every fresh install.
+const PNG_OPTS = { palette: true, quality: 85, compressionLevel: 9, effort: 10 };
+
 function trimmedIconAt(size, raw) {
   return sharp(raw.data, { raw: { width: raw.info.width, height: raw.info.height, channels: raw.info.channels } })
     .resize(size, size, { fit: 'cover' })
-    .png();
+    .png(PNG_OPTS);
 }
 
 (async () => {
@@ -110,9 +116,11 @@ function trimmedIconAt(size, raw) {
   }
 
   console.log('Generating navbar logo from new_logo.png:');
-  const LOGO_HEIGHT = 256;
+  // Largest rendered size is the 64px pairing-wizard logo (.pw-logo);
+  // 192px covers it at 3× DPR. The navbar itself is 40px.
+  const LOGO_HEIGHT = 192;
   const logoDst = path.join(OUT, 'logo.png');
-  await sharp(LOGO_SRC).resize({ height: LOGO_HEIGHT }).png().toFile(logoDst);
+  await sharp(LOGO_SRC).resize({ height: LOGO_HEIGHT }).png(PNG_OPTS).toFile(logoDst);
   const logoBytes = fs.statSync(logoDst).size;
   console.log(`  logo.png                  height=${LOGO_HEIGHT}  ${(logoBytes / 1024).toFixed(1)} KB`);
 

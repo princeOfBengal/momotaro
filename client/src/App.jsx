@@ -8,7 +8,7 @@ import UpdateBanner from './components/UpdateBanner';
 import AdminTaskBanner from './components/AdminTaskBanner';
 import BottomNav from './components/BottomNav';
 import RequireAdminAccess from './components/RequireAdminAccess';
-import { api, setConnectivityProbe } from './api/client';
+import { api, setConnectivityProbe, GATE_OK_KEY } from './api/client';
 import { ConnectivityProvider, ConnectivityBanner, useConnectivity } from './context/ConnectivityContext';
 import { UserProvider } from './context/UserContext';
 import { PreferencesProvider } from './context/PreferencesContext';
@@ -73,6 +73,24 @@ const Downloads       = lazy(() => import('./pages/Downloads'));
  * caller has no valid session) it routes to `/login`. Pairing is checked first,
  * so an external device pairs *then* logs in.
  *
+ * Optimistic fast path: a previous clean allow is recorded in
+ * `localStorage[GATE_OK_KEY]`. When the flag is set, the gate renders the
+ * app immediately and the probe revalidates in the background — a returning
+ * user no longer pays a blocking round-trip on every app open. If the
+ * background probe comes back pairing/user-required (revoked device, closed
+ * registration), the flag is cleared and the redirect fires then; the only
+ * exposure in that window is data already cached on the device. First-ever
+ * visits have no flag and keep the blocking spinner. Every token/server-url
+ * setter in api/client.js clears the flag AND the probe's TTL cache
+ * (invalidateGateState), so a logout is never masked by a stale allow and a
+ * fresh login is never bounced by a cached `user_required` verdict.
+ *
+ * The probe itself goes through `api.getAuthStatusCached()` (60 s TTL) —
+ * this effect re-runs on every route change, and per-navigation probes were
+ * pure overhead competing with page data fetches. A visibilitychange
+ * listener re-evaluates on tab focus so a revocation is noticed on
+ * long-idle tabs too, at most once per TTL window.
+ *
  * Skipped:
  *   - The `/pairing` and `/login` routes themselves (would infinite-loop)
  *   - The AniList OAuth callback (third-party redirect, doesn't carry tokens)
@@ -80,7 +98,9 @@ const Downloads       = lazy(() => import('./pages/Downloads'));
  * Failure mode: if `/api/admin/auth-status` is unreachable (network
  * partition, server down), we let the user through. The downstream API
  * calls will surface the real error; we don't want a blank page just
- * because the status endpoint blipped.
+ * because the status endpoint blipped. An unreachable probe deliberately
+ * neither sets nor clears the fast-path flag — "unknown" must not become
+ * "allow forever", nor silently sign anyone out.
  */
 const GATE_EXEMPT_PATHS = new Set(['/pairing', '/login', '/auth/anilist/callback']);
 
@@ -94,8 +114,28 @@ function isNativeShell() {
 function FirstLaunchGate({ children }) {
   const location = useLocation();
   const { online } = useConnectivity();
-  const [decision, setDecision] = useState('loading'); // 'loading' | 'allow' | 'redirect'
+  // 'loading' | 'allow' | 'redirect'. Starts at 'allow' when the fast-path
+  // flag records a previous clean probe — see the component doc above.
+  const [decision, setDecision] = useState(() => {
+    try {
+      return localStorage.getItem(GATE_OK_KEY) === '1' ? 'allow' : 'loading';
+    } catch (_) {
+      return 'loading';
+    }
+  });
   const [target, setTarget] = useState('/pairing');    // where to send on 'redirect'
+  // Bumped on tab-visibility regain so a long-idle tab re-evaluates. The
+  // probe is TTL-cached in the API client, so this re-checks at most once
+  // per TTL window, not on every focus.
+  const [probeVersion, setProbeVersion] = useState(0);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === 'visible') setProbeVersion(v => v + 1);
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,7 +172,7 @@ function FirstLaunchGate({ children }) {
       return;
     }
 
-    api.getAuthStatus()
+    api.getAuthStatusCached()
       .then(status => {
         if (cancelled) return;
         // Cache the multi-user flag so the offline branch above can tell
@@ -144,18 +184,30 @@ function FirstLaunchGate({ children }) {
           );
         } catch (_) { /* localStorage disabled — non-fatal */ }
         // Pairing (device trust) is checked first, then login (identity).
-        if (status?.pairing_required)   { setTarget('/pairing'); setDecision('redirect'); }
-        else if (status?.user_required) { setTarget('/login');   setDecision('redirect'); }
-        else setDecision('allow');
+        // Any non-allow verdict clears the fast-path flag so the next boot
+        // blocks on the probe again; a clean allow (re)arms it.
+        if (status?.pairing_required) {
+          try { localStorage.removeItem(GATE_OK_KEY); } catch (_) {}
+          setTarget('/pairing'); setDecision('redirect');
+        } else if (status?.user_required) {
+          try { localStorage.removeItem(GATE_OK_KEY); } catch (_) {}
+          setTarget('/login'); setDecision('redirect');
+        } else {
+          try { localStorage.setItem(GATE_OK_KEY, '1'); } catch (_) {}
+          setDecision('allow');
+        }
       })
       .catch(() => {
         // Server unreachable / not running — don't block the UI. The user
         // will see the real error from whatever route they navigated to.
+        // Deliberately leaves the fast-path flag untouched: "unknown" is
+        // neither a durable allow nor grounds to force a re-probe spinner
+        // on the next boot.
         if (!cancelled) setDecision('allow');
       });
 
     return () => { cancelled = true; };
-  }, [location.pathname, online]);
+  }, [location.pathname, online, probeVersion]);
 
   if (decision === 'loading') {
     return (

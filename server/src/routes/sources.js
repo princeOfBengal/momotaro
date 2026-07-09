@@ -539,7 +539,8 @@ router.get('/schedules', asyncWrapper(async (req, res) => {
     SELECT s.id, s.manga_id, s.enabled, s.frequency, s.day_of_week,
            s.time_of_day, s.last_checked_at, s.last_result, s.next_run_at,
            s.created_at, s.updated_at,
-           m.title AS manga_title, m.cover_image AS manga_cover_image
+           m.title AS manga_title, m.cover_image AS manga_cover_image,
+           m.cover_updated_at AS manga_cover_updated_at
       FROM manga_schedules s
       JOIN manga m ON m.id = s.manga_id
      ORDER BY m.title COLLATE NOCASE ASC
@@ -581,7 +582,7 @@ router.get('/schedules', asyncWrapper(async (req, res) => {
     manga: {
       id:        s.manga_id,
       title:     s.manga_title,
-      cover_url: s.manga_cover_image ? thumbnailUrl(s.manga_cover_image) : null,
+      cover_url: s.manga_cover_image ? thumbnailUrl(s.manga_cover_image, s.manga_cover_updated_at) : null,
     },
     urls: urlsByManga.get(s.manga_id) || [],
   }));

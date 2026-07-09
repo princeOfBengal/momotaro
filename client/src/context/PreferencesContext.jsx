@@ -10,6 +10,14 @@ import { useUser } from './UserContext';
  * every device. Reads are local-only after the initial fetch; writes are
  * optimistic + debounced 300 ms then sent to /api/user/preferences.
  *
+ * Warm start: the last successful fetch is mirrored to a per-user
+ * localStorage slot (`momotaro_prefs_cache_<userId>`), and the provider
+ * hydrates from it synchronously on mount. Consumers therefore see
+ * `loading: false` from the first render on return visits — Home fires
+ * /api/home immediately with last-known prefs instead of waiting a network
+ * round-trip — and the background fetch reconciles afterwards (identity-
+ * preserving when nothing changed, so no spurious refetches downstream).
+ *
  * Cross-device sync model: each device re-fetches on tab focus
  * (`visibilitychange`), so a change on Device A appears on Device B the next
  * time B's tab regains focus or reloads. Real-time push is out of scope.
@@ -17,16 +25,61 @@ import { useUser } from './UserContext';
  * Migration: the first mount after upgrade reads any legacy `home_*` values
  * from localStorage, uploads them to the server, deletes them locally, and
  * sets `home_prefs_migrated` so the migration runs exactly once per browser.
+ * The migration only ever runs against a *network* result — never against
+ * the warm-start mirror — so a failed boot can't mark it complete.
  *
  * Failure modes:
- *   - Initial GET fails (offline, server down) → prefs resolves to {} and
- *     consumers fall back to their hard-coded defaults. The optimistic local
- *     state still works; writes queue and retry on the next change.
+ *   - Initial GET fails (offline, server down) → prefs keeps the warm-start
+ *     mirror when one exists, else resolves to {} and consumers fall back to
+ *     their hard-coded defaults. The optimistic local state still works;
+ *     writes queue and retry on the next change.
  *   - PUT fails → the patch is requeued so the next debounced flush carries
  *     it back to the server.
  */
 
 const PreferencesContext = createContext(null);
+
+// ── localStorage warm-start mirror ──────────────────────────────────────────
+// The last successful fetch's merged prefs, mirrored per user so a returning
+// visit hydrates synchronously instead of holding /api/home behind the
+// preferences round-trip. Keyed by the active user id (mirrored to
+// localStorage by the login/register/getMe flows) so an account switch on a
+// shared device never flashes another user's Discover filters.
+const PREFS_CACHE_PREFIX = 'momotaro_prefs_cache_';
+
+function prefsCacheKey() {
+  let uid = null;
+  try { uid = api.getActiveUserId(); } catch (_) { /* storage disabled */ }
+  return PREFS_CACHE_PREFIX + (uid || 'default');
+}
+
+function readPrefsCache() {
+  try {
+    const raw = localStorage.getItem(prefsCacheKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writePrefsCache(prefs) {
+  try {
+    localStorage.setItem(prefsCacheKey(), JSON.stringify(prefs));
+  } catch (_) { /* quota / disabled storage — warm-start just won't happen */ }
+}
+
+// Reference-preserving merge: if `next` is content-identical to `prev`, keep
+// `prev` so downstream hooks see the same object/array references. Without
+// this, every fetch settling would mint fresh array identities for
+// unchanged prefs, changing Home's `load` callback identity and firing a
+// redundant /api/home request. Both sides come from JSON, so stringify
+// equality is faithful; key order is stable in practice (same construction
+// path), and a spurious mismatch merely costs one extra fetch.
+function preferPrev(prev, next) {
+  return prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
 
 // One-shot migration of the four pre-existing localStorage keys to the
 // server. The mapping is intentionally identity — the key names already
@@ -83,52 +136,79 @@ async function maybeMigrateLegacyLocalStorage(serverPrefs) {
 }
 
 export function PreferencesProvider({ children }) {
-  // `null` while the initial fetch is in flight, then either the server's
-  // payload (possibly post-migration) or `{}` on failure / no-token.
-  const [prefs, setPrefs] = useState(null);
+  // Warm-started from the per-user localStorage mirror when available, so
+  // `loading` is false from the very first render and Home can fire
+  // /api/home immediately with the last-known prefs. `null` (no mirror yet
+  // — first ever visit, or a fresh account on this device) preserves the
+  // old "loading until the fetch settles" behaviour.
+  const [prefs, setPrefs] = useState(() => readPrefsCache());
   const pendingRef = useRef({});         // batched writes since last flush
   const timerRef   = useRef(null);
 
-  // Re-fetch on (a) initial mount and (b) whenever the user's session token
-  // changes (login / logout / account switch). We watch the live `user`
-  // object from UserContext to retrigger.
-  const { user } = useUser();
-  const userId = user?.id ?? null;
+  // Subscribe to UserContext purely as a re-render trigger: this provider is
+  // passed to UserProvider as a `children` element, so without the context
+  // subscription a login/logout state change would NOT re-render it (React's
+  // children-as-prop bailout) and the token below would never be re-read.
+  //
+  // The fetch itself is keyed on the session TOKEN, not the resolved user
+  // id: the token IS the identity and changes exactly on login / logout /
+  // account switch. Keying on the user id (the previous design) re-ran this
+  // effect when /api/users/me resolved on boot — null → id under the SAME
+  // token — discarding an identical in-flight prefs fetch and serializing
+  // /api/home behind the duplicate round-trip.
+  useUser();
+  const token = api.getUserToken();
 
+  const firstRunRef = useRef(true);
   useEffect(() => {
     let cancelled = false;
-    setPrefs(null); // surface a "loading" state on account switch
 
-    // Drop any writes queued under the previous user. Otherwise a patch made
-    // by user A within the 300 ms debounce window — then a logout-then-login
-    // as user B before flush — would carry A's intended changes onto B's
-    // preferences. Clearing here is the cheapest correct moment because
-    // pendingRef is provider-local state that survives across user changes.
-    pendingRef.current = {};
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
+    if (firstRunRef.current) {
+      // Mount: state already warm-started by the useState initializer —
+      // re-setting it here would mint a new object identity and re-fire
+      // every consumer for no reason.
+      firstRunRef.current = false;
+    } else {
+      // Account switch. Drop any writes queued under the previous user
+      // (a patch made by user A within the 300 ms debounce window must not
+      // land on B's preferences), then re-hydrate from the new identity's
+      // mirror slot — `null` surfaces the loading state when this identity
+      // has no cached prefs on this device yet.
+      pendingRef.current = {};
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      setPrefs(readPrefsCache());
     }
 
     // If multi-user is on but nobody is logged in yet, /api/user/preferences
-    // would 401 — skip until a user is present (or token-less single-user).
-    // We allow the call when there's no token AND no user (single-user mode
-    // resolves to the default user server-side, which has its own prefs row).
+    // would 401 — the catch below falls back to defaults. We allow the call
+    // when there's no token AND no user (single-user mode resolves to the
+    // default user server-side, which has its own prefs row).
     api.getUserPreferences()
       .then(async (server) => {
         if (cancelled) return;
         const merged = await maybeMigrateLegacyLocalStorage(server || {});
-        if (!cancelled) setPrefs(merged);
+        if (!cancelled) setPrefs(prev => preferPrev(prev, merged));
       })
       .catch(() => {
-        // Offline / unauthenticated — fall back to empty prefs so consumers
-        // see their hard-coded defaults. Writes still queue locally and will
-        // be retried on the next change.
-        if (!cancelled) setPrefs({});
+        // Offline / unauthenticated — keep the warm-started value when we
+        // have one (better than dropping to defaults mid-session); otherwise
+        // fall back to empty prefs so consumers see their hard-coded
+        // defaults. Writes still queue locally and retry on the next change.
+        if (!cancelled) setPrefs(prev => prev ?? {});
       });
 
     return () => { cancelled = true; };
-  }, [userId]);
+  }, [token]);
+
+  // Write-through mirror: persist every settled prefs object (fetch results
+  // and optimistic setPref updates alike) so the next boot warm-starts with
+  // current data. Writing the just-hydrated value back is a harmless no-op.
+  useEffect(() => {
+    if (prefs) writePrefsCache(prefs);
+  }, [prefs]);
 
   // Refetch on tab-visibility regain so a change made on another device
   // shows up without a full reload. Cheap when the prefs object is small.
@@ -141,7 +221,7 @@ export function PreferencesProvider({ children }) {
     function onVisible() {
       if (document.visibilityState !== 'visible') return;
       api.getUserPreferences()
-        .then(server => setPrefs(prev => ({
+        .then(server => setPrefs(prev => preferPrev(prev, {
           ...prev,
           ...(server || {}),
           ...pendingRef.current,

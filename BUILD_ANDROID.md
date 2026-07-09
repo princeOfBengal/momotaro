@@ -33,10 +33,12 @@ are installed.
 #    export JAVA_HOME=/usr/lib/jvm/temurin-21-jdk          # Linux
 
 # 1. Build the React app (always do this first; the APK packs whatever is
-#    currently in client/dist).
+#    currently in client/dist). `build:app` skips the brotli precompression
+#    step — the .br siblings only matter when the Node server serves dist/
+#    over HTTP, and would just bloat the APK by ~200 KiB of dead weight.
 cd client
 npm install
-npm run build
+npm run build:app
 
 # 2. Sync web assets + Capacitor plugin registrations into the Android
 #    project. Use `sync` (not `copy`) whenever package.json's dependencies
@@ -85,7 +87,7 @@ cp client/android/key.properties.example client/android/key.properties
 #    Build steps above.
 export JAVA_HOME=...              # macOS / Linux  (pin to JDK 21)
 $env:JAVA_HOME="..."              # PowerShell    (same idea)
-cd client && npm run build && npx cap sync android
+cd client && npm run build:app && npx cap sync android
 cd android && ./gradlew assembleRelease
 ```
 
@@ -203,7 +205,7 @@ After any change to the web code:
 ```bash
 # Pin JAVA_HOME at JDK 21 first (see Build steps above).
 cd client
-npm run build
+npm run build:app
 npx cap sync android        # prefer `sync` over `copy` — see note below
 cd android && ./gradlew assembleDebug
 ```

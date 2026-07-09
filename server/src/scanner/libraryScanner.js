@@ -669,8 +669,8 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
           fs.copyFileSync(thumbPath, originalPath);
         } catch (_) {}
       }
-      db.prepare('UPDATE manga SET cover_image = ?, original_cover = COALESCE(original_cover, ?) WHERE id = ?')
-        .run(path.basename(thumbPath), originalName, mangaId);
+      db.prepare('UPDATE manga SET cover_image = ?, original_cover = COALESCE(original_cover, ?), cover_updated_at = ? WHERE id = ?')
+        .run(path.basename(thumbPath), originalName, Date.now(), mangaId);
 
       // Defensive: if any higher-priority source cover is already on disk
       // for this manga, the priority resolver will swap it in over the

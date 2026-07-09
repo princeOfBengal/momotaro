@@ -275,12 +275,14 @@ The Library page's A–Z quick-jump rail anchors the keyset-paginated browse gri
   "score":       8.3,
   "status":      "FINISHED",
   "cover_image": "5.webp",
-  "cover_url":   "/thumbnails/05/5.webp",
+  "cover_url":   "/thumbnails/05/5.webp?v=1713200000000",
   "updated_at":  1713200000
 }
 ```
 
 `updated_at` is retained because the `sort=updated` keyset cursor reads it. `title` is retained for the `sort=title` cursor. Both are also rendered by the UI (year/score badges, title text). Search-by-genre still works because the WHERE clause is resolved server-side via the indexed `manga_genres` table — the response payload does not need to include genres.
+
+`cover_url`'s `?v=` param is the manga's `cover_updated_at` (unix ms of the last byte change to the active cover file — see [scanner.md § Cover Priority](./scanner.md#cover-priority)). It exists purely as a cache key: `/thumbnails` responses are served with `Cache-Control: private, max-age=31536000, immutable`, so browsers never revalidate a cover until its URL changes. Rows whose cover predates the column omit the param. Always render the server-baked `cover_url` rather than rebuilding a URL from `cover_image` — a rebuilt URL loses the version.
 
 ### Caching
 

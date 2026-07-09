@@ -111,6 +111,12 @@ Because `./data` is a host bind mount (not a Docker-managed named volume), **all
 
 **To migrate to another host**, copy both `./data` and `./library` to the new host alongside `docker-compose.yml`, then `docker compose up -d --build`.
 
+### Remote access performance
+
+The Node server speaks HTTP/1.1, and browsers cap HTTP/1.1 at six connections per origin — on a remote link (cellular, away-from-home), a Home or Library render's burst of cover-thumbnail requests queues behind that cap. Fronting Momotaro with a TLS reverse proxy that speaks **HTTP/2** (Caddy does this with two lines of config; nginx with `listen 443 ssl http2`) multiplexes every request over one connection and removes the queueing entirely. The same proxy also satisfies Android Chrome's HTTPS requirement for the PWA install prompt — see [frontend.md § Installation requirement](./frontend.md#installation-requirement).
+
+Static assets are served with precompressed **brotli** bodies out of the box (built at quality 11 by `client/scripts/precompress.cjs`, served when the browser advertises `Accept-Encoding: br`; anything else falls back to the compression middleware's dynamic brotli/gzip); configure the proxy to pass `Accept-Encoding` through rather than re-compressing.
+
 **If you previously used the old named-volume setup** (`momotaro_data`) and have data in it you want to keep, copy it out once before switching:
 
 ```bash
@@ -131,5 +137,5 @@ docker volume rm momotaro_data
 | `THUMBNAIL_DIR` | `$DATA_PATH/thumbnails` | Generated cover thumbnails |
 | `CBZ_CACHE_DIR` | `$DATA_PATH/cbz-cache` | Per-chapter extract cache for CBZ archives. Size cap and scheduled auto-clear are runtime-configurable from Settings → Database (persisted in the `settings` table). See [scanner.md § CBZ Serve Cache](./scanner.md#cbz-serve-cache). |
 | `DOWNLOADS_DIR` | `$DATA_PATH/downloads` | Holds the signed Android APK (`momotaro.apk`) and `version.json` advertised by `GET /api/app/version`. See [android.md § Self-hosted distribution](./android.md#self-hosted-distribution). |
-| `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts (set to the literal string `false` to disable). |
+| `SCAN_ON_STARTUP` | `true` | Re-scan all libraries when server starts (set to the literal string `false` to disable). The scan is fire-and-forget — the server accepts requests immediately — but on very large libraries it competes with those first requests for disk I/O; set `false` if cold-boot responsiveness matters more than automatic rescans. |
 | `REQUEST_DELAY_MS` | `700` | Legacy minimum delay floor; the AniList integration now reads `X-RateLimit-Limit` and adapts spacing per response (default range 700–5 000 ms). |

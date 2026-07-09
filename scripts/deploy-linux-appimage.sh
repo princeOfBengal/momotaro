@@ -38,7 +38,11 @@ echo "==> Deploying Momotaro Linux AppImage v${VERSION}"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> Building web assets"
-  ( cd client && npm ci && npm run build && npx cap sync @capacitor-community/electron )
+  # build:app = vite build WITHOUT the brotli precompression step. The .br
+  # siblings only matter when the Node server serves dist/ over HTTP — the
+  # Electron shell reads files by exact path and would just package
+  # ~200 KiB of dead weight.
+  ( cd client && npm ci && npm run build:app && npx cap sync @capacitor-community/electron )
 
   echo "==> Building Electron main + AppImage"
   ( cd client/electron && npm ci && npm run build \

@@ -201,8 +201,8 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
           const anilistPath = thumbnailPath(manga.anilist_cover);
           if (fs.existsSync(anilistPath)) {
             fs.copyFileSync(anilistPath, activePath);
-            db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-              .run(`${manga.id}.webp`, manga.id);
+            db.prepare('UPDATE manga SET cover_image = ?, cover_updated_at = ? WHERE id = ?')
+              .run(`${manga.id}.webp`, Date.now(), manga.id);
             regenerated++;
             report(i + 1, allManga.length, `Regenerated ${regenerated}, ${errors} errors`);
             continue;
@@ -256,8 +256,8 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
           }
 
           if (generated) {
-            db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?')
-              .run(`${manga.id}.webp`, manga.id);
+            db.prepare('UPDATE manga SET cover_image = ?, cover_updated_at = ? WHERE id = ?')
+              .run(`${manga.id}.webp`, Date.now(), manga.id);
             regenerated++;
           }
         }

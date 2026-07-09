@@ -29,9 +29,21 @@ export function UserProvider({ children }) {
       setUser(me);
       if (me?.id != null) api.setActiveUserId(me.id);
       return me;
-    } catch {
-      // Token invalid/expired/offline — treat as logged out. A stale token is
-      // cleared so the gate routes to /login instead of looping.
+    } catch (err) {
+      // Clear the stored token only when the USER layer says the session is
+      // dead. /api/users/me sits behind the device gate
+      // (requireClientOrAdmin), which emits its own 401s — 'Authentication
+      // required' / 'Invalid or revoked token' — when the *pairing* is
+      // missing or revoked. Those say nothing about the user session: a
+      // revoked device that re-pairs should resume its login, not be forced
+      // through it again. The body match is coupled to the message in
+      // server/src/middleware/userAuth.js (requireUser) — keep in sync.
+      // Network failures (offline boot, server down) carry no `.status` and
+      // must keep the token too: the session may still be valid once the
+      // server is reachable again.
+      if (err?.status === 401 && err?.body?.error === 'User authentication required') {
+        api.clearUserToken();
+      }
       setUser(null);
       return null;
     } finally {

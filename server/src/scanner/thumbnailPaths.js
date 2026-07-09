@@ -23,10 +23,15 @@ function thumbnailPath(filename) {
   return path.join(config.THUMBNAIL_DIR, shard, filename);
 }
 
-function thumbnailUrl(filename) {
+// `version` is the manga's `cover_updated_at` (unix ms of the last byte
+// change to the active cover). Baked in as `?v=` so the URL changes when the
+// file content does — /thumbnails responses carry immutable cache headers on
+// the strength of this. A null/undefined version (legacy rows) emits the bare
+// URL, which is what those clients already have cached.
+function thumbnailUrl(filename, version) {
   const shard = shardFor(filename);
-  if (!shard) return `/thumbnails/${filename}`;
-  return `/thumbnails/${shard}/${filename}`;
+  const base = shard ? `/thumbnails/${shard}/${filename}` : `/thumbnails/${filename}`;
+  return version ? `${base}?v=${version}` : base;
 }
 
 function ensureShardDir(filename) {

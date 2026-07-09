@@ -224,6 +224,11 @@ function migrate(db) {
   // operator runs the explicit reset (which clears the flag back to 0).
   addColumnIfMissing(db, 'manga',     'cover_user_set',    'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'manga',     'last_metadata_fetch_attempt_at', 'INTEGER');
+  // Unix ms of the last time the active cover file's *bytes* changed. Baked
+  // into cover_url as a `?v=` cache-buster so /thumbnails can be served with
+  // immutable cache headers. NULL for covers that predate the column — their
+  // URLs stay unversioned until the first post-upgrade cover change.
+  addColumnIfMissing(db, 'manga',     'cover_updated_at',  'INTEGER');
 
   // Cached disk-usage columns — populated during scan so that /api/stats and
   // /api/manga/:id/info don't need to re-walk the library each request.

@@ -521,6 +521,26 @@ export default function Home() {
     });
   }, [data, discoverSeed]);
 
+  // The one ribbon whose first tile keeps loading="eager" +
+  // fetchpriority="high" (alongside the hero, which is always high). Marking
+  // the first tile of EVERY ribbon eager — the previous behaviour — promoted
+  // up to ~9 covers to high priority, competing with the actual LCP image on
+  // HTTP/1.1's six-connection budget. Walks the user's configured ribbon
+  // order and picks the first one that will really render tiles; the Art
+  // Gallery ribbon is skipped because ArtGalleryRibbon owns its own image
+  // markup (and is usually below the fold anyway).
+  const firstEagerRibbonId = useMemo(() => {
+    if (!data) return null;
+    for (const r of ribbonOrder) {
+      if (!r.visible) continue;
+      if (r.id === 'continue' && continueRest.length > 0) return 'continue';
+      if (r.id === 'recent' && (data.recently_added?.length ?? 0) > 0) return 'recent';
+      if (r.id === 'discover' && discoverVisible.length > 0) return 'discover';
+      if (r.id === 'genres' && genreRibbonsVisible.length > 0) return 'genres';
+    }
+    return null;
+  }, [data, ribbonOrder, continueRest, discoverVisible, genreRibbonsVisible]);
+
   function handleManualDiscoverRefresh() {
     setDiscoverSeed(forceDiscoverSeed());
   }
@@ -695,7 +715,11 @@ export default function Home() {
                       return continueRest.length > 0 ? (
                         <Ribbon key="continue" title="Continue Reading">
                           {continueRest.map((m, i) => (
-                            <ContinueReadingTile key={m.id} manga={m} eager={i === 0} />
+                            <ContinueReadingTile
+                              key={m.id}
+                              manga={m}
+                              eager={firstEagerRibbonId === 'continue' && i === 0}
+                            />
                           ))}
                         </Ribbon>
                       ) : null;
@@ -707,7 +731,11 @@ export default function Home() {
                           viewAllTo={{ pathname: '/library', state: { search: '' } }}
                         >
                           {data.recently_added.map((m, i) => (
-                            <MangaTile key={m.id} manga={m} eager={i === 0} />
+                            <MangaTile
+                              key={m.id}
+                              manga={m}
+                              eager={firstEagerRibbonId === 'recent' && i === 0}
+                            />
                           ))}
                         </Ribbon>
                       ) : null;
@@ -746,7 +774,7 @@ export default function Home() {
                             <MangaTile
                               key={m.id}
                               manga={m}
-                              eager={i === 0}
+                              eager={firstEagerRibbonId === 'discover' && i === 0}
                               sub={m.match_count > 1
                                 ? `${m.match_count} matching genres`
                                 : '1 matching genre'}
@@ -772,14 +800,18 @@ export default function Home() {
                     case 'genres':
                       return (
                         <React.Fragment key="genres">
-                          {genreRibbonsVisible.map(g => (
+                          {genreRibbonsVisible.map((g, gi) => (
                             <Ribbon
                               key={g.genre}
                               title={`Top Manga in ${g.genre}`}
                               viewAllTo={{ pathname: '/library', state: { search: g.genre } }}
                             >
                               {g.manga.map((m, i) => (
-                                <MangaTile key={m.id} manga={m} eager={i === 0} />
+                                <MangaTile
+                                  key={m.id}
+                                  manga={m}
+                                  eager={firstEagerRibbonId === 'genres' && gi === 0 && i === 0}
+                                />
                               ))}
                             </Ribbon>
                           ))}

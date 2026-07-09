@@ -482,6 +482,18 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
   const [applying, setApplying] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [generateMsg, setGenerateMsg] = useState(null);
+  // Cache-bust for preview images. The source-archive files these previews
+  // render (`<id>_anilist.webp`, `<id>_ch<n>.webp`, …) are overwritten in
+  // place under stable filenames by metadata refreshes / cover generation,
+  // while /thumbnails is served with immutable cache headers — so an
+  // unbusted preview could show a stale image pinned by the browser cache.
+  // One value per modal open keeps it to a single fetch per file per visit;
+  // regenerating covers mints a new value so the fresh files render.
+  const [previewBust, setPreviewBust] = useState(() => Date.now());
+  const thumbSrc = (filename) => {
+    const base = api.thumbnailUrl(filename);
+    return `${base}${base.includes('?') ? '&' : '?'}cb=${previewBust}`;
+  };
 
   useEffect(() => {
     api.getThumbnailOptions(mangaId)
@@ -526,6 +538,9 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
           : 'No chapters available to generate from.'
       );
       const refreshed = await api.getThumbnailOptions(mangaId);
+      // New bust value: generation overwrites `<id>_ch<n>.webp` files in
+      // place, so previews rendered under the old value would be stale.
+      setPreviewBust(Date.now());
       setOptions(refreshed);
     } catch (err) {
       setGenerateMsg('Failed: ' + err.message);
@@ -571,7 +586,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">AniList</h3>
                   <div className="thumb-picker-grid">
                     <ThumbOption
-                      src={api.thumbnailUrl(options.anilist_cover)}
+                      src={thumbSrc(options.anilist_cover)}
                       label="AniList Cover"
                       applying={applying === options.anilist_cover}
                       onUse={() => applyFile(options.anilist_cover)}
@@ -585,7 +600,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">MyAnimeList</h3>
                   <div className="thumb-picker-grid">
                     <ThumbOption
-                      src={api.thumbnailUrl(options.mal_cover)}
+                      src={thumbSrc(options.mal_cover)}
                       label="MAL Cover"
                       applying={applying === options.mal_cover}
                       onUse={() => applyFile(options.mal_cover)}
@@ -599,7 +614,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">MangaUpdates</h3>
                   <div className="thumb-picker-grid">
                     <ThumbOption
-                      src={api.thumbnailUrl(options.mangaupdates_cover)}
+                      src={thumbSrc(options.mangaupdates_cover)}
                       label="MangaUpdates Cover"
                       applying={applying === options.mangaupdates_cover}
                       onUse={() => applyFile(options.mangaupdates_cover)}
@@ -613,7 +628,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">Doujinshi.info</h3>
                   <div className="thumb-picker-grid">
                     <ThumbOption
-                      src={api.thumbnailUrl(options.doujinshi_cover)}
+                      src={thumbSrc(options.doujinshi_cover)}
                       label="Doujinshi.info Cover"
                       applying={applying === options.doujinshi_cover}
                       onUse={() => applyFile(options.doujinshi_cover)}
@@ -627,7 +642,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                   <h3 className="thumb-picker-section-title">Original</h3>
                   <div className="thumb-picker-grid">
                     <ThumbOption
-                      src={api.thumbnailUrl(options.original_cover)}
+                      src={thumbSrc(options.original_cover)}
                       label="Scan Default"
                       applying={applying === options.original_cover}
                       onUse={() => applyFile(options.original_cover)}
@@ -643,7 +658,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                     {options.history.map(h => (
                       <ThumbOption
                         key={h.id}
-                        src={api.thumbnailUrl(h.filename)}
+                        src={thumbSrc(h.filename)}
                         applying={applying === h.filename}
                         onUse={() => applyFile(h.filename)}
                       />
@@ -661,7 +676,7 @@ function ThumbnailPickerModal({ mangaId, onApplied, onClose }) {
                         ? (
                           <ThumbOption
                             key={ch.chapter_id}
-                            src={api.thumbnailUrl(ch.generated_filename)}
+                            src={thumbSrc(ch.generated_filename)}
                             label={ch.label}
                             applying={applying === ch.generated_filename}
                             onUse={() => applyFile(ch.generated_filename)}
@@ -1950,21 +1965,53 @@ export default function MangaDetail() {
   const [navLists, setNavLists] = useState([]);
   const [navLoaded, setNavLoaded] = useState(false);
 
+  // Primary fetch — the page paints as soon as the manga row + chapter list
+  // arrive. Only a failure HERE shows the full-page error state; the
+  // secondary data below degrades its own widgets instead. (Previously all
+  // four requests sat in one Promise.all, so first paint waited on the
+  // slowest of them and any single rejection errored the entire page.)
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setError(null);
+    api.getManga(id)
+      .then(mangaData => {
+        if (cancelled) return;
+        setManga(mangaData);
+        setLoading(false);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setError(err.message);
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [id]);
+
+  // Secondary data — the AniList tracking panel and the Lists dropdown.
+  // Fired in parallel with getManga but never blocks first paint. State is
+  // reset on id change BEFORE the fetches so a detail→detail navigation
+  // can't act on the previous manga's list memberships (toggling a list
+  // entry against stale mangaListIds would edit the wrong manga's lists).
+  // Per-call fallbacks: a failed AniList probe renders the disconnected
+  // panel rather than an infinite spinner (`status === null` means loading
+  // forever); failed list fetches leave the dropdown empty.
+  useEffect(() => {
+    let cancelled = false;
     setAnilistStatus(null);
+    setReadingLists([]);
+    setMangaListIds(new Set());
     Promise.all([
-      api.getManga(id),
-      api.getAnilistStatus(id),
-      api.getReadingLists(),
-      api.getMangaReadingLists(id),
-    ]).then(([mangaData, statusData, listsData, listIds]) => {
-      setManga(mangaData);
+      api.getAnilistStatus(id).catch(() => ({ logged_in: false })),
+      api.getReadingLists().catch(() => []),
+      api.getMangaReadingLists(id).catch(() => []),
+    ]).then(([statusData, listsData, listIds]) => {
+      if (cancelled) return;
       setAnilistStatus(statusData);
       setReadingLists(listsData);
       setMangaListIds(new Set(listIds));
-      setLoading(false);
-    }).catch(err => { setError(err.message); setLoading(false); });
+    });
+    return () => { cancelled = true; };
   }, [id]);
 
   useEffect(() => {
@@ -1983,22 +2030,39 @@ export default function MangaDetail() {
   const showInfoRef = useRef(false);
   useEffect(() => { showInfoRef.current = showInfo; }, [showInfo]);
 
-  // Watch for library scans (started elsewhere, e.g. Settings → Libraries) and
-  // refresh the More Info stats when one completes. Polls scan status while
-  // the page is mounted. On a running → idle transition we re-fetch the manga
-  // and the info payload so file count / folder size reflect the scan result.
+  // Watch for library scans (started elsewhere, e.g. Settings → Libraries)
+  // and refresh the manga + More Info stats when one completes. Completion
+  // is detected by the server's `finishedAt` stamp advancing — not by a
+  // running→idle transition — so a scan that starts AND finishes between
+  // two polls (or while the tab is hidden) still triggers the refresh. The
+  // first successful poll adopts the current stamp without refreshing: a
+  // scan that completed before this page opened is already reflected in the
+  // mount fetch.
+  //
+  // Polling is visibility-gated: a hidden tab parks the loop entirely (no
+  // network, no timers — this was a 5 s heartbeat for the page's whole
+  // lifetime, scan or no scan) and visibilitychange→visible restarts it
+  // with an immediate tick. Idle cadence is 15 s — this is a background
+  // freshness check, not a progress bar — tightening to 2 s only while a
+  // scan is actually running so the post-scan refresh lands quickly.
   const prevScanRunningRef = useRef(false);
+  const lastFinishedAtRef  = useRef(undefined); // undefined = not yet adopted
   useEffect(() => {
     let cancelled = false;
     let timer = null;
+
     async function tick() {
       if (cancelled) return;
+      // Parked while hidden — the visibility listener below restarts us.
+      if (document.visibilityState === 'hidden') return;
       try {
         const status = await api.getScanStatus();
-        const wasRunning = prevScanRunningRef.current;
-        const isRunning = !!status?.running;
-        prevScanRunningRef.current = isRunning;
-        if (wasRunning && !isRunning && !cancelled) {
+        if (cancelled) return;
+        prevScanRunningRef.current = !!status?.running;
+        const finishedAt = status?.finishedAt ?? null;
+        const last = lastFinishedAtRef.current;
+        lastFinishedAtRef.current = finishedAt;
+        if (last !== undefined && finishedAt != null && finishedAt !== last) {
           try {
             const fresh = await api.getManga(id);
             if (cancelled) return;
@@ -2021,16 +2085,26 @@ export default function MangaDetail() {
         }
       } catch { /* network/auth blip — try again next tick */ }
       if (!cancelled) {
-        // Faster polling while a scan is in flight so the post-scan refresh
-        // lands quickly; slower otherwise to keep the page idle-cheap.
-        const delay = prevScanRunningRef.current ? 2000 : 5000;
+        if (timer) clearTimeout(timer);
+        const delay = prevScanRunningRef.current ? 2000 : 15000;
         timer = setTimeout(tick, delay);
       }
     }
+
+    function onVisible() {
+      if (document.visibilityState !== 'visible') return;
+      // Clear any pending timer before the immediate tick so a rapid
+      // hide/show cycle can't stack two concurrent loops.
+      if (timer) clearTimeout(timer);
+      tick();
+    }
+    document.addEventListener('visibilitychange', onVisible);
+
     tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [id]);
 
@@ -2462,7 +2536,10 @@ export default function MangaDetail() {
   // `thumbnailUrl(cover_image)` path for any response that doesn't include
   // cover_url yet.
   const coverBase = manga.cover_url || (manga.cover_image ? api.thumbnailUrl(manga.cover_image) : null);
-  const coverUrl = coverBase ? `${coverBase}${coverBust ? (coverBase.includes('?') ? '&' : '?') + `t=${coverBust}` : ''}` : null;
+  // Bust param is `cb`, NOT `t` — `t` is the auth-token query param on
+  // gated /thumbnails URLs, and appending a second `t` makes Express parse
+  // req.query.t as an array, which fails the token check on paired setups.
+  const coverUrl = coverBase ? `${coverBase}${coverBust ? (coverBase.includes('?') ? '&' : '?') + `cb=${coverBust}` : ''}` : null;
   const genres = Array.isArray(manga.genres) ? manga.genres : [];
   const hasMetadata = manga.metadata_source && manga.metadata_source !== 'none';
 

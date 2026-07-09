@@ -91,7 +91,19 @@ app.use(enforceLanOnlyMode);
 // accepts the token via the `?t=` query string (see
 // [middleware/auth.js]) — the SPA's thumbnailUrl helper appends it.
 fs.mkdirSync(config.THUMBNAIL_DIR, { recursive: true });
-app.use('/thumbnails', requireClientOrAdmin, express.static(config.THUMBNAIL_DIR));
+// Immutable caching is safe because cover_url bakes the manga's
+// `cover_updated_at` into a `?v=` query param — any byte change to a cover
+// produces a new URL (see scanner/coverResolver.js). `private` because the
+// route is auth-gated (the `?t=` token rides the query string); a shared
+// proxy must not serve one client's authorized fetch to another.
+// Out-of-band edits (someone hand-replacing a .webp on disk) won't surface
+// until the next cover-write bumps the version — same contract the service
+// worker's CacheFirst rule already imposes.
+app.use('/thumbnails', requireClientOrAdmin, express.static(config.THUMBNAIL_DIR, {
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  },
+}));
 
 // Self-hosted Android APK distribution. Public on purpose — the system
 // browser tab that handles the APK download cannot carry the bearer
@@ -199,23 +211,137 @@ app.use('/api', requireClientOrAdmin, requireAdmin, sourcesRoutes);
 // Serve built React client (production)
 const clientDist = path.join(__dirname, '../../client/dist');
 if (fs.existsSync(clientDist)) {
+  const distAssetsDir = path.join(clientDist, 'assets') + path.sep;
+
+  // Cache-Control policy for a dist file, shared by the plain static handler
+  // and the brotli fast path below (which must derive headers from the
+  // ORIGINAL asset path, not the .br sibling's). Returns null for files that
+  // keep Express's default ETag revalidation (root-level logo/icons — their
+  // filenames are stable, so they must stay revalidatable).
+  function staticCacheControl(filePath) {
+    // Service worker and its registration script must never be served from
+    // the HTTP cache — the browser must re-fetch them on every load so it
+    // can detect updates.
+    if (
+      filePath.endsWith('sw.js') ||
+      filePath.endsWith('registerSW.js') ||
+      filePath.endsWith('manifest.webmanifest')
+    ) {
+      return 'no-store, no-cache';
+    }
+    // Vite content-hashes every file under assets/ (and the workbox runtime
+    // at the dist root) — a changed file gets a new name, so these can be
+    // cached forever without revalidation.
+    if (
+      filePath.startsWith(distAssetsDir) ||
+      /[\\/]workbox-[\w-]+\.js$/.test(filePath)
+    ) {
+      return 'public, max-age=31536000, immutable';
+    }
+    // Explicit no-cache: index.html references the hashed asset names, so a
+    // heuristically-cached stale shell would point at chunks that no longer
+    // exist after a deploy ("white screen after update"). no-cache still
+    // allows conditional revalidation (ETag 304s).
+    if (filePath.endsWith('index.html')) {
+      return 'no-cache';
+    }
+    return null;
+  }
+
+  // Brotli fast path. The client build writes a `.br` sibling for every
+  // compressible asset (client/scripts/precompress.cjs, quality 11). Any
+  // request this function declines falls through to express.static + the
+  // compression middleware, which (as of compression@1.8) does DYNAMIC
+  // brotli at quality 4 for br-capable clients and gzip otherwise — so the
+  // fast path's win over the fallback is the q11-vs-q4 byte savings plus
+  // zero per-request compression CPU, and a fall-through is never
+  // incorrect, just marginally larger.
+  //
+  // `Vary: Accept-Encoding` is required here: the immutable assets are
+  // `public`, and a shared cache serving the br body to a client that never
+  // asked for it would hand it garbage. (Plain responses get their Vary from
+  // the compression middleware.) The Content-Type must come from this map —
+  // sendFile would otherwise infer application/octet-stream from the .br
+  // extension.
+  const BR_TYPES = {
+    '.js':          'application/javascript; charset=utf-8',
+    '.css':         'text/css; charset=utf-8',
+    '.html':        'text/html; charset=utf-8',
+    '.svg':         'image/svg+xml',
+    '.webmanifest': 'application/manifest+json',
+    '.json':        'application/json; charset=utf-8',
+  };
+
+  // Returns true when the response was handled (a fresh .br sibling exists
+  // and the caller accepts brotli); false lets the caller fall through.
+  function sendPrecompressed(req, res, filePath) {
+    // Two-step negotiation, order matters. The explicit-token check comes
+    // first because a request with NO Accept-Encoding header means
+    // "identity" in practice (bare curl, naive HTTP clients) — but Express's
+    // negotiator treats a missing header as a wildcard that accepts
+    // anything, so consulting it alone would hand those clients brotli
+    // bytes. With the token present, acceptsEncodings then honours
+    // q-values: `br;q=0` is an explicit refusal and falls through to plain.
+    if (!/\bbr\b/.test(req.headers['accept-encoding'] || '')) return false;
+    if (!req.acceptsEncodings('br')) return false;
+    const type = BR_TYPES[path.extname(filePath).toLowerCase()];
+    if (!type) return false;
+    const brPath = `${filePath}.br`;
+    // Staleness guard: only serve the sibling if it's at least as new as its
+    // source. Every standard build flow regenerates both together (Vite
+    // empties dist/), but a hand-run `vite build --emptyOutDir=false` could
+    // otherwise leave a stale .br shadowing a newer plain file. Also covers
+    // "sibling missing" and "source missing" (stat throws → plain path).
+    let brStat;
+    let srcStat;
+    try {
+      brStat = fs.statSync(brPath);
+      srcStat = fs.statSync(filePath);
+    } catch (_) {
+      return false;
+    }
+    if (brStat.mtimeMs < srcStat.mtimeMs) return false;
+    const headers = {
+      'Content-Type':     type,
+      'Content-Encoding': 'br',
+      'Vary':             'Accept-Encoding',
+    };
+    const cc = staticCacheControl(filePath);
+    if (cc) headers['Cache-Control'] = cc;
+    res.sendFile(brPath, { headers });
+    return true;
+  }
+
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    let rel;
+    try {
+      rel = decodeURIComponent(req.path);
+    } catch (_) {
+      return next(); // malformed percent-encoding — let downstream 404 it
+    }
+    let filePath = path.normalize(path.join(clientDist, rel));
+    // Traversal guard: anything that normalizes outside dist falls through
+    // to the regular handlers (which have their own protections).
+    if (!filePath.startsWith(clientDist + path.sep)) return next();
+    if (filePath.endsWith(path.sep)) filePath = path.join(filePath, 'index.html');
+    if (sendPrecompressed(req, res, filePath)) return;
+    next();
+  });
+
   app.use(express.static(clientDist, {
     setHeaders(res, filePath) {
-      // Service worker and its registration script must never be served from
-      // the HTTP cache — the browser must re-fetch them on every load so it
-      // can detect updates.  All other static assets use the default ETag
-      // behaviour (conditional re-validation).
-      if (
-        filePath.endsWith('sw.js') ||
-        filePath.endsWith('registerSW.js') ||
-        filePath.endsWith('manifest.webmanifest')
-      ) {
-        res.setHeader('Cache-Control', 'no-store, no-cache');
-      }
+      const cc = staticCacheControl(filePath);
+      if (cc) res.setHeader('Cache-Control', cc);
     },
   }));
+
   app.get('*', (req, res) => {
-    res.sendFile(path.join(clientDist, 'index.html'));
+    const indexPath = path.join(clientDist, 'index.html');
+    if (sendPrecompressed(req, res, indexPath)) return;
+    res.sendFile(indexPath, {
+      headers: { 'Cache-Control': 'no-cache' },
+    });
   });
 }
 

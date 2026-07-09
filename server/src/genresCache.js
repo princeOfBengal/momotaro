@@ -22,11 +22,16 @@ let _payload = null;
 
 function buildPayload() {
   const db = getDb();
+  // The correlated subquery returns the picked manga's *id* rather than its
+  // cover filename — the cover URL needs both `cover_image` and
+  // `cover_updated_at` (the `?v=` cache key), and resolving them in a single
+  // batched IN query afterwards is cheaper than duplicating the ordered
+  // subquery per column.
   const rows = db.prepare(`
     SELECT g.genre AS genre,
            COUNT(DISTINCT m.id) AS manga_count,
            (
-             SELECT m2.cover_image
+             SELECT m2.id
              FROM manga m2
              JOIN manga_genres g2 ON g2.manga_id = m2.id
              LEFT JOIN libraries l2 ON l2.id = m2.library_id
@@ -35,7 +40,7 @@ function buildPayload() {
                AND m2.cover_image IS NOT NULL
              ORDER BY m2.score DESC NULLS LAST, m2.id ASC
              LIMIT 1
-           ) AS cover_image
+           ) AS cover_manga_id
     FROM manga_genres g
     JOIN manga m ON m.id = g.manga_id
     LEFT JOIN libraries l ON l.id = m.library_id
@@ -43,11 +48,26 @@ function buildPayload() {
     GROUP BY g.genre COLLATE NOCASE
     ORDER BY g.genre ASC
   `).all();
-  return rows.map(r => ({
-    genre:       r.genre,
-    manga_count: r.manga_count,
-    cover_url:   r.cover_image ? thumbnailUrl(r.cover_image) : null,
-  }));
+
+  const coverIds = [...new Set(rows.map(r => r.cover_manga_id).filter(id => id != null))];
+  const coversById = new Map();
+  if (coverIds.length > 0) {
+    const placeholders = coverIds.map(() => '?').join(',');
+    for (const m of db.prepare(
+      `SELECT id, cover_image, cover_updated_at FROM manga WHERE id IN (${placeholders})`
+    ).all(...coverIds)) {
+      coversById.set(m.id, m);
+    }
+  }
+
+  return rows.map(r => {
+    const cover = r.cover_manga_id != null ? coversById.get(r.cover_manga_id) : null;
+    return {
+      genre:       r.genre,
+      manga_count: r.manga_count,
+      cover_url:   cover?.cover_image ? thumbnailUrl(cover.cover_image, cover.cover_updated_at) : null,
+    };
+  });
 }
 
 // Synchronous read — better-sqlite3 is synchronous, so first-request lazy

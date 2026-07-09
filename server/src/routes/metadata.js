@@ -1667,7 +1667,8 @@ router.post('/libraries/:id/reset-metadata', requireAdmin, asyncWrapper(async (r
       }
     }
 
-    db.prepare('UPDATE manga SET cover_image = ? WHERE id = ?').run(activeName, manga.id);
+    db.prepare('UPDATE manga SET cover_image = ?, cover_updated_at = ? WHERE id = ?')
+      .run(activeName, Date.now(), manga.id);
   }
 
   console.log(
@@ -1933,8 +1934,8 @@ router.post('/manga/:id/set-thumbnail', asyncWrapper(async (req, res) => {
   // post-scan reinforcement that uses the same op) is the only thing that
   // will override it — the metadata-apply path will leave it alone, even
   // if the user later applies AniList on top.
-  db.prepare('UPDATE manga SET cover_image = ?, cover_user_set = 1 WHERE id = ?')
-    .run(`${manga.id}.webp`, manga.id);
+  db.prepare('UPDATE manga SET cover_image = ?, cover_user_set = 1, cover_updated_at = ? WHERE id = ?')
+    .run(`${manga.id}.webp`, Date.now(), manga.id);
 
   res.json({ data: { cover_image: `${manga.id}.webp` } });
 }));

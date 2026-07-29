@@ -1393,51 +1393,72 @@ function deleteHomeCacheForUser(userId) {
   }
 }
 
-// GET /api/home
-router.get('/home', asyncWrapper(async (req, res) => {
-  // Browser HTTP cache backs up the service worker's StaleWhileRevalidate.
-  // Helps non-PWA tabs and incognito windows where the SW isn't active.
-  res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=300');
+// Parse + clamp the /api/home query params into a canonical object. Shared by
+// the request handler and the background warmer so both derive the exact same
+// cache key from the same inputs — see `homeCacheKey`. Every field falls back
+// to a "behave as before" default, so a client that omits a param (or the
+// warmer replaying an older param set) still gets today's behaviour.
+function parseHomeParams(query) {
+  return {
+    minScore:               clampMinScore(query.min_score),
+    discoverMinScore:       clampScore(query.discover_min_score, 0),
+    discoverExcludedGenres: parseCsvLower(query.discover_excluded_genres),
+    discoverMinMatchCount:  clampInt(query.discover_min_match_count, 1, 1, 6),
+    discoverLibraryIds:     parseCsvInt(query.discover_library_ids),
+    discoverSkipBookmarked: query.discover_skip_bookmarked === '1',
+    favoriteGenresOverride: parseCsv(query.favorite_genres),
+    genreRibbonCount:       clampInt(query.genre_ribbon_count, 4, 1, 8),
+    recentWindowHours:      clampInt(query.recent_window_hours, 0, 0, 24 * 365),
+    limContinue: clampLimit(query.continue_limit, HOME_LIMITS.continue),
+    limDiscover: clampLimit(query.discover_limit, HOME_LIMITS.discover),
+    limGallery:  clampLimit(query.gallery_limit,  HOME_LIMITS.gallery),
+    limRibbon:   clampLimit(query.ribbon_limit,   HOME_LIMITS.genreRibbons),
+    limRecent:   clampLimit(query.recent_limit,   HOME_LIMITS.recent),
+  };
+}
 
-  const userId = req.user.id;
-  const minScore = clampMinScore(req.query.min_score);
-
-  // Discover-ribbon filters. Every one of these is optional and falls back to
-  // a "behave as before" default — a client that doesn't know about a given
-  // param still gets today's behaviour.
-  const discoverMinScore       = clampScore(req.query.discover_min_score, 0);
-  const discoverExcludedGenres = parseCsvLower(req.query.discover_excluded_genres);
-  const discoverMinMatchCount  = clampInt(req.query.discover_min_match_count, 1, 1, 6);
-  const discoverLibraryIds     = parseCsvInt(req.query.discover_library_ids);
-  const discoverSkipBookmarked = req.query.discover_skip_bookmarked === '1';
-  const favoriteGenresOverride = parseCsv(req.query.favorite_genres);
-  const genreRibbonCount       = clampInt(req.query.genre_ribbon_count, 4, 1, 8);
-  const recentWindowHours      = clampInt(req.query.recent_window_hours, 0, 0, 24 * 365);
-
-  const db = getDb();
-
-  const limContinue = clampLimit(req.query.continue_limit, HOME_LIMITS.continue);
-  const limDiscover = clampLimit(req.query.discover_limit, HOME_LIMITS.discover);
-  const limGallery  = clampLimit(req.query.gallery_limit,  HOME_LIMITS.gallery);
-  const limRibbon   = clampLimit(req.query.ribbon_limit,   HOME_LIMITS.genreRibbons);
-  const limRecent   = clampLimit(req.query.recent_limit,   HOME_LIMITS.recent);
-
-  // Cache key includes user_id + a hash of every param that affects the
-  // payload. continue_reading / favorite genres / discover are all per-user,
-  // so one user's Home must never be served to another; the param hash keeps
-  // two clients with different Discover filters from colliding either.
-  const cacheKey = `u:${userId}|` + sha1Short(JSON.stringify({
-    minScore, discoverMinScore, discoverExcludedGenres, discoverMinMatchCount,
-    discoverLibraryIds, discoverSkipBookmarked, favoriteGenresOverride,
-    genreRibbonCount, recentWindowHours,
-    limContinue, limDiscover, limGallery, limRibbon, limRecent,
+// Cache key = user_id + a hash of every param that affects the payload.
+// continue_reading / favourite genres / discover are all per-user, so one
+// user's Home must never be served to another; the param hash keeps two
+// clients with different Discover filters from colliding either. The key
+// ordering is fixed here (not the caller's object order) so the handler and the
+// warmer always produce a byte-identical key for the same params.
+function homeCacheKey(userId, p) {
+  return `u:${userId}|` + sha1Short(JSON.stringify({
+    minScore: p.minScore,
+    discoverMinScore: p.discoverMinScore,
+    discoverExcludedGenres: p.discoverExcludedGenres,
+    discoverMinMatchCount: p.discoverMinMatchCount,
+    discoverLibraryIds: p.discoverLibraryIds,
+    discoverSkipBookmarked: p.discoverSkipBookmarked,
+    favoriteGenresOverride: p.favoriteGenresOverride,
+    genreRibbonCount: p.genreRibbonCount,
+    recentWindowHours: p.recentWindowHours,
+    limContinue: p.limContinue,
+    limDiscover: p.limDiscover,
+    limGallery: p.limGallery,
+    limRibbon: p.limRibbon,
+    limRecent: p.limRecent,
   }));
-  const now = Date.now();
-  const cached = _homeCache.get(cacheKey);
-  if (cached && (now - cached.ts) < HOME_TTL_MS) {
-    return res.json({ data: cached.payload });
-  }
+}
 
+// ── Home working-set warmer ──────────────────────────────────────────────────
+// Track the most recent param set each user requested Home with. The warmer
+// (driven from index.js on an interval) replays these to keep the SQLite + OS
+// page cache for the Home working set resident, so a return-after-idle load
+// runs against a warm DB instead of cold disk. Replaying the *actual* last-seen
+// params (rather than reconstructing them from stored prefs) guarantees the
+// warmed cache key matches what the client will next request.
+const _homeWarmSet = new Map(); // userId -> { params, ts }
+
+function recordHomeActivity(userId, params) {
+  _homeWarmSet.set(userId, { params, ts: Date.now() });
+}
+
+// Build the full Home payload for a user. Pure read side — no req/res, so both
+// the request handler and the warmer call it. All queries are synchronous
+// (better-sqlite3), so this returns the payload directly.
+function buildHomePayload(db, userId, p) {
   // ── Continue Reading ─────────────────────────────────────────────────────
   // Manga the user has opened, most-recent first. Joined to chapters so the
   // UI can show the label of the current chapter without a follow-up fetch.
@@ -1458,7 +1479,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       AND (m.library_id IS NULL OR l.show_in_all = 1)
     ORDER BY p.last_read_at DESC
     LIMIT ?
-  `).all(userId, limContinue);
+  `).all(userId, p.limContinue);
 
   const continue_reading = continueReadingRows.map(r => ({
     id:                r.id,
@@ -1493,8 +1514,8 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // libraries (Home has no per-library switch); kept at 8 to bound how many
   // genres feed Discover and the ribbons.
   let favoriteGenres;
-  if (favoriteGenresOverride.length > 0) {
-    favoriteGenres = favoriteGenresOverride.slice(0, 6);
+  if (p.favoriteGenresOverride.length > 0) {
+    favoriteGenres = p.favoriteGenresOverride.slice(0, 6);
   } else {
     favoriteGenres = computeFavoriteGenres(db, {
       userId,
@@ -1513,7 +1534,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
   // covers Home forwarding a stale or cross-device pref, and any direct API
   // caller. When favoriteGenres is empty the Discover block below is skipped
   // entirely, so this is only consulted with at least one genre in play.
-  const effectiveMinMatchCount = Math.min(discoverMinMatchCount, favoriteGenres.length);
+  const effectiveMinMatchCount = Math.min(p.discoverMinMatchCount, favoriteGenres.length);
 
   // ── Discover New Series ──────────────────────────────────────────────────
   // Unread manga (no progress row, or a progress row with zero completed
@@ -1540,24 +1561,24 @@ router.get('/home', asyncWrapper(async (req, res) => {
     let havingClause = '';
     const extraParams = [];
 
-    if (discoverMinScore > 0) {
+    if (p.discoverMinScore > 0) {
       extraWhere += ' AND m.score >= ?';
-      extraParams.push(discoverMinScore);
+      extraParams.push(p.discoverMinScore);
     }
-    if (discoverLibraryIds.length > 0) {
-      extraWhere += ` AND m.library_id IN (${discoverLibraryIds.map(() => '?').join(',')})`;
-      extraParams.push(...discoverLibraryIds);
+    if (p.discoverLibraryIds.length > 0) {
+      extraWhere += ` AND m.library_id IN (${p.discoverLibraryIds.map(() => '?').join(',')})`;
+      extraParams.push(...p.discoverLibraryIds);
     }
-    if (discoverExcludedGenres.length > 0) {
-      const exPh = discoverExcludedGenres.map(() => '?').join(',');
+    if (p.discoverExcludedGenres.length > 0) {
+      const exPh = p.discoverExcludedGenres.map(() => '?').join(',');
       extraWhere += `
         AND m.id NOT IN (
           SELECT manga_id FROM manga_genres
           WHERE genre IN (${exPh}) COLLATE NOCASE
         )`;
-      extraParams.push(...discoverExcludedGenres);
+      extraParams.push(...p.discoverExcludedGenres);
     }
-    if (discoverSkipBookmarked) {
+    if (p.discoverSkipBookmarked) {
       extraWhere += `
         AND m.id NOT IN (
           SELECT manga_id FROM reading_list_manga
@@ -1587,7 +1608,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       ${havingClause}
       ORDER BY match_count DESC, m.score DESC NULLS LAST, m.id ASC
       LIMIT ?
-    `).all(userId, ...favoriteGenres, ...extraParams, limDiscover).map(r => ({
+    `).all(userId, ...favoriteGenres, ...extraParams, p.limDiscover).map(r => ({
       id:          r.id,
       title:       r.title,
       cover_url:   r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
@@ -1610,7 +1631,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
     WHERE (m.library_id IS NULL OR l.show_in_all = 1)
     ORDER BY ag.created_at DESC
     LIMIT ?
-  `).all(limGallery);
+  `).all(p.limGallery);
 
   const art_gallery = galleryRows.map(r => ({
     id:              r.id,
@@ -1652,9 +1673,9 @@ router.get('/home', asyncWrapper(async (req, res) => {
     LIMIT ?
   `);
 
-  const favorite_genres_ribbons = favoriteGenres.slice(0, genreRibbonCount).map(genre => ({
+  const favorite_genres_ribbons = favoriteGenres.slice(0, p.genreRibbonCount).map(genre => ({
     genre,
-    manga: topByGenreStmt.all(genre, minScore, limRibbon).map(r => ({
+    manga: topByGenreStmt.all(genre, p.minScore, p.limRibbon).map(r => ({
       id:        r.id,
       title:     r.title,
       cover_url: r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
@@ -1675,7 +1696,7 @@ router.get('/home', asyncWrapper(async (req, res) => {
       AND (? = 0 OR m.created_at >= unixepoch() - ? * 3600)
     ORDER BY m.created_at DESC, m.id DESC
     LIMIT ?
-  `).all(recentWindowHours, recentWindowHours, limRecent);
+  `).all(p.recentWindowHours, p.recentWindowHours, p.limRecent);
   const recently_added = recentlyAddedRows.map(r => ({
     id:         r.id,
     title:      r.title,
@@ -1684,14 +1705,102 @@ router.get('/home', asyncWrapper(async (req, res) => {
     created_at: r.created_at,
   }));
 
-  const payload = {
+  return {
     continue_reading,
     discover_candidates,
     recently_added,
     art_gallery,
     favorite_genres_ribbons,
   };
+}
 
+// Warm the Home working set for recently-active users. Driven from index.js on
+// an interval. Replays each warm-set user's last-seen params through
+// buildHomePayload — which touches the same tables a real Home request reads —
+// so the SQLite + OS page cache stays resident and a return-after-idle load
+// runs warm. The rebuilt payload is also written into _homeCache under the
+// identical key the client will request, so a return within the TTL is an
+// outright cache hit; after the TTL the read path recomputes against the warm
+// DB (still fast). Freshness is unchanged — TTL is not extended.
+//
+// better-sqlite3 is synchronous, so one buildHomePayload blocks the event loop
+// for its duration. To avoid a pass of up to `maxUsers` back-to-back queries
+// blocking request handling in a single tick, we `await` a macrotask yield
+// between users — each user's query still runs synchronously, but a real
+// request queued behind the warmer gets serviced between users rather than
+// after all of them. Returns a Promise resolving to the number warmed.
+//
+// The caller (index.js) skips a pass while a scan is running, and guards
+// against overlapping passes, since a scan is the most I/O-heavy op and
+// warming would only contend with it.
+async function warmHome({ maxUsers = 8, windowMs = 7 * 24 * 60 * 60 * 1000 } = {}) {
+  const now = Date.now();
+  // Drop entries outside the window so the map can't grow without bound.
+  for (const [uid, v] of _homeWarmSet) {
+    if (now - v.ts > windowMs) _homeWarmSet.delete(uid);
+  }
+  const users = [..._homeWarmSet.entries()]
+    .sort((a, b) => b[1].ts - a[1].ts) // most-recently-seen first
+    .slice(0, Math.max(0, maxUsers));
+  if (users.length === 0) return 0;
+
+  const db = getDb();
+  let warmed = 0;
+  for (let i = 0; i < users.length; i++) {
+    const [userId, { params }] = users[i];
+    try {
+      const payload = buildHomePayload(db, userId, params);
+      _homeCache.set(homeCacheKey(userId, params), { payload, ts: Date.now() });
+      warmed++;
+    } catch (err) {
+      console.warn(`[Home warm] user ${userId} failed: ${err.message}`);
+    }
+    // Yield to the event loop between users (not after the last) so pending
+    // requests are serviced between warm queries instead of after the whole
+    // pass. setImmediate drains I/O callbacks ahead of the next user.
+    if (i < users.length - 1) await new Promise(resolve => setImmediate(resolve));
+  }
+  return warmed;
+}
+
+// One-shot warm at startup: seed the default user (id 1) with default params so
+// the very first Home load after a cold boot runs against a warm DB. Real
+// users' actual param sets enter the warm set as they hit /api/home. The DB
+// warmth is largely param-independent (same tables), so even if user 1 has
+// custom prefs this still primes the working set.
+function warmHomeStartup() {
+  try {
+    const params = parseHomeParams({});
+    recordHomeActivity(1, params);
+    const db = getDb();
+    const payload = buildHomePayload(db, 1, params);
+    _homeCache.set(homeCacheKey(1, params), { payload, ts: Date.now() });
+  } catch (err) {
+    console.warn(`[Home warm] startup warm failed: ${err.message}`);
+  }
+}
+
+// GET /api/home
+router.get('/home', asyncWrapper(async (req, res) => {
+  // Browser HTTP cache backs up the service worker's StaleWhileRevalidate.
+  // Helps non-PWA tabs and incognito windows where the SW isn't active.
+  res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=300');
+
+  const userId = req.user.id;
+  const params = parseHomeParams(req.query);
+
+  // Remember this user's most recent param set so the background warmer can
+  // replay it (see warmHome). Recorded on every request, hit or miss.
+  recordHomeActivity(userId, params);
+
+  const cacheKey = homeCacheKey(userId, params);
+  const cached = _homeCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < HOME_TTL_MS) {
+    return res.json({ data: cached.payload });
+  }
+
+  const db = getDb();
+  const payload = buildHomePayload(db, userId, params);
   _homeCache.set(cacheKey, { payload, ts: Date.now() });
 
   res.json({ data: payload });
@@ -1761,3 +1870,12 @@ module.exports = router;
 // home-affecting key changes. Kept on the module exports so the prefs route
 // doesn't depend on the internal _homeCache Map directly.
 module.exports.deleteHomeCacheForUser = deleteHomeCacheForUser;
+// Home working-set warmer, driven from index.js. `warmHomeStartup` primes the
+// default user once at boot; `warmHome` runs on an interval for recently-active
+// users. See buildHomePayload / _homeWarmSet.
+module.exports.warmHome = warmHome;
+module.exports.warmHomeStartup = warmHomeStartup;
+// Exported for tests (seed the warm set / build a canonical param object
+// without going through the HTTP handler). Harmless pure helpers.
+module.exports.recordHomeActivity = recordHomeActivity;
+module.exports.parseHomeParams = parseHomeParams;

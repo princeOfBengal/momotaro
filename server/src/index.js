@@ -444,10 +444,50 @@ async function start() {
   startWatcher(libraries);
 
   // Initial scan — fire-and-forget. Server is already listening; progress
-  // is observable via GET /api/scan/status.
+  // is observable via GET /api/scan/status. Deferred by
+  // SCAN_STARTUP_DELAY_MS so the first Home request and the DB warm pass win
+  // the disk before the scan's read / thumbnail I/O ramps up — a cold boot's
+  // perceived Home speed matters more than shaving a few seconds off the
+  // rescan. The watcher is already running (above), so live changes during the
+  // delay are still caught. `.unref()` so the timer never holds up shutdown.
   if (config.SCAN_ON_STARTUP) {
-    runFullScan({ trigger: 'startup' })
-      .catch(err => console.error('[Scan] Startup scan error:', err.message));
+    const startStartupScan = () => {
+      // A manual scan may have been triggered during the delay window;
+      // runFullScan would 409, so skip rather than log a spurious error.
+      if (getScanStatus().running) return;
+      runFullScan({ trigger: 'startup' })
+        .catch(err => console.error('[Scan] Startup scan error:', err.message));
+    };
+    if (config.SCAN_STARTUP_DELAY_MS > 0) {
+      setTimeout(startStartupScan, config.SCAN_STARTUP_DELAY_MS).unref();
+    } else {
+      startStartupScan();
+    }
+  }
+
+  // Warm the Home working set. One immediate pass primes the default user so
+  // the first post-boot Home load is warm; the interval then keeps the SQLite
+  // + OS page cache resident for recently-active users so a return-after-idle
+  // load never pays cold disk reads. Skipped while a scan runs (I/O
+  // contention). HOME_WARM_INTERVAL_MS = 0 disables the feature entirely —
+  // including the startup prime — so an operator can opt out of all warm I/O.
+  if (config.HOME_WARM_INTERVAL_MS > 0) {
+    libraryRoutes.warmHomeStartup();
+    // warmHome now yields between users, so a pass spans multiple ticks.
+    // `warmPassActive` prevents a slow pass (or a very short interval) from
+    // stacking overlapping passes; skipping is harmless since the next tick
+    // retries.
+    let warmPassActive = false;
+    setInterval(() => {
+      if (warmPassActive || getScanStatus().running) return;
+      warmPassActive = true;
+      libraryRoutes.warmHome({
+        maxUsers: config.HOME_WARM_MAX_USERS,
+        windowMs: config.HOME_WARM_WINDOW_MS,
+      })
+        .catch(err => console.warn(`[Home warm] pass failed: ${err.message}`))
+        .finally(() => { warmPassActive = false; });
+    }, config.HOME_WARM_INTERVAL_MS).unref();
   }
 
   // Daily PRAGMA optimize. Keeps the query-planner stats fresh on a

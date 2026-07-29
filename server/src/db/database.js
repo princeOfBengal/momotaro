@@ -25,12 +25,17 @@ function getDb() {
     db.pragma('temp_store = MEMORY');        // temp tables in RAM
     migrate(db);
 
-    // Ask SQLite to hand idle page-cache pages back to the OS every few
-    // minutes. No-op when the cache is hot — only reclaims what SQLite
-    // isn't using. Cheap; .unref() so the timer never blocks shutdown.
-    setInterval(() => {
-      try { db.pragma('shrink_memory'); } catch (_) { /* best-effort */ }
-    }, 5 * 60 * 1000).unref();
+    // Optionally ask SQLite to hand idle page-cache pages back to the OS.
+    // Disabled by default (DB_SHRINK_INTERVAL_MS = 0): the page cache is
+    // already hard-capped by `cache_size`, and periodic shrinking discards the
+    // hot working set, which is exactly what makes the first Home load after an
+    // idle period slow. Enable a positive interval only on memory-constrained
+    // hosts. .unref() so the timer never blocks shutdown.
+    if (config.DB_SHRINK_INTERVAL_MS > 0) {
+      setInterval(() => {
+        try { db.pragma('shrink_memory'); } catch (_) { /* best-effort */ }
+      }, config.DB_SHRINK_INTERVAL_MS).unref();
+    }
   }
   return db;
 }
@@ -259,6 +264,32 @@ function migrate(db) {
   backfillUserAniListSession(db);
   dropLegacyDeviceAniListTable(db);
   addColumnIfMissing(db, 'connection_attempts', 'username', 'TEXT');
+  ensureHomeIndexes(db);
+}
+
+/**
+ * Indexes that back the /api/home ribbons. Split out from the base schema block
+ * because they reference columns added by later migrations — `progress.user_id`
+ * only exists after `migrateProgressToPerUser`, so creating an index on it in
+ * the top-of-migrate() exec would throw on an un-migrated DB. Called last, once
+ * every referenced column is guaranteed present. Both are `IF NOT EXISTS` and
+ * idempotent.
+ *
+ *   idx_progress_user_last_read — Continue Reading reads
+ *     `WHERE user_id=? ORDER BY last_read_at DESC LIMIT n`. Without a
+ *     (user_id, last_read_at DESC) index the planner filters by user then sorts;
+ *     with it the rows come out pre-ordered and the LIMIT stops early.
+ *   idx_art_gallery_created_at — the Art Gallery ribbon reads
+ *     `ORDER BY created_at DESC LIMIT n`; direction mirrors the ORDER BY so the
+ *     planner skips the temp b-tree.
+ */
+function ensureHomeIndexes(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_progress_user_last_read
+      ON progress(user_id, last_read_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_art_gallery_created_at
+      ON art_gallery(created_at DESC);
+  `);
 }
 
 /**

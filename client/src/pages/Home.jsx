@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import Ribbon from '../components/Ribbon';
 import AppSidebar from '../components/AppSidebar';
-import { useUserPref, usePreferences } from '../context/PreferencesContext';
+import { useUserPref } from '../context/PreferencesContext';
 // MangaCard is also statically imported by Library, so it lives in the main
 // chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
@@ -336,7 +336,6 @@ export default function Home() {
 
   // Per-user, server-synced preferences. Defaults match Home's pre-rollout
   // behaviour so an empty prefs store renders exactly the same page.
-  const { loading: prefsLoading } = usePreferences();
   const [discoverIntervalMs] = useUserPref('home_discover_refresh_ms', DEFAULT_DISCOVER_INTERVAL_MS);
   const [genreMinScore]      = useUserPref('home_genre_score_threshold', DEFAULT_GENRE_MIN_SCORE);
   const [galleryOrderRaw]    = useUserPref('home_gallery_order', DEFAULT_GALLERY_ORDER);
@@ -439,13 +438,26 @@ export default function Home() {
     favGenresManual, genreRibbonCount, recentWindowHours,
   ]);
 
-  // Wait for the initial prefs fetch before hitting /api/home — otherwise the
-  // first request goes out with defaults, the response is cached for 30s,
-  // and the second request (after prefs arrive) hits a stale entry. Once
-  // prefs resolve (success or empty fallback), load fires normally.
+  // Fire /api/home as soon as we can, without blocking on the preferences
+  // round-trip. On return visits PreferencesContext warm-starts from its
+  // localStorage mirror, so `load` already carries the user's real params on
+  // the first render — the common path is a single correctly-parameterised
+  // fetch. Only on a truly cold visit (first-ever, or after the browser evicted
+  // localStorage — the same long-idle case that leaves the server cold) is
+  // `load` initially built from hard-coded defaults; we fetch immediately with
+  // those rather than wait, and when prefs resolve to something different the
+  // pref-derived deps change `load`'s identity and this effect re-runs with the
+  // correct params. `data` is left in place across that second load (the
+  // skeleton only renders while `!data`), so the user sees content rather than
+  // a spinner. A default-pref user's prefs resolve to the same values, so
+  // `load`'s identity is stable and no second fetch happens.
+  //
+  // Server-side the two requests carry different param hashes only when the
+  // prefs actually differ from defaults, so they occupy distinct cache slots —
+  // the second never reads a stale defaults-keyed entry.
   useEffect(() => {
-    if (!prefsLoading) load();
-  }, [load, prefsLoading]);
+    load();
+  }, [load]);
 
   // Debounced search. 300 ms matches the Library page so cross-page muscle
   // memory is consistent. Empty query → reset state and let the ribbons show.

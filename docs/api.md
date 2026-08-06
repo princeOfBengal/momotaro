@@ -198,11 +198,66 @@ Response shape:
 | GET | `/api/manga/:id` | Get single manga with chapters and progress |
 | GET | `/api/manga/:id/info` | Get filesystem info computed on demand: path, chapter count, folder size in MB, `track_volumes`, and missing-chapter / missing-volume gap lists |
 | GET | `/api/manga/:id/offline-package` | Batched payload for the offline downloader — `{ manga, chapters, server_updated_at, fetched_at }`. Used by `queueSeries` (one round-trip per series instead of two) and `refreshOfflineSnapshot` (stale-copy detection). The chapter rows alias `file_mtime AS updated_at` because `chapters` has no literal `updated_at` column. See [offline.md § Server endpoint](./offline.md#server-endpoint). |
+| GET | `/api/manga/:id/similar` | _Discover Similar Manga_ — other manga sharing **≥ 75 %** of this manga's tags (genres) whose average rating clears a threshold. See [Discover Similar Manga](#discover-similar-manga-get-apimangaidsimilar) below. |
 | PATCH | `/api/manga/:id` | Update user-editable manga fields. Body accepts any subset of `{ track_volumes?, title?, author?, genres? }`. `track_volumes` is coerced to 0/1; an empty `title` returns 400; `author = ""` clears the field; `genres` must be an array of strings (non-strings/empties are dropped). The triggers on `manga` keep `manga_fts` and `manga_genres` in sync automatically when `title`/`author`/`genres` change. |
 | GET  | `/api/manga/:id/thumbnail-options` | List all thumbnail choices: anilist, original, history, chapter first pages (each annotated with its pre-generated cover when available) |
 | POST | `/api/manga/:id/set-thumbnail` | Set thumbnail from a page `{ page_id }` or saved file `{ saved_filename }` |
 | POST | `/api/manga/:id/generate-chapter-covers` | Render a 300×430 WebP from the first page of every chapter and save each into `thumbnail_history` (idempotent per chapter); does not change the active cover |
 | DELETE | `/api/manga/:id` | Remove manga from DB and delete files on disk |
+
+### Discover Similar Manga (`GET /api/manga/:id/similar`)
+
+Backs the **Discover Similar Manga** ribbon rendered under the Art Gallery
+section on the manga-detail page. Returns other manga that share **at least
+75 % of the current manga's tags** (a candidate `M` must contain ≥ 75 % of
+manga `C`'s genres — extra tags on `M` don't disqualify it) **and** whose
+average rating (`manga.score`) clears the quality threshold.
+
+Design doc: [discover-similar-manga.md](./design/discover-similar-manga.md).
+
+| Query param | Meaning | Clamp / default |
+|---|---|---|
+| `min_score` | Average-rating floor. Forwarded by the client from the per-user `home_discover_min_score` pref (the "Discover quality threshold" setting) — the server does **not** read prefs directly, keeping the response cache key derivable from the query string alone, same contract as `/api/home`. | `[0, 10]`, default `0` |
+| `limit` | Size of the candidate **pool** (not the display count). The client shuffles this pool with a per-day seed and slices to a fixed visible window, so a pool larger than the window is what lets titles rotate in daily. | `[1, 100]`, default `60` |
+
+Semantics:
+
+- **Tags = genres.** Matching runs against the normalised `manga_genres` table
+  (case-insensitive, PK-deduped). The required shared-tag count is
+  `ceil(0.75 × N)` where `N` is the current manga's tag count, computed with
+  integer math server-side (`floor((3N+3)/4)`, never from a client-supplied
+  count). This single rule **binds for every tag count** — it is not capped by
+  a flat floor — so "75 %" holds whether a manga has 4 tags or 20 (5 tags → 4
+  shared, 20 → 15). A 4-tag manga needs 3 (3/4 = 75 %), so sparsely-tagged
+  titles still match; manga with 1–3 tags require all of them (2/3 = 67 % < 75 %).
+- A manga with **0 tags** returns `[]` (no basis for similarity).
+- `m.score >= min_score` **excludes unrated (NULL-score) manga** automatically.
+- Scoped to visible libraries (`show_in_all`); the current manga is excluded
+  from its own results. Ordered by shared-tag count, then score
+  (`NULLS LAST`), then id.
+- Cached in-process for 60 s, keyed by `id | min_score | limit`, so a
+  threshold change transparently misses the stale slot.
+- **Daily rotation is client-side.** The endpoint returns a _deterministically
+  ordered_ pool (shared-tag count, then score); the client shuffles it with a
+  seed that only changes at local midnight and slices to a fixed window
+  (`SIMILAR_DISPLAY_COUNT = 18`). The order is therefore stable all day and
+  reshuffles the next day, surfacing different similar titles daily. The
+  tag-match and rating filters live entirely server-side and never change.
+  Because randomisation is client-side, the server response cache stays
+  deterministic (no `ORDER BY RANDOM()`).
+
+Response:
+
+```json
+{
+  "data": [
+    { "id": 42, "title": "…", "cover_url": "/thumbnails/…?v=…", "score": 8.4 }
+  ]
+}
+```
+
+Rows are slim (the UI renders cover + title + score only). The shared-tag count
+is computed server-side for the `HAVING` / `ORDER BY` but not returned.
 
 ### Search (`?search=`)
 

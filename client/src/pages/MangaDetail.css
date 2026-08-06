@@ -685,6 +685,13 @@
 
 /* Art Gallery */
 .gallery-section { margin-top: 32px; }
+/* Discover Similar Manga ribbon under the Art Gallery section. The Ribbon
+   component brings its own tile styling (Ribbon.css); this only spaces it
+   from the gallery above. */
+.similar-section { margin-top: 32px; }
+/* Non-zero height so the IntersectionObserver reliably reports the sentinel as
+   intersecting (a true 0-height target can read as ratio 0/0 in edge cases). */
+.similar-sentinel { min-height: 1px; }
 .gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

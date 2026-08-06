@@ -395,6 +395,15 @@ const _rawApi = {
     return apiFetch(`/api/library/letters${q ? '?' + q : ''}`);
   },
   getManga: (id) => apiFetch(`/api/manga/${id}`),
+  // Manga that share ≥75% of this manga's tags (genres) and clear the given
+  // average-rating floor. `minScore` is the caller's home_discover_min_score
+  // pref, forwarded as ?min_score= (the server stays stateless w.r.t. prefs).
+  getSimilar: (id, { minScore } = {}) => {
+    const params = new URLSearchParams();
+    if (minScore) params.set('min_score', String(minScore));
+    const qs = params.toString();
+    return apiFetch(`/api/manga/${id}/similar${qs ? '?' + qs : ''}`);
+  },
   // Single batched payload for the offline-download bootstrap: manga +
   // cover URL + full chapter list, plus a `server_updated_at` field the
   // client persists to detect a stale local copy later.

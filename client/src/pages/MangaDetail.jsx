@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useCallback, useDeferredValue, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useDeferredValue, useMemo, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAdminTask } from '../hooks/useAdminTask';
 import { useConnectivity } from '../context/ConnectivityContext';
+import { useUserPref, usePreferences } from '../context/PreferencesContext';
+import { shuffleWithSeed } from '../utils/shuffle';
+import Ribbon from '../components/Ribbon';
 import {
   queueChapter,
   queueSeries,
@@ -30,6 +33,25 @@ const CHAPTER_FILTER_THRESHOLD = 50;
 // the filter threshold because users want a fast resume mechanism even
 // before lists get hard to scroll.
 const CHAPTER_JUMP_THRESHOLD = 30;
+
+// ── Discover Similar Manga: daily rotation ──────────────────────────────────
+// The server returns a filtered candidate *pool* (tag-match ≥75% + rating
+// threshold already applied). We shuffle it with a seed that only changes at
+// local midnight and slice to a fixed window, so the visible set rotates once
+// a day — new titles surface daily — while the filtering rules never change.
+// Same seeded-shuffle approach as Home's Discover/genre ribbons.
+const SIMILAR_DISPLAY_COUNT = 18;
+
+// Seed stable for the whole local calendar day, changing at local midnight.
+// XOR'd with the manga id so two different manga pages don't rotate in lockstep
+// (each gets its own daily order).
+function dailyShuffleSeed(mangaId) {
+  const now = new Date();
+  const localDayIndex = Math.floor(
+    new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 86400000
+  );
+  return (localDayIndex ^ Math.imul(Number(mangaId) || 0, 0x9e3779b1)) | 0;
+}
 
 // Single source of truth for chapter-label formatting. Used by both the
 // chapter row and the resume subtitle below the Continue Reading button
@@ -1845,9 +1867,29 @@ function SourceUrlsModal({ manga, onClose }) {
 export default function MangaDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { online } = useConnectivity();
   const [manga, setManga] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Discover Similar Manga — titles sharing ≥75% of this manga's tags, gated by
+  // the user's Discover quality threshold (home_discover_min_score), forwarded
+  // to the server as ?min_score=. Rendered under the Art Gallery section.
+  const [discoverMinScore] = useUserPref('home_discover_min_score', 0);
+  // Whether the preferences have finished loading. Until they do, useUserPref
+  // returns the default (0), so fetching now and again after prefs resolve would
+  // fire two queries under different min_score keys — wait for the real value.
+  const { loading: prefsLoading } = usePreferences();
+  const [similar, setSimilar] = useState([]);
+  // The section sits below the chapter list / gallery, so most opens never
+  // scroll to it. Defer the (potentially fan-out-heavy) fetch until a sentinel
+  // near the section enters the viewport — avoids a per-open query users never
+  // see. Uses a callback ref (node in state) rather than useRef so the observer
+  // effect re-runs when the sentinel actually mounts: the component
+  // early-returns a loading state before the main content exists, so a plain
+  // ref would be null on the effect's first run and never re-attach.
+  const [similarNode, setSimilarNode] = useState(null);
+  const [similarVisible, setSimilarVisible] = useState(false);
 
   const [coverBust, setCoverBust] = useState(0);
   const [showThumbPicker, setShowThumbPicker] = useState(false);
@@ -2024,6 +2066,54 @@ export default function MangaDetail() {
     }).catch(() => { if (!cancelled) setGalleryLoading(false); });
     return () => { cancelled = true; };
   }, [id]);
+
+  // Reset the viewport gate when navigating to a different manga — the route
+  // component is reused across :id changes, so without this a page opened after
+  // scrolling down on a previous manga would fetch eagerly at the top.
+  useEffect(() => { setSimilarVisible(false); }, [id]);
+
+  // Watch a sentinel near the similar section; flip `similarVisible` once it's
+  // within ~600px of the viewport, then stop observing. Falls back to eager
+  // when IntersectionObserver is unavailable.
+  useEffect(() => {
+    if (similarVisible || !similarNode) return;
+    if (typeof IntersectionObserver === 'undefined') { setSimilarVisible(true); return; }
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) {
+        setSimilarVisible(true);
+        obs.disconnect();
+      }
+    }, { rootMargin: '600px' });
+    obs.observe(similarNode);
+    return () => obs.disconnect();
+    // Re-arming on :id change is handled by the reset effect flipping
+    // similarVisible, so `id` isn't needed here.
+  }, [similarNode, similarVisible]);
+
+  // Fetch "Discover Similar Manga" once the manga has loaded, actually has tags
+  // (a 0-tag manga has no basis for similarity — skip the request rather than
+  // round-trip for an empty list), and the section has neared the viewport.
+  // Re-runs when the quality threshold changes. Needs the server, so it's
+  // skipped offline. The current manga's tags are fixed per id, so keying on a
+  // boolean `hasGenres` (not the manga object) avoids refetching on unrelated
+  // setManga(...) updates.
+  const hasGenres = Array.isArray(manga?.genres) && manga.genres.length > 0;
+  useEffect(() => {
+    if (!id || !hasGenres || !online || !similarVisible || prefsLoading) { setSimilar([]); return; }
+    let cancelled = false;
+    api.getSimilar(id, { minScore: discoverMinScore })
+      .then(items => { if (!cancelled) setSimilar(items); })
+      .catch(() => { if (!cancelled) setSimilar([]); });
+    return () => { cancelled = true; };
+  }, [id, hasGenres, discoverMinScore, online, similarVisible, prefsLoading]);
+
+  // Shuffle the pool with today's seed and slice to the visible window. Stable
+  // within a local calendar day (so refreshes/re-renders keep the same order)
+  // and reshuffles the next day — surfacing different similar titles daily.
+  const displayedSimilar = useMemo(() => {
+    if (similar.length <= 1) return similar;
+    return shuffleWithSeed(similar, dailyShuffleSeed(id)).slice(0, SIMILAR_DISPLAY_COUNT);
+  }, [similar, id]);
 
   // Keep a ref of `showInfo` so the scan-status poller below can read the
   // latest value without re-subscribing every time the modal toggles.
@@ -3195,6 +3285,46 @@ export default function MangaDetail() {
             </div>
           )}
         </div>
+
+        {/* Sentinel: observed to lazily trigger the similar fetch only when the
+            section nears the viewport. Always rendered so the observer has a
+            target even before (or without) any results. `min-height: 1px` (see
+            CSS) keeps it non-zero-area so IntersectionObserver fires reliably. */}
+        <div ref={setSimilarNode} className="similar-sentinel" aria-hidden="true" />
+
+        {/* Discover Similar Manga — other titles sharing ≥75% of this manga's
+            tags that clear the Discover quality threshold. The Ribbon renders
+            nothing when it has no children, so an empty result hides the whole
+            section (no clutter). */}
+        {displayedSimilar.length > 0 && (
+          <div className="similar-section">
+            <Ribbon title="Discover Similar Manga">
+              {displayedSimilar.map(m => (
+                <Link
+                  key={m.id}
+                  to={`/manga/${m.id}`}
+                  className="ribbon-tile"
+                  role="listitem"
+                  aria-label={m.title}
+                >
+                  <div className="ribbon-tile-cover">
+                    {m.cover_url
+                      ? <img src={m.cover_url} alt="" loading="lazy" decoding="async" draggable={false} />
+                      : <div className="ribbon-tile-cover-fallback" aria-hidden="true">📕</div>}
+                    {m.score != null && (
+                      <span className="ribbon-tile-score" aria-label={`Score ${m.score}`}>
+                        ★ {Number(m.score).toFixed(1)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="ribbon-tile-meta">
+                    <p className="ribbon-tile-title">{m.title}</p>
+                  </div>
+                </Link>
+              ))}
+            </Ribbon>
+          </div>
+        )}
       </main>
 
       {showMetaModal && (

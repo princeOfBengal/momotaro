@@ -8,6 +8,7 @@ import { useUserPref } from '../context/PreferencesContext';
 // chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
 import { fmtSpan } from '../utils/format';
+import { shuffleWithSeed } from '../utils/shuffle';
 import './Library.css';
 import './Home.css';
 
@@ -48,19 +49,9 @@ const DEFAULT_RIBBON_ORDER = [
 const COVER_W = 140;
 const COVER_H = 210;
 
-// Deterministic PRNG seeded with a 32-bit integer. Used so the Discover
-// shuffle is stable for an entire refresh window — reloading the page
-// doesn't change what the user sees until the cadence elapses.
-function mulberry32(seed) {
-  let state = seed | 0;
-  return function () {
-    state = (state + 0x6D2B79F5) | 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// mulberry32 / shuffleWithSeed live in ../utils/shuffle (shared with
+// MangaDetail). The Discover shuffle stays stable for an entire refresh window
+// because the seed only changes when the cadence elapses (see resolveDiscoverSeed).
 
 // FNV-1a 32-bit string hash. Used to derive a stable per-genre offset for the
 // Top Manga ribbons so each genre rotates independently from `discoverSeed`
@@ -98,17 +89,6 @@ function discoverEmptyMessage(data, filters) {
   return 'Read some chapters so we can learn your favourite genres.';
 }
 
-function shuffleWithSeed(items, seed) {
-  const rng = mulberry32(seed);
-  const arr = items.slice();
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = arr[i];
-    arr[i] = arr[j];
-    arr[j] = tmp;
-  }
-  return arr;
-}
 
 // `intervalMs` is supplied by the caller from the per-user preference rather
 // than read from localStorage — Home reads its prefs via useUserPref and

@@ -141,9 +141,11 @@ router.patch('/libraries/:id', requireAdmin, asyncWrapper(async (req, res) => {
       .run(show_in_all ? 1 : 0, library.id);
     // /api/home and /api/stats both scope to libraries with show_in_all = 1
     // in All Libraries mode; drop their caches so the toggle is visible
-    // immediately instead of after the next TTL expiry.
+    // immediately instead of after the next TTL expiry. The similar-manga
+    // pool is scoped the same way, so drop it too.
     _homeCache.clear();
     _statsCache.clear();
+    _similarCache.clear();
     const updated = db.prepare(`
       SELECT l.*, COUNT(m.id) as manga_count
       FROM libraries l LEFT JOIN manga m ON m.library_id = l.id
@@ -754,6 +756,114 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
   });
 }));
 
+// ── Discover Similar Manga ───────────────────────────────────────────────────
+// Other manga that share ≥75% of THIS manga's tags (genres) and whose average
+// rating clears the caller's Discover quality threshold. The threshold arrives
+// as ?min_score= (forwarded from the home_discover_min_score pref) — the server
+// stays stateless w.r.t. prefs, exactly like /api/home, so the response cache
+// key is derivable purely from the query string. Powers the "Discover Similar
+// Manga" ribbon under Art Gallery on the manga-detail page. Read-only.
+//
+// Fan-out note: at the default threshold (min_score=0) nothing is pruned by
+// score, so a manga tagged with a popular genre makes `g.genre IN (…)` match
+// many rows before the GROUP BY. Two things bound the cost: the pool LIMIT
+// caps output, the 60 s cache below absorbs repeats, and — most importantly —
+// the client defers this request behind an IntersectionObserver so it only
+// fires when the section nears the viewport, not on every detail-page open.
+const SIMILAR_TTL_MS = 60 * 1000;
+const SIMILAR_CACHE_MAX = 100;
+const _similarCache = new Map(); // `${id}|${minScore}|${limit}` -> { payload, ts }
+
+router.get('/manga/:id/similar', asyncWrapper(async (req, res) => {
+  res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=300');
+  const db = getDb();
+  // Strict numeric id — parseInt would accept "5abc" as 5.
+  const rawId = req.params.id;
+  if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: 'Invalid manga id' });
+  const id = parseInt(rawId, 10);
+
+  const minScore = clampScore(req.query.min_score, 0);
+  // This is a candidate *pool*, not the display count. The client shuffles it
+  // with a per-day seed and slices to a smaller visible window, so a larger
+  // pool than the display window is what lets new titles rotate in each day
+  // while the tag-match + rating filters (applied below) stay fixed. Same
+  // pool-then-client-shuffle split Home's Discover ribbon uses.
+  const limit = clampInt(req.query.limit, 60, 1, 100);
+
+  const cacheKey = `${id}|${minScore}|${limit}`;
+  const cached = _similarCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < SIMILAR_TTL_MS) {
+    // Refresh recency for true LRU: a Map keeps a key's original insertion
+    // order on set(), so re-insert to move this hot key to the newest slot
+    // (otherwise the overflow eviction below is FIFO, not LRU).
+    _similarCache.delete(cacheKey);
+    _similarCache.set(cacheKey, cached);
+    return res.json({ data: cached.payload });
+  }
+
+  // The current manga's tag set drives the match. Read it from the normalised,
+  // case-insensitive, PK-deduped table rather than the JSON blob.
+  const currentTags = db.prepare(
+    'SELECT genre FROM manga_genres WHERE manga_id = ?'
+  ).all(id).map(r => r.genre);
+  const N = currentTags.length;
+
+  // No tags → no basis for similarity, and guards the ceil() below from N=0
+  // (which would otherwise set required=0 and match every manga).
+  if (N === 0) {
+    _similarCache.set(cacheKey, { payload: [], ts: Date.now() });
+    return res.json({ data: [] });
+  }
+
+  // Required shared-tag count = ceil(0.75 * N), computed in integer arithmetic
+  // (floor((3N+3)/4) == ceil(3N/4) == ceil(0.75N)) so no IEEE-754 rounding can
+  // creep in. This single rule *binds for every tag count* — it is never capped
+  // or subsumed by a flat floor — so the "75% of the tags" promise holds whether
+  // a manga has 4 tags or 20: a 5-tag manga needs 4 shared, a 20-tag manga 15.
+  // A 4-tag manga needs 3 (3/4 = 75%), so sparsely-tagged titles still surface
+  // matches — no separate floor is needed. Manga with 1–3 tags require all of
+  // them (2/3 = 67% < 75%), which is the intended strictness at that size.
+  const required = Math.floor((3 * N + 3) / 4);
+
+  // Joining only on the current manga's tags means COUNT(DISTINCT g.genre)
+  // counts *shared* tags — extra tags on a candidate aren't joined, so they
+  // don't affect the count. `m.score >= ?` drops NULL (unrated) scores
+  // automatically. show_in_all gate matches every other Home query.
+  const placeholders = currentTags.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT m.id, m.title, m.cover_image, m.cover_updated_at, m.score,
+           COUNT(DISTINCT g.genre COLLATE NOCASE) AS shared
+    FROM   manga m
+    JOIN   manga_genres g ON g.manga_id = m.id
+    LEFT JOIN libraries l ON l.id = m.library_id
+    WHERE  m.id != ?
+      AND (m.library_id IS NULL OR l.show_in_all = 1)
+      AND g.genre IN (${placeholders}) COLLATE NOCASE
+      AND m.score >= ?
+    GROUP BY m.id
+    HAVING shared >= ?
+    ORDER BY shared DESC, m.score DESC NULLS LAST, m.id ASC
+    LIMIT ?
+  `).all(id, ...currentTags, minScore, required, limit);
+
+  // `shared` / `total` are used by the SQL (HAVING / ORDER BY) but not the UI,
+  // so they're intentionally omitted from the payload.
+  const payload = rows.map(r => ({
+    id:        r.id,
+    title:     r.title,
+    cover_url: r.cover_image ? thumbnailUrl(r.cover_image, r.cover_updated_at) : null,
+    score:     r.score,
+  }));
+
+  // Bounded LRU: on overflow, evict the oldest (insertion-ordered Map).
+  _similarCache.set(cacheKey, { payload, ts: Date.now() });
+  if (_similarCache.size > SIMILAR_CACHE_MAX) {
+    _similarCache.delete(_similarCache.keys().next().value);
+  }
+
+  res.json({ data: payload });
+}));
+
 // GET /api/manga/:id/offline-package — single batched payload the Android
 // app's download queue uses to bootstrap an offline series snapshot. Returns
 // manga metadata + cover URL + the full chapter list in one round-trip,
@@ -1313,6 +1423,11 @@ setInterval(() => {
   }
   for (const [k, v] of _statsCache) {
     if (now - v.ts >= STATS_TTL_MS) _statsCache.delete(k);
+  }
+  // _similarCache is size-capped, but sweep expired entries too so a burst of
+  // one-off manga views doesn't hold stale payloads until the cap forces them out.
+  for (const [k, v] of _similarCache) {
+    if (now - v.ts >= SIMILAR_TTL_MS) _similarCache.delete(k);
   }
 }, 60 * 1000).unref();
 

@@ -10,6 +10,7 @@ const config = require('./config');
 const { getDb } = require('./db/database');
 const { runFullScan, getScanStatus } = require('./scanner/libraryScanner');
 const { migrateToSharded } = require('./scanner/thumbnailPaths');
+const { sweepOrphanGalleryThumbs } = require('./scanner/galleryThumbs');
 const cbzCache = require('./scanner/cbzCache');
 const cbzCacheSchedule = require('./scanner/cbzCacheSchedule');
 const downloader = require('./downloader/queue');
@@ -380,6 +381,14 @@ async function start() {
     cbzCache.auditOrphans(db);
   } catch (err) {
     console.warn(`[CBZ Cache] Startup orphan audit failed: ${err.message}`);
+  }
+
+  // Same idea for Art Gallery thumbnails: gallery rows removed by a cascade
+  // (manga/chapter/page deleted) leave their downscaled copies behind.
+  try {
+    sweepOrphanGalleryThumbs(db);
+  } catch (err) {
+    console.warn(`[Gallery] Startup thumbnail sweep failed: ${err.message}`);
   }
 
   // Start the cache auto-clear scheduler (no-op if mode is 'off').

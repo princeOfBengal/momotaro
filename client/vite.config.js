@@ -113,6 +113,22 @@ export default defineConfig({
             },
           },
 
+          // ── 1b. Art Gallery thumbnails ────────────────────────────────────────
+          // Downscaled gallery pages. The URL carries `?v=<chapter mtime>`, so
+          // content behind a given URL never changes.
+          {
+            urlPattern: /\/api\/pages\/\d+\/thumb/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'gallery-thumbs',
+              expiration: {
+                maxEntries: 2000,
+                maxAgeSeconds: 365 * 24 * 60 * 60, // 1 year
+              },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+
           // ── 2. Cover thumbnails ───────────────────────────────────────────────
           // Generated once per manga; filenames are stable.
           {

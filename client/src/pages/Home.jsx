@@ -7,7 +7,7 @@ import { useUserPref } from '../context/PreferencesContext';
 // MangaCard is also statically imported by Library, so it lives in the main
 // chunk regardless — no benefit to lazy-loading it here.
 import MangaCard from '../components/MangaCard';
-import { fmtSpan } from '../utils/format';
+import { fmtSpan, withExtraLabel } from '../utils/format';
 import { shuffleWithSeed } from '../utils/shuffle';
 import './Library.css';
 import './Home.css';
@@ -164,9 +164,9 @@ const ContinueReadingTile = memo(function ContinueReadingTile({ manga, eager }) 
   const cc = manga.current_chapter;
   const label = cc
     ? (cc.number != null
-        ? `${track} ${fmtSpan(cc.number, cc.number_end)}`
+        ? withExtraLabel(`${track} ${fmtSpan(cc.number, cc.number_end)}`, cc.extra_label)
         : (cc.volume != null
-            ? `Volume ${fmtSpan(cc.volume, cc.volume_end)}`
+            ? withExtraLabel(`Volume ${fmtSpan(cc.volume, cc.volume_end)}`, cc.extra_label)
             : cc.folder_name || '—'))
     : '—';
   const pct = manga.total_chapters > 0
@@ -229,9 +229,9 @@ function ResumeHero({ manga }) {
   const track = manga.track_volumes ? 'Volume' : 'Chapter';
   const cc = manga.current_chapter;
   const label = cc?.number != null
-    ? `${track} ${fmtSpan(cc.number, cc.number_end)}`
+    ? withExtraLabel(`${track} ${fmtSpan(cc.number, cc.number_end)}`, cc.extra_label)
     : (cc?.volume != null
-        ? `Volume ${fmtSpan(cc.volume, cc.volume_end)}`
+        ? withExtraLabel(`Volume ${fmtSpan(cc.volume, cc.volume_end)}`, cc.extra_label)
         : cc?.folder_name || '—');
   const page = manga.current_page ? Number(manga.current_page) : 0;
   const pageCount = manga.current_chapter?.page_count || 0;

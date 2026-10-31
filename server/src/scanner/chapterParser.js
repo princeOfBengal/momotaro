@@ -119,6 +119,10 @@ function parseChapterInfo(name) {
 
   // ── Fallback: no explicit "Ch" prefix found ──────────────────────────────
   if (chapter === null) {
+    // Drop extra-content keywords first so a digit inside one ("4-Koma") isn't
+    // read as the chapter: "Vol 1 4-Koma" is volume 1, not Vol 1 Ch 4.
+    for (const re of EXTRA_LABELS_GLOBAL) base = base.replace(re, ' ');
+    base = base.replace(/\s+/g, ' ').trim();
     // Bare numeric range ("001-005"), rejecting year–year spans ("2017-2018").
     BARE_RANGE_RE.lastIndex = 0;
     let m;
@@ -142,6 +146,171 @@ function parseChapterInfo(name) {
 
 function parseChapterNumber(name) {
   return parseChapterInfo(name).chapter;
+}
+
+// ── Extra-content labels ─────────────────────────────────────────────────────
+//
+// Bonus material ("Ch 5 Omake", "Vol 1 Extras", "Artbook") shares its number
+// with a regular chapter/volume, so the number alone can't tell them apart.
+// Each pattern maps the spellings seen in the wild onto one canonical label,
+// which is stored on the chapter row, shown in the UI, and kept in the
+// optimize standard name. Order matters only when a name carries two keywords
+// — the first match wins.
+const EXTRA_LABELS = [
+  ['Omake',         /\bomake\b/i],
+  ['Bonus',         /\bbonus(?:es)?\b/i],
+  ['Extra',         /\bextras?\b/i],
+  ['Artbook',       /\bart[\s-]?books?\b/i],
+  ['Fanbook',       /\bfan[\s-]?books?\b/i],
+  ['Databook',      /\bdata[\s-]?books?\b/i],
+  ['Guidebook',     /\bguide[\s-]?books?\b/i],
+  ['Illustrations', /\b(?:illust(?:ration)?s?|art[\s-]?works?|art[\s-]?gallery)\b/i],
+  ['Side Story',    /\bside[\s-]?stor(?:y|ies)\b/i],
+  ['Short Story',   /\bshort[\s-]?stor(?:y|ies)\b/i],
+  ['Gaiden',        /\bgaiden\b/i],
+  ['Spin-off',      /\bspin[\s-]?offs?\b/i],
+  ['Special',       /\bspecials?\b/i],
+  ['Oneshot',       /\bone[\s-]?shots?\b/i],
+  ['Pilot',         /\bpilot\b/i],
+  ['4-Koma',        /\b(?:4|yon)[\s-]?koma\b/i],
+  ['Interlude',     /\b(?:interludes?|intermissions?)\b/i],
+  ['Afterword',     /\b(?:afterwords?|postscripts?)\b/i],
+];
+
+const EXTRA_LABELS_GLOBAL = EXTRA_LABELS.map(([, re]) => new RegExp(re.source, 'gi'));
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Entry name → the text keyword detection runs on: extension and `[group]`
+// tags removed (a scanlator called "[Extra Scans]" would otherwise tag every
+// file), underscores and runs of whitespace collapsed to single spaces.
+function normalizeEntryText(name) {
+  return path.basename(name)
+    .replace(/\.(cbz|zip|7z|rar|pdf)$/i, '')
+    .replace(/\[.*?\]/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Remove the series name wherever it appears as whole words. Bounded by
+// letters/digits on both sides so a short series name ("K", "Ao") can't eat
+// the inside of a keyword ("Omake" → "Oma e"). Folder names often carry a
+// "(2015)" / "(Official)" qualifier the file names don't, so the name with
+// parenthesised parts removed is tried as well.
+function stripSeriesName(text, seriesName) {
+  if (!seriesName) return text;
+  const full = normalizeEntryText(seriesName);
+  const bare = full.replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const series of new Set([full, bare])) {
+    if (!series) continue;
+    const pattern = escapeRegExp(series).replace(/ /g, '\\s+');
+    text = text.replace(new RegExp(`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, 'giu'), ' ');
+  }
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// Words before the first word containing a digit — where a series title sits
+// in names like "X Gaiden c001". True extras usually follow the number.
+function titleWordCount(words) {
+  const i = words.findIndex(w => /\d/.test(w));
+  return i === -1 ? words.length : i;
+}
+
+// Every keyword match in `text`: [{ label, leading }], in EXTRA_LABELS order.
+// `leading` = the match starts before the first number (title position).
+function findExtraMatches(text) {
+  const words = text ? text.split(' ') : [];
+  const titleEnd = words.slice(0, titleWordCount(words)).join(' ').length;
+  const matches = [];
+  for (const [label, re] of EXTRA_LABELS) {
+    const m = re.exec(text);
+    if (m) matches.push({ label, leading: m.index < titleEnd });
+  }
+  return matches;
+}
+
+/**
+ * Extra-content detection for every entry in one manga folder.
+ * Returns Map of name → { label, keyword }:
+ *
+ *   label   — canonical tag to store and display, or null.
+ *   keyword — true when ANY extra keyword appears in the name once only the
+ *             folder's series name is removed — i.e. before rules 2 and 3,
+ *             so even a suppressed label still counts. Optimize's duplicate
+ *             removal keys off this, not `label`, so the labelling heuristics
+ *             below can never make bonus material eligible for deletion (a
+ *             folder holding just "Bonus 5 A" and "Bonus 5 B" loses its labels
+ *             to rule 2, but neither file can be deleted as a duplicate).
+ *
+ * Series naming is recognised three ways, all limited to the title position
+ * (before the first number) so "Ch 5 Bonus"-style extras are never affected:
+ *
+ *   1. The folder's series name, removed as whole words.
+ *   2. A shared title prefix: when 2+ entries all start with the same words
+ *      before their numbers ("X Gaiden c1", "X Gaiden c3 Omake"), those words
+ *      are the series title even if the folder is named differently. Only
+ *      applied when every entry keeps at least one word after removal.
+ *   3. Majority: a label found in title position on more than half of 3+
+ *      entries is series naming (catches a few odd-named files breaking the
+ *      shared prefix). Exactly half doesn't count, so "every chapter has an
+ *      omake" folders keep their labels.
+ */
+function detectExtraInfo(names, seriesName = null) {
+  const wordLists = names.map(n => {
+    const text = stripSeriesName(normalizeEntryText(n), seriesName);
+    return text ? text.split(' ') : [];
+  });
+  const hasKeyword = wordLists.map(ws => findExtraMatches(ws.join(' ')).length > 0);
+
+  // 2. Shared title prefix (case-insensitive, whole words).
+  if (names.length >= 2) {
+    let shared = Math.min(...wordLists.map(titleWordCount));
+    for (let i = 0; i < shared; i++) {
+      const w = wordLists[0][i].toLowerCase();
+      if (!wordLists.every(ws => ws[i].toLowerCase() === w)) { shared = i; break; }
+    }
+    if (shared > 0 && wordLists.every(ws => ws.length > shared)) {
+      for (let i = 0; i < wordLists.length; i++) wordLists[i] = wordLists[i].slice(shared);
+    }
+  }
+
+  const matches = wordLists.map(ws => findExtraMatches(ws.join(' ')));
+
+  // 3. Majority in title position.
+  const suppressed = new Set();
+  if (names.length >= 3) {
+    const leadingCounts = new Map();
+    for (const ms of matches) {
+      for (const label of new Set(ms.filter(m => m.leading).map(m => m.label))) {
+        leadingCounts.set(label, (leadingCounts.get(label) || 0) + 1);
+      }
+    }
+    for (const [label, count] of leadingCounts) {
+      if (count > names.length / 2) suppressed.add(label);
+    }
+  }
+
+  const out = new Map();
+  names.forEach((n, i) => {
+    const kept = matches[i].find(m => !(m.leading && suppressed.has(m.label)));
+    out.set(n, { label: kept ? kept.label : null, keyword: hasKeyword[i] });
+  });
+  return out;
+}
+
+/** Labels for every entry in one manga folder: Map of name → label|null. */
+function detectExtraLabels(names, seriesName = null) {
+  const labels = new Map();
+  for (const [n, info] of detectExtraInfo(names, seriesName)) labels.set(n, info.label);
+  return labels;
+}
+
+/** Canonical extra-content label for a single entry name, or null. */
+function detectExtraLabel(name, seriesName = null) {
+  return detectExtraLabels([name], seriesName).get(name);
 }
 
 /**
@@ -347,6 +516,9 @@ function detectChapterType(entryPath) {
 module.exports = {
   parseChapterInfo,
   parseChapterNumber,
+  detectExtraLabel,
+  detectExtraLabels,
+  detectExtraInfo,
   getChapterPages,
   getFolderPages,
   listCbzEntries,

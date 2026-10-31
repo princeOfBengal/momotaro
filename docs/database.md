@@ -90,6 +90,7 @@ One row per chapter folder or CBZ file.
 | `number_end` | REAL | Inclusive **end** chapter when the file spans a range (`Ch 10-12`); null for a single chapter. See [scanner.md § Chapter/Volume Name Parsing](./scanner.md#chaptervolume-name-parsing). |
 | `volume` | REAL | Parsed volume number — the **start** of a volume range (null if chapter-only) |
 | `volume_end` | REAL | Inclusive **end** volume when the file spans a range (`v17-18`); null for a single volume. |
+| `extra_label` | TEXT | Canonical extra-content tag parsed from the entry name (`Omake`, `Bonus`, `Extra`, `Artbook`, `Side Story`, …); null for regular chapters/volumes. See [scanner.md § Extra-content labels](./scanner.md#extra-content-labels). |
 | `title` | TEXT | Optional chapter title |
 | `page_count` | INTEGER | |
 | `file_mtime` | INTEGER | Unix timestamp (seconds) of the chapter file/folder at last scan — used to skip re-processing unchanged chapters |
@@ -211,7 +212,9 @@ User-bookmarked pages shown in the *Art Gallery* section at the bottom of MangaD
 
 **Index:** `idx_art_gallery_manga_id ON art_gallery(manga_id)`
 
-**Cascade behaviour:** Deleting a manga, chapter, or page automatically removes the matching gallery rows — no manual cleanup is required after rescans that drop pages.
+**Cascade behaviour:** Deleting a manga, chapter, or page automatically removes the matching gallery rows — no manual cleanup is required after rescans that drop pages. Note that a rescan which sees a chapter's `file_mtime` change (archive replaced, re-zipped, or touched by an external tool) runs `DELETE FROM pages` for that chapter and re-inserts them with new IDs, so that chapter's gallery entries are removed too.
+
+**Thumbnail files:** each row has a downscaled WebP on disk at `THUMBNAIL_DIR/gallery/<page_id % 256 as hex>/<page_id>_<chapters.file_mtime>.webp`, generated on add or first view (see [api.md § Gallery thumbnails](./api.md#gallery-thumbnails)). Files are not tracked in the schema: the delete routes remove them directly, and `sweepOrphanGalleryThumbs` reaps any whose row disappeared via a cascade or config import.
 
 ---
 
@@ -503,6 +506,7 @@ Columns added via `addColumnIfMissing` (safe to run on every startup):
 | `chapters` | `number_end` | Multi-chapter range support (`Ch 10-12`) |
 | `chapters` | `volume_end` | Multi-volume range support (`v17-18`) |
 | `chapters` | `file_mtime` | Incremental scan optimisation |
+| `chapters` | `extra_label` | Omake / Bonus / Extras tagging (one-time backfill on add) |
 | `manga` | `author` | AniList staff extraction |
 | `manga` | `doujinshi_id` | Doujinshi.info integration |
 | `manga` | `mangaupdates_id` | MangaUpdates integration |

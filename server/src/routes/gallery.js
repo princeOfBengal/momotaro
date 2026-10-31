@@ -1,6 +1,9 @@
 const express = require('express');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
+const {
+  galleryThumbUrl, ensureGalleryThumb, removeGalleryThumbs,
+} = require('../scanner/galleryThumbs');
 
 const router = express.Router();
 
@@ -12,10 +15,31 @@ const SELECT_ITEM_SQL = `
          c.volume       AS chapter_volume,
          c.volume_end   AS chapter_volume_end,
          c.folder_name  AS chapter_folder_name,
-         c.title        AS chapter_title
+         c.extra_label  AS chapter_extra_label,
+         c.title        AS chapter_title,
+         c.file_mtime   AS chapter_file_mtime
   FROM art_gallery g
   JOIN pages    p ON p.id = g.page_id
   JOIN chapters c ON c.id = g.chapter_id
+`;
+
+// Attach the downscaled thumbnail URL every gallery view renders from, and
+// drop the internal mtime it was derived from.
+function withThumbUrl(item) {
+  if (!item) return item;
+  const { chapter_file_mtime, ...rest } = item;
+  return { ...rest, thumb_url: galleryThumbUrl(item.page_id, chapter_file_mtime) };
+}
+
+// Everything ensureGalleryThumb needs to build a page's thumbnail. Restricted
+// to pages that are actually in the gallery so the thumb route can't be used
+// to fill the disk with downscales of arbitrary pages.
+const THUMB_SOURCE_SQL = `
+  SELECT p.id, p.page_index, p.filename, p.path,
+         c.type AS chapter_type, c.path AS chapter_path, c.file_mtime
+  FROM pages p
+  JOIN chapters c ON c.id = p.chapter_id
+  WHERE p.id = ? AND EXISTS (SELECT 1 FROM art_gallery g WHERE g.page_id = p.id)
 `;
 
 // GET /api/gallery/all — every saved page in the art gallery, grouped by
@@ -33,7 +57,9 @@ router.get('/gallery/all', asyncWrapper(async (req, res) => {
            c.number_end AS chapter_number_end,
            c.volume AS chapter_volume,
            c.volume_end AS chapter_volume_end,
+           c.extra_label AS chapter_extra_label,
            c.title  AS chapter_title,
+           c.file_mtime AS chapter_file_mtime,
            ag.page_id, p.page_index, p.width, p.height,
            ag.created_at
     FROM art_gallery ag
@@ -66,6 +92,7 @@ router.get('/gallery/all', asyncWrapper(async (req, res) => {
       width:               r.width,
       height:              r.height,
       page_image_url:      `/api/pages/${r.page_id}/image`,
+      thumb_url:           galleryThumbUrl(r.page_id, r.chapter_file_mtime),
       created_at:          r.created_at,
     });
   }
@@ -79,7 +106,7 @@ router.get('/manga/:id/gallery', asyncWrapper(async (req, res) => {
   const items = db.prepare(
     `${SELECT_ITEM_SQL} WHERE g.manga_id = ? ORDER BY g.created_at DESC, g.id DESC`
   ).all(parseInt(req.params.id, 10));
-  res.json({ data: items });
+  res.json({ data: items.map(withThumbUrl) });
 }));
 
 // POST /api/manga/:id/gallery — add a page. Body: { pageId }
@@ -102,11 +129,20 @@ router.post('/manga/:id/gallery', asyncWrapper(async (req, res) => {
     'INSERT OR IGNORE INTO art_gallery (manga_id, chapter_id, page_id) VALUES (?, ?, ?)'
   ).run(mangaId, page.chapter_id, pageId);
 
+  // Build the thumbnail now, while the reader that saved the page is open —
+  // one zip-entry decompress + resize, off the response path. A failure here
+  // is non-fatal: the thumb route retries on first view.
+  const source = db.prepare(THUMB_SOURCE_SQL).get(pageId);
+  if (source) {
+    ensureGalleryThumb(source).catch(err =>
+      console.warn(`[Gallery] Thumbnail for page ${pageId} failed: ${err.message}`));
+  }
+
   const item = db.prepare(
     `${SELECT_ITEM_SQL} WHERE g.manga_id = ? AND g.page_id = ?`
   ).get(mangaId, pageId);
 
-  res.json({ data: item });
+  res.json({ data: withThumbUrl(item) });
 }));
 
 // DELETE /api/manga/:id/gallery/page/:pageId — remove a page from the gallery by pageId
@@ -115,6 +151,7 @@ router.delete('/manga/:id/gallery/page/:pageId', asyncWrapper(async (req, res) =
   const mangaId = parseInt(req.params.id, 10);
   const pageId  = parseInt(req.params.pageId, 10);
   const info = db.prepare('DELETE FROM art_gallery WHERE manga_id = ? AND page_id = ?').run(mangaId, pageId);
+  if (info.changes > 0) removeGalleryThumbs(pageId);
   res.json({ data: { removed: info.changes } });
 }));
 
@@ -123,8 +160,35 @@ router.delete('/manga/:id/gallery/:itemId', asyncWrapper(async (req, res) => {
   const db = getDb();
   const mangaId = parseInt(req.params.id, 10);
   const itemId  = parseInt(req.params.itemId, 10);
+  const pageId = db.prepare('SELECT page_id FROM art_gallery WHERE manga_id = ? AND id = ?')
+    .pluck().get(mangaId, itemId);
   const info = db.prepare('DELETE FROM art_gallery WHERE manga_id = ? AND id = ?').run(mangaId, itemId);
+  if (info.changes > 0 && pageId) removeGalleryThumbs(pageId);
   res.json({ data: { removed: info.changes } });
+}));
+
+// GET /api/pages/:id/thumb — downscaled WebP of a gallery page, generated on
+// first request from a single archive entry (never a chapter extraction).
+// Immutable: the URL carries `?v=<chapter file_mtime>`, so the bytes behind a
+// given URL never change.
+router.get('/pages/:id/thumb', asyncWrapper(async (req, res) => {
+  const pageId = parseInt(req.params.id, 10);
+  const source = Number.isFinite(pageId) ? getDb().prepare(THUMB_SOURCE_SQL).get(pageId) : null;
+  if (!source) return res.status(404).json({ error: 'Gallery page not found' });
+
+  let file;
+  try {
+    file = await ensureGalleryThumb(source);
+  } catch (err) {
+    console.warn(`[Gallery] Thumbnail for page ${pageId} failed: ${err.message}`);
+    return res.status(404).json({ error: 'Thumbnail could not be generated' });
+  }
+  res.sendFile(file, {
+    headers: {
+      'Content-Type':  'image/webp',
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    },
+  });
 }));
 
 module.exports = router;

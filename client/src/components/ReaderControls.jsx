@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { isAndroid } from '../api/volumeButtons';
 import ToggleRow from './ToggleRow';
 import { useActionStatus } from '../hooks/useActionStatus';
-import { fmtSpan } from '../utils/format';
+import { fmtSpan, withExtraLabel } from '../utils/format';
 import {
   READING_MODE_OPTIONS,
   ORIENTATION_OPTIONS,
@@ -119,11 +119,11 @@ export default function ReaderControls({
   const chapterTitle = !chapter
     ? ''
     : (volSpan != null && numSpan != null)
-        ? `Vol. ${volSpan} Ch. ${numSpan}`
+        ? withExtraLabel(`Vol. ${volSpan} Ch. ${numSpan}`, chapter.extra_label)
         : volSpan != null
-          ? `Volume ${volSpan}`
+          ? withExtraLabel(`Volume ${volSpan}`, chapter.extra_label)
           : numSpan != null
-            ? `${unitLabel} ${numSpan}`
+            ? withExtraLabel(`${unitLabel} ${numSpan}`, chapter.extra_label)
             : chapter.folder_name;
 
   return (

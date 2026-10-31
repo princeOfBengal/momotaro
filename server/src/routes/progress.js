@@ -3,7 +3,7 @@ const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { saveMediaListEntry } = require('../metadata/anilist');
 const { getUserAniList } = require('./settings');
-const { safeJsonParse, csvEscape, formatUnix } = require('../utils');
+const { safeJsonParse, csvEscape, formatUnix, chapterOrderSql } = require('../utils');
 
 const router = express.Router();
 
@@ -127,7 +127,7 @@ router.patch('/progress/:mangaId/chapter/:chapterId', asyncWrapper(async (req, r
     const allChapters = db.prepare(`
       SELECT id FROM chapters
       WHERE manga_id = ?
-      ORDER BY COALESCE(number, volume) ASC NULLS LAST, folder_name ASC
+      ORDER BY ${chapterOrderSql()}
     `).all(mangaId);
 
     const markedIdx  = allChapters.findIndex(c => c.id === chapterId);

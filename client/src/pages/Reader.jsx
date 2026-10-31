@@ -7,6 +7,7 @@ import ReaderControls from '../components/ReaderControls';
 import ReaderEdgeHints from '../components/ReaderEdgeHints';
 import { useReaderPrefetch } from '../hooks/useReaderPrefetch';
 import { getResumePageForChapter, setResume, clearResume } from '../utils/readingProgress';
+import { compareChapters } from '../utils/format';
 import { enableImmersive, disableImmersive, isNativeShell } from '../api/immersive';
 import { enableVolumeButtons, disableVolumeButtons, addVolumeButtonListener, isAndroid } from '../api/volumeButtons';
 import {
@@ -588,14 +589,7 @@ export default function Reader() {
       api.getChapters(mangaId),
     ]).then(([m, chs]) => {
       setManga(m);
-      setAllChapters(chs.sort((a, b) => {
-        const aKey = a.number ?? a.volume;
-        const bKey = b.number ?? b.volume;
-        if (aKey === null && bKey === null) return 0;
-        if (aKey === null) return 1;
-        if (bKey === null) return -1;
-        return aKey - bKey;
-      }));
+      setAllChapters(chs.sort(compareChapters));
     }).catch(() => {});
   }, [mangaId]);
 

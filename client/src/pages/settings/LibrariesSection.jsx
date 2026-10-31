@@ -9,13 +9,23 @@ import '../Libraries.css';
 // Per-library bulk optimize. Each library row mounts its own instance so
 // the hook state is scoped to that library — two libraries can show
 // independent progress at the same time.
-function BulkOptimizeButton({ libraryId, disabled }) {
+function BulkOptimizeButton({ libraryId, libraryName, disabled }) {
   const { button } = useAdminTaskButton({
     startUrl:     `/api/libraries/${libraryId}/bulk-optimize`,
     statusUrl:    `/api/libraries/${libraryId}/bulk-optimize/status`,
     idleLabel:    'Bulk Optimize',
     runningLabel: 'Optimizing',
     buttonTitle:  'Rename and convert all chapters in this library to standardized CBZ format',
+    // Same deletions as the per-manga Optimize modal, across every series —
+    // never start it on a single click.
+    confirmMessage:
+      `Optimize every series in "${libraryName}"?\n\n` +
+      'Chapter folders and .zip/.7z archives are converted to .cbz and file names are standardized. ' +
+      'Metadata files in chapter folders (ComicInfo.xml, .json, …) are moved to the series folder first. ' +
+      'When a chapter or volume exists more than once, only the largest copy is kept — smaller copies are deleted. ' +
+      'Bonus content (Omake, Extras, …) is never treated as a duplicate.\n\n' +
+      'Original folders, non-CBZ archives, and smaller duplicate copies are deleted from disk. This cannot be undone.',
+    confirmOptions: { danger: true, okLabel: 'Optimize Library' },
     disabled,
   });
   return button;
@@ -386,7 +396,7 @@ export default function LibrariesSection() {
                         </div>
                       )}
                     </div>
-                    <BulkOptimizeButton libraryId={lib.id} disabled={scanning === lib.id} />
+                    <BulkOptimizeButton libraryId={lib.id} libraryName={lib.name} disabled={scanning === lib.id} />
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleExportMetadata(lib)}

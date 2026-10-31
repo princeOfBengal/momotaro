@@ -5,12 +5,13 @@ const config = require('../config');
 const { getDb } = require('../db/database');
 const { runFullScan, scanLibrary, getScanStatus } = require('../scanner/libraryScanner');
 const { thumbnailPath, thumbnailUrl } = require('../scanner/thumbnailPaths');
+const { galleryThumbUrl } = require('../scanner/galleryThumbs');
 const { addLibraryWatch, removeLibraryWatch } = require('../watcher');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const { requireAdmin } = require('../middleware/auth');
 const genresCache = require('../genresCache');
 const cbzCache = require('../scanner/cbzCache');
-const { safeJsonParse, csvEscape, formatUnix, readWeightSql, expandChapterRange, computeMissingSequence } = require('../utils');
+const { safeJsonParse, csvEscape, formatUnix, readWeightSql, chapterOrderSql, expandChapterRange, computeMissingSequence } = require('../utils');
 
 const router = express.Router();
 
@@ -735,7 +736,7 @@ router.get('/manga/:id', asyncWrapper(async (req, res) => {
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
   const chapters = db.prepare(
-    'SELECT * FROM chapters WHERE manga_id = ? ORDER BY number ASC NULLS LAST, folder_name ASC'
+    `SELECT * FROM chapters WHERE manga_id = ? ORDER BY ${chapterOrderSql()}`
   ).all(manga.id);
 
   // Scope progress to the requesting user — otherwise multi-user installs
@@ -893,11 +894,11 @@ router.get('/manga/:id/offline-package', asyncWrapper(async (req, res) => {
   // stale-copy detector (see client/src/api/downloader.js,
   // `isChapterStale`) can compare against it without branching.
   const chapters = db.prepare(
-    `SELECT id, manga_id, number, number_end, volume, volume_end, title, folder_name, page_count, type,
+    `SELECT id, manga_id, number, number_end, volume, volume_end, extra_label, title, folder_name, page_count, type,
             file_mtime AS updated_at
      FROM chapters
      WHERE manga_id = ?
-     ORDER BY number ASC NULLS LAST, folder_name ASC`
+     ORDER BY ${chapterOrderSql()}`
   ).all(manga.id);
 
   res.json({
@@ -1582,7 +1583,7 @@ function buildHomePayload(db, userId, p) {
            p.current_chapter_id, p.current_page, p.last_read_at,
            c.number AS cur_number, c.number_end AS cur_number_end,
            c.volume AS cur_volume, c.volume_end AS cur_volume_end,
-           c.folder_name AS cur_folder,
+           c.folder_name AS cur_folder, c.extra_label AS cur_extra_label,
            c.page_count AS cur_page_count,
            (SELECT COUNT(*) FROM chapters ch WHERE ch.manga_id = m.id) AS total_chapters,
            ${existingCompletedCountSql('p')} AS completed_count
@@ -1609,6 +1610,7 @@ function buildHomePayload(db, userId, p) {
       number_end:  r.cur_number_end,
       volume:      r.cur_volume,
       volume_end:  r.cur_volume_end,
+      extra_label: r.cur_extra_label,
       page_count:  r.cur_page_count,
     } : null,
     current_page:      r.current_page,
@@ -1737,6 +1739,7 @@ function buildHomePayload(db, userId, p) {
     SELECT ag.id, ag.manga_id, m.title AS manga_title, m.track_volumes,
            ag.chapter_id, c.folder_name AS chapter_folder,
            c.number AS chapter_number, c.volume AS chapter_volume,
+           c.file_mtime AS chapter_file_mtime,
            ag.page_id, pg.page_index, pg.width, pg.height, ag.created_at
     FROM art_gallery ag
     JOIN manga m    ON m.id = ag.manga_id
@@ -1765,6 +1768,8 @@ function buildHomePayload(db, userId, p) {
     width:           r.width,
     height:          r.height,
     page_image_url:  `/api/pages/${r.page_id}/image`,
+    // Downscaled copy the ribbon renders — see scanner/galleryThumbs.js.
+    thumb_url:       galleryThumbUrl(r.page_id, r.chapter_file_mtime),
     created_at:      r.created_at,
   }));
 

@@ -173,6 +173,8 @@ function setActiveUserId(id) {
  *     `api.pageImageUrl()` helper already does this for paths the SPA
  *     constructs locally; this catches the server-baked `page_image_url`
  *     field used by ArtGalleryRibbon (home page + dedicated /art-gallery).
+ *   - `/api/pages/<id>/thumb` — downscaled Art Gallery copies, baked into
+ *     gallery responses as `thumb_url`.
  *
  * Two rewrites are applied:
  *   1. Prepend the saved server URL when the URL is server-relative.
@@ -187,7 +189,7 @@ function setActiveUserId(id) {
  * Already-tagged URLs are not double-tagged. Recurses into arrays and
  * plain objects. Returns a shallow copy; the input is not mutated.
  */
-const TOKEN_BEARING_URL_RE = /\/thumbnails\/|\/api\/pages\/\d+\/image(?:\?|$|\/)/;
+const TOKEN_BEARING_URL_RE = /\/thumbnails\/|\/api\/pages\/\d+\/(?:image|thumb)(?:\?|$|\/)/;
 
 function rewriteMediaUrls(value, serverUrl, token) {
   if (value === null || value === undefined) return value;

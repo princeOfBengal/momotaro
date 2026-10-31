@@ -34,6 +34,32 @@ export function fmtSpan(start, end) {
   return end != null && end !== start ? `${start}-${end}` : `${start}`;
 }
 
+// Append a chapter's extra-content tag ("Omake", "Bonus", …, from the server's
+// `extra_label`) to its numeric label, so "Chapter 5" and "Chapter 5 · Bonus"
+// read as different entries. No-op for regular chapters.
+export function withExtraLabel(label, extraLabel) {
+  return extraLabel ? `${label} · ${extraLabel}` : label;
+}
+
+// Canonical chapter reading order (ascending). Mirrors the server's
+// `chapterOrderSql` (server/src/utils.js) — keep the two in step:
+//   1. number ?? volume, unnumbered entries last
+//   2. regular entries before extras sharing that number (Ch 5, then Ch 5 · Omake)
+//   3. folder name, natural order
+export function compareChapters(a, b) {
+  const ak = a.number ?? a.volume ?? null;
+  const bk = b.number ?? b.volume ?? null;
+  if (ak !== bk) {
+    if (ak === null) return 1;
+    if (bk === null) return -1;
+    return ak - bk;
+  }
+  const ax = a.extra_label ? 1 : 0;
+  const bx = b.extra_label ? 1 : 0;
+  if (ax !== bx) return ax - bx;
+  return String(a.folder_name || '').localeCompare(String(b.folder_name || ''), undefined, { numeric: true });
+}
+
 export function formatBytes(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

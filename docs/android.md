@@ -148,14 +148,16 @@ The server side is documented in [api.md § Pairing](./api.md#pairing).
 
 The server's library / home / gallery responses bake **server-relative**
 URLs into JSON: `cover_url: "/thumbnails/05/5.webp"`,
-`page_image_url: "/api/pages/123/image"`. In the PWA these resolve
+`page_image_url: "/api/pages/123/image"`,
+`thumb_url: "/api/pages/123/thumb?v=1713199000"` (Art Gallery tiles). In the PWA these resolve
 same-origin against the server. In the APK the WebView origin is
 `http://momotaro.app`, so the same relative URLs would resolve to a path
 the Capacitor asset shell has never heard of — every `<img>` would break.
 
 [client/src/api/client.js § rewriteMediaUrls](../client/src/api/client.js)
 walks every JSON response after `apiFetch` parses it and rewrites the
-URLs that match `/thumbnails/...` or `/api/pages/N/image`:
+URLs that match `/thumbnails/...`, `/api/pages/N/image`, or
+`/api/pages/N/thumb`:
 
 1. **Prepends the saved server URL** when the URL starts with `/` and a
    server URL is configured. The relative `/thumbnails/05/5.webp` becomes

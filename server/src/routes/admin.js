@@ -10,7 +10,7 @@ const { reinforceAllCovers } = require('../scanner/coverResolver');
 const cbzCache = require('../scanner/cbzCache');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 const taskRegistry = require('../admin/taskRegistry');
-const { csvEscape } = require('../utils');
+const { csvEscape, chapterOrderSql } = require('../utils');
 
 const router = express.Router();
 
@@ -219,7 +219,7 @@ router.post('/admin/regenerate-thumbnails', asyncWrapper(async (req, res) => {
           FROM pages p
           JOIN chapters c ON c.id = p.chapter_id
           WHERE c.manga_id = ? AND p.page_index = 0
-          ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
+          ORDER BY ${chapterOrderSql('c')}
           LIMIT 1
         `).get(manga.id);
 

@@ -176,7 +176,7 @@ export default function ArtGalleryRibbon({ items, title = 'Art Gallery', fullSiz
                 tabIndex={idx < items.length ? 0 : -1}
               >
                 <img
-                  src={g.page_image_url}
+                  src={g.thumb_url || g.page_image_url}
                   alt=""
                   loading="lazy"
                   decoding="async"

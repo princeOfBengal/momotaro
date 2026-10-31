@@ -33,6 +33,7 @@ export function useAdminTaskButton({
   runningLabel = 'Running',
   formatResult,            // (result) => string
   confirmMessage,          // optional appConfirm() text before start
+  confirmOptions,          // optional appConfirm() options ({ danger, okLabel })
   buttonClassName = 'btn btn-ghost btn-sm',
   buttonStyle     = { flexShrink: 0, alignSelf: 'flex-start' },
   buttonTitle,
@@ -66,7 +67,7 @@ export function useAdminTaskButton({
   }, [task.isDone, task.result, onDone]);
 
   async function handleClick() {
-    if (confirmMessage && !(await appConfirm(confirmMessage))) return;
+    if (confirmMessage && !(await appConfirm(confirmMessage, confirmOptions))) return;
     try { await task.start(); } catch (_) { /* surfaced via task.lastError */ }
   }
 

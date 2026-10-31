@@ -9,6 +9,7 @@ The scanner turns filesystem folders and CBZ files into database records.
 | [server/src/scanner/libraryScanner.js](../server/src/scanner/libraryScanner.js) | Main scanner — walks directories, upserts DB rows, generates thumbnails |
 | [server/src/scanner/chapterParser.js](../server/src/scanner/chapterParser.js) | Parses chapter/volume numbers from names; lists and streams CBZ entries via `yauzl` |
 | [server/src/scanner/thumbnailGenerator.js](../server/src/scanner/thumbnailGenerator.js) | Generates WebP cover images via Sharp (accepts either a filesystem path or a CBZ entry descriptor) |
+| [server/src/scanner/galleryThumbs.js](../server/src/scanner/galleryThumbs.js) | Downscaled Art Gallery thumbnails, built from a single CBZ entry or folder image without touching the CBZ cache, plus the orphan sweep (see [api.md § Gallery thumbnails](./api.md#gallery-thumbnails)) |
 | [server/src/scanner/coverResolver.js](../server/src/scanner/coverResolver.js) | Active-cover priority resolver. Used by `applyMetadataToManga`, `POST /api/admin/reset-thumbnails`, and the post-scan reinforcement pass. See [Cover Priority](#cover-priority). |
 | [server/src/scanner/localMetadata.js](../server/src/scanner/localMetadata.js) | Reads JSON sidecar (generic + scraper `primary_title` format) and `ComicInfo.xml` metadata from manga folders |
 | [server/src/watcher/index.js](../server/src/watcher/index.js) | chokidar watcher — triggers `scanMangaDirectory` on file changes |
@@ -267,6 +268,49 @@ Before matching, the parser:
 
 Regression matrix: [server/test/chapterParser.test.js](../server/test/chapterParser.test.js).
 
+### Extra-content labels
+
+Bonus material usually shares its number with a regular entry (`Ch 5` and `Ch 5 Omake` both parse to chapter 5), so `detectExtraLabel(name, seriesName)` in [chapterParser.js](../server/src/scanner/chapterParser.js) tags it separately. Whole-word, case-insensitive keywords map to one canonical label, stored in `chapters.extra_label` and shown in the UI as `Chapter 5 · Omake`:
+
+| Label | Matches |
+|---|---|
+| Omake | `omake` |
+| Bonus | `bonus`, `bonuses` |
+| Extra | `extra`, `extras` |
+| Artbook | `artbook`, `art book`, `art-book(s)` |
+| Fanbook / Databook / Guidebook | `fanbook`, `data book`, `guide-book`, … |
+| Illustrations | `illust(s)`, `illustration(s)`, `artwork(s)`, `art gallery` |
+| Side Story / Short Story | `side story`, `side-stories`, `short stories`, … |
+| Gaiden | `gaiden` |
+| Spin-off | `spin-off`, `spinoff(s)` |
+| Special | `special`, `specials` |
+| Oneshot | `oneshot`, `one-shot(s)` |
+| Pilot | `pilot` |
+| 4-Koma | `4koma`, `4-koma`, `yonkoma` |
+| Interlude | `interlude(s)`, `intermission(s)` |
+| Afterword | `afterword(s)`, `postscript(s)` |
+
+`[group]` tags are ignored, so a scanlator called `[Extra Scans]` doesn't tag every file. `detectExtraInfo(names, seriesName)` labels a whole folder at once and recognises **series naming** — a keyword that's part of the title, not a bonus marker — three ways. All three only look at the *title position* (words before the first number), so a trailing `Ch 5 Bonus` is never affected:
+
+1. **Folder name** — removed wherever it appears as whole words (so a folder named `K` can't eat the "k" in "Omake"). Also tried with parenthesised parts removed, so `Kingdom Gaiden (2015)/` matches `Kingdom Gaiden c001`.
+2. **Shared title prefix** — when 2+ entries all start with the same words before their numbers (`X Gaiden c1`, `X Gaiden c3 Omake`), those words are the series title. Skipped if it would leave any name empty.
+3. **Majority** — a label found in title position on *more than* half of 3+ entries is series naming. Exactly half doesn't count, so a folder where every chapter has its own omake keeps its labels.
+
+`detectExtraInfo` returns `{ label, keyword }` per name. `label` is what's stored and shown. `keyword` is true if any keyword appears after only rule 1 — Optimize's duplicate removal uses it, so rules 2–3 can't make bonus material deletable (a folder of just `Bonus 5 A` and `Bonus 5 B` loses its labels to rule 2 but neither file is deduplicated).
+
+The chapter parser also removes keywords before its bare-number fallback, so the digit in `Vol 1 4-Koma` isn't read as chapter 4.
+
+Known trade-offs:
+
+- A chapter whose *title* contains a keyword (`Ch 12 - Special Training`) is tagged `Special`. Label-only, and it exempts the entry from duplicate removal — the safe direction.
+- If the file names repeat a series title that matches neither the folder name nor a shared prefix (renamed folder, mixed naming), and fewer than half the files carry it, those files are tagged with the keyword in their title (e.g. `Gaiden`) and never deduplicated.
+
+The scanner writes the column on every scan; a one-time backfill (`backfillChapterExtraLabels` in [database.js](../server/src/db/database.js)) fills it for existing rows when the column is first added. Optimize keeps the label in the standard name (`Ch 5 Omake.cbz`), never deduplicates entries with a keyword, and skips any rename whose standard name wouldn't parse back to the same numbers and label. An entry with a keyword whose label was suppressed by rule 2 or 3 is left completely unchanged (no rename, no dedupe): its standard name would carry no label, so renaming `Side Story 2` to `Ch 2.cbz` would make it indistinguishable from the main chapter 2 — and deletable as its duplicate on a later run. No other entry is ever renamed onto the name of an entry left in place. Tests: [server/test/extraLabel.test.js](../server/test/extraLabel.test.js).
+
+### Chapter order
+
+Every chapter list and "first chapter" lookup sorts the same way: `COALESCE(number, volume)` ascending (unnumbered last), then regular entries before extras sharing that number, then folder name. Server: `chapterOrderSql()` in [server/src/utils.js](../server/src/utils.js). Client: `compareChapters` in [client/src/utils/format.js](../client/src/utils/format.js) — used by the chapter list, the reader and the offline library. Keep the two in step.
+
 ## CBZ Reads
 
 CBZ files are read via `yauzl` in two modes:
@@ -358,7 +402,7 @@ The fast path returns to the client after only a handful of pages are on disk; t
 
 **Priority hints**: `POST /api/chapters/:id/prioritize-pages` (called from the reader on scrubber/jump) moves the named page indices to the front of the Phase 2 work queue. Ensures that a user who scrubs ahead doesn't end up waiting on Phase 2 to reach their target in strict ascending order. No-op when there's no active fast extraction or when the chapter row has been removed.
 
-**Page IDs are now stable across re-extractions.** Both full and fast modes UPSERT `pages` rows by `(chapter_id, page_index)` rather than the pre-feature `DELETE FROM pages` + INSERT pattern. A cache eviction followed by a re-extract preserves every row's `pages.id`, so art-gallery entries and any client-cached page-id references survive intact.
+**Page IDs are now stable across re-extractions.** Both full and fast modes UPSERT `pages` rows by `(chapter_id, page_index)` rather than the pre-feature `DELETE FROM pages` + INSERT pattern. A cache eviction followed by a re-extract preserves every row's `pages.id`, so art-gallery entries and any client-cached page-id references survive intact. (This covers cache re-extraction only. The library scanner still deletes and re-inserts a chapter's pages when it sees the chapter's `file_mtime` change, which assigns new IDs and cascades away that chapter's gallery entries.)
 
 ### Tunables
 
@@ -431,6 +475,8 @@ Each cancellation aborts the chapter's `AbortController`, rejects every open pag
 - Once at end of `init()` (boot-time).
 - Once at the end of every `scanLibrary` run, after the manga-level pruning pass.
 
+**`sweepOrphanGalleryThumbs(db)`** ([galleryThumbs.js](../server/src/scanner/galleryThumbs.js)) is the equivalent for Art Gallery thumbnails. It walks `THUMBNAIL_DIR/gallery/`, keeps files whose `<pageId>_<file_mtime>.webp` name matches a current `art_gallery` row joined to its chapter, and deletes the rest (plus leftover `.tmp` files when no generation is in flight). It runs next to `auditOrphans` — at boot and at the end of every `scanLibrary` run — and after `POST /api/admin/import-config`.
+
 This catches the case where a manga folder is removed while the server is down (or while it's running but the watcher missed it).
 
 **Cover generation paths** — `POST /api/admin/regenerate-thumbnails` and `POST /api/manga/:id/set-thumbnail` for CBZ pages resolve through `cbzCache.getCbzPageFile(chapterId, cbzPath, pageIndex)`, which always uses `mode: 'full'` so the caller sees a complete directory before listing. Scanner-time thumbnail generation still uses the streaming fast path (`openCbzEntryStream`) so the initial walk of a large library doesn't explode into gigabytes of extracted covers.
@@ -460,6 +506,8 @@ The settings are read through a single shared `readAutoclearSettings(db)` helper
 
 1. **JSON sidecar** — see file priority and field mapping below.
 2. **`ComicInfo.xml`** — used as a fallback only if no usable JSON sidecar is found (same manga-dir-then-first-subdir search order).
+
+**After Optimize Chapters.** Packing a chapter folder into a CBZ would otherwise delete the chapter-subdir copies this lookup falls back to, so Optimize first moves each chapter folder's metadata files up into the manga directory. The first copy of each name becomes the series-level file there. Differing per-chapter copies go to a `metadata/` archive folder, which `findLocalMetadata` doesn't read — it holds only subfolders, so it's skipped both as a chapter and as a metadata source. For local metadata the outcome normally matches what the lookup found before conversion: the first chapter's file applies. See [api.md § Metadata files in chapter folders](./api.md#metadata-files-in-chapter-folders).
 
 ### JSON sidecar
 
@@ -546,6 +594,8 @@ thumbnails/
 └── ff/
     └── 255.webp
 ```
+
+Art Gallery thumbnails live in a separate `gallery/` subtree (`THUMBNAIL_DIR/gallery/<shard>/<pageId>_<file_mtime>.webp`, sharded by page ID) managed by [galleryThumbs.js](../server/src/scanner/galleryThumbs.js). They are served through `GET /api/pages/:id/thumb` rather than the static `/thumbnails` route, so a missing file can be generated on demand. `migrateToSharded()` only looks at files at the root, so it leaves this subtree alone.
 
 The shard for a thumbnail is `id % 256` rendered as two lowercase hex digits. Every file name in the system is prefixed with the manga's numeric id (`<id>.webp`, `<id>_anilist.webp`, `<id>_original.webp`, `<id>_<timestamp>.webp`), so the shard is derivable from the filename alone — the DB schema is unchanged, `manga.cover_image` still stores just the file name.
 

@@ -98,6 +98,23 @@ function readWeightSql(c) {
   END)`;
 }
 
+/**
+ * SQL ORDER BY body: canonical chapter reading order, shared by every query
+ * that lists chapters or picks the "first" one. Mirrors `compareChapters` in
+ * client/src/utils/format.js — keep the two in step.
+ *
+ *   1. COALESCE(number, volume) ascending, unnumbered entries last
+ *   2. regular entries before extras sharing that number ("Ch 5" before
+ *      "Ch 5 Omake" — by name alone the space sorts the omake first)
+ *   3. folder_name
+ *
+ * Pass the chapters-table alias in scope at the call site ('' for none).
+ */
+function chapterOrderSql(c = '') {
+  const p = c ? `${c}.` : '';
+  return `COALESCE(${p}number, ${p}volume) ASC NULLS LAST, (${p}extra_label IS NOT NULL) ASC, ${p}folder_name ASC`;
+}
+
 // Cap on how many missing numbers are listed (the count is still exact).
 const MISSING_LIST_CAP = 500;
 
@@ -179,6 +196,6 @@ function setSetting(db, key, value) {
 
 module.exports = {
   safeJsonParse, csvEscape, formatUnix, getSetting, setSetting,
-  naturalSort, compareByBasename, expandChapterRange, readWeightSql,
+  naturalSort, compareByBasename, expandChapterRange, readWeightSql, chapterOrderSql,
   computeMissingSequence, computeAggregateScore,
 };

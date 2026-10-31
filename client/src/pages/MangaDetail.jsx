@@ -20,7 +20,7 @@ import {
 import { getJobForChapter, listJobs, getOfflineChapter, listOfflineChaptersForManga } from '../api/offlineDb';
 import { isAvailable as offlineStorageAvailable } from '../api/offlineStorage';
 import { getResume, clearResume } from '../utils/readingProgress';
-import { fmtSpan } from '../utils/format';
+import { fmtSpan, withExtraLabel, compareChapters } from '../utils/format';
 import { appAlert, appConfirm, ensureAdminAccess } from '../dialog/dialogService';
 import './MangaDetail.css';
 
@@ -56,14 +56,15 @@ function dailyShuffleSeed(mangaId) {
 // Single source of truth for chapter-label formatting. Used by both the
 // chapter row and the resume subtitle below the Continue Reading button
 // so the labels never diverge. Falls back to folder_name when both
-// volume and number are unknown (manga ripped without metadata).
+// volume and number are unknown (manga ripped without metadata) — the folder
+// name already carries any Omake/Bonus wording, so no extra tag is appended.
 function formatChapterLabel(ch, trackVolumes) {
   if (!ch) return '—';
   const v = ch.volume != null ? fmtSpan(ch.volume, ch.volume_end) : null;
   const n = ch.number != null ? fmtSpan(ch.number, ch.number_end) : null;
-  if (v != null && n != null) return `Vol. ${v} Ch. ${n}`;
-  if (v != null) return `Volume ${v}`;
-  if (n != null) return `${trackVolumes ? 'Volume' : 'Chapter'} ${n}`;
+  if (v != null && n != null) return withExtraLabel(`Vol. ${v} Ch. ${n}`, ch.extra_label);
+  if (v != null) return withExtraLabel(`Volume ${v}`, ch.extra_label);
+  if (n != null) return withExtraLabel(`${trackVolumes ? 'Volume' : 'Chapter'} ${n}`, ch.extra_label);
   return ch.folder_name || '—';
 }
 
@@ -2263,9 +2264,10 @@ export default function MangaDetail() {
   function formatGalleryItemLabel(item) {
     const vol = item.chapter_volume != null ? fmtSpan(item.chapter_volume, item.chapter_volume_end) : null;
     const num = item.chapter_number != null ? fmtSpan(item.chapter_number, item.chapter_number_end) : null;
-    if (vol != null && num != null) return `Vol. ${vol} Ch. ${num}`;
-    if (vol != null)                return `Volume ${vol}`;
-    if (num != null)                return (manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`);
+    const extra = item.chapter_extra_label;
+    if (vol != null && num != null) return withExtraLabel(`Vol. ${vol} Ch. ${num}`, extra);
+    if (vol != null)                return withExtraLabel(`Volume ${vol}`, extra);
+    if (num != null)                return withExtraLabel(manga?.track_volumes ? `Volume ${num}` : `Chapter ${num}`, extra);
     return item.chapter_folder_name || '';
   }
 
@@ -2524,15 +2526,7 @@ export default function MangaDetail() {
   const { chapters = [], progress } = manga;
   const completedIds = new Set(progress?.completed_chapters || []);
   // Reading order (ascending) — used for the "start at first chapter" fallback
-  const readingOrderChapters = [...chapters].sort((a, b) => {
-    // Use volume as primary sort key for volume-only entries, chapter number otherwise
-    const aKey = a.number ?? a.volume;
-    const bKey = b.number ?? b.volume;
-    if (aKey === null && bKey === null) return a.folder_name.localeCompare(b.folder_name);
-    if (aKey === null) return 1;
-    if (bKey === null) return -1;
-    return aKey - bKey;
-  });
+  const readingOrderChapters = [...chapters].sort(compareChapters);
   // Display order (descending) — highest chapter/volume on top
   const displayChapters = [...readingOrderChapters].reverse();
 
@@ -2560,7 +2554,8 @@ export default function MangaDetail() {
       const vol    = ch.volume != null ? fmtSpan(ch.volume, ch.volume_end) : '';
       const title  = (ch.title || '').toLowerCase();
       const folder = (ch.folder_name || '').toLowerCase();
-      return num.includes(q) || vol.includes(q) || title.includes(q) || folder.includes(q);
+      const extra  = (ch.extra_label || '').toLowerCase();
+      return num.includes(q) || vol.includes(q) || title.includes(q) || folder.includes(q) || extra.includes(q);
     });
   })();
 
@@ -3258,7 +3253,7 @@ export default function MangaDetail() {
                       title={`${formatGalleryItemLabel(item)} · Page ${item.page_index + 1}`}
                     >
                       <img
-                        src={api.pageImageUrl(item.page_id)}
+                        src={item.thumb_url || api.pageImageUrl(item.page_id)}
                         alt={`${formatGalleryItemLabel(item)} page ${item.page_index + 1}`}
                         loading="lazy"
                         className="gallery-item-img"
@@ -3693,12 +3688,13 @@ export default function MangaDetail() {
                   This will process every chapter in <strong>{manga.title}</strong>:
                 </p>
                 <ul className="optimize-list">
-                  <li>Folders of images → converted to <strong>.cbz</strong></li>
+                  <li>Folders of images → converted to <strong>.cbz</strong> (metadata files such as <strong>ComicInfo.xml</strong> or <strong>.json</strong> are moved to the series folder first)</li>
                   <li><strong>.zip</strong> files → renamed to <strong>.cbz</strong></li>
                   <li><strong>.7z</strong> files → extracted and repacked as <strong>.cbz</strong> (requires 7-Zip)</li>
                   <li>File names → standardized to <strong>Ch N</strong> or <strong>Vol N Ch M</strong></li>
+                  <li>Duplicate chapters/volumes → the <strong>largest</strong> copy is kept, smaller copies are deleted</li>
                 </ul>
-                <p className="optimize-warning">Original folders and non-CBZ archives will be deleted. This cannot be undone.</p>
+                <p className="optimize-warning">Original folders, non-CBZ archives, and smaller duplicate copies will be deleted. This cannot be undone.</p>
                 <div className="optimize-actions">
                   <button className="btn btn-ghost" onClick={closeOptimizeModal}>Cancel</button>
                   <button className="btn btn-primary" onClick={handleOptimize}>Start Optimization</button>
@@ -3740,6 +3736,10 @@ export default function MangaDetail() {
                     <span className="optimize-stat-label">Converted to CBZ</span>
                   </div>
                   <div className="optimize-stat">
+                    <span className="optimize-stat-value">{(optimizeResult.duplicatesRemoved || []).length}</span>
+                    <span className="optimize-stat-label">Duplicates Removed</span>
+                  </div>
+                  <div className="optimize-stat">
                     <span className="optimize-stat-value">{(optimizeResult.skipped || []).length}</span>
                     <span className="optimize-stat-label">Skipped</span>
                   </div>
@@ -3748,6 +3748,22 @@ export default function MangaDetail() {
                     <span className="optimize-stat-label">Errors</span>
                   </div>
                 </div>
+                {(optimizeResult.duplicatesRemoved || []).length > 0 && (
+                  <div className="optimize-log">
+                    <p className="optimize-log-title">Duplicates Removed</p>
+                    {optimizeResult.duplicatesRemoved.map((d, i) => (
+                      <p key={i} className="optimize-log-item"><span className="optimize-log-name">{d.name}</span> — kept larger copy “{d.keptName}”</p>
+                    ))}
+                  </div>
+                )}
+                {(optimizeResult.metadataMoved || []).length > 0 && (
+                  <div className="optimize-log">
+                    <p className="optimize-log-title">Metadata Moved</p>
+                    {optimizeResult.metadataMoved.map((m, i) => (
+                      <p key={i} className="optimize-log-item"><span className="optimize-log-name">{m.name}</span> → {m.movedTo}</p>
+                    ))}
+                  </div>
+                )}
                 {(optimizeResult.skipped || []).length > 0 && (
                   <div className="optimize-log">
                     <p className="optimize-log-title">Skipped</p>

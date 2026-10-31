@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 const { getDb } = require('../db/database');
-const { parseChapterInfo, getChapterPages, detectChapterType } = require('./chapterParser');
+const { parseChapterInfo, detectExtraLabels, getChapterPages, detectChapterType } = require('./chapterParser');
 const { generateThumbnail } = require('./thumbnailGenerator');
 const { thumbnailPath, ensureShardDir } = require('./thumbnailPaths');
 const { findLocalMetadata } = require('./localMetadata');
@@ -10,6 +10,7 @@ const { computeAggregateScore } = require('../utils');
 const { reinforceAllCovers } = require('./coverResolver');
 const { enforceMetadataPriorityForLibrary } = require('../routes/metadata');
 const cbzCache = require('./cbzCache');
+const { sweepOrphanGalleryThumbs } = require('./galleryThumbs');
 
 // Concurrency knobs.
 //   MANGA_CONCURRENCY — how many manga directories we walk in parallel. Sharp
@@ -342,6 +343,15 @@ async function scanLibrary(library, { force = false, _fromFullScan = false } = {
       console.warn(`[Scanner] CBZ cache orphan audit failed: ${err.message}`);
     }
 
+    // Chapters/pages dropped by this scan cascade their art_gallery rows;
+    // reap the matching gallery thumbnails (and any made stale by a
+    // replaced archive's new file_mtime).
+    try {
+      sweepOrphanGalleryThumbs(db);
+    } catch (err) {
+      console.warn(`[Scanner] Gallery thumbnail sweep failed: ${err.message}`);
+    }
+
     console.log(`[Scanner] Done scanning library "${library.name}".`);
   } finally {
     if (claimedState) {
@@ -520,6 +530,8 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
 
   let coverPage = null;                // { type, chapterPath, entryNameOrPath }
   let lowestChapterNumber = Infinity;
+  // Omake / Bonus / Extras … — computed over the whole folder (see detectExtraLabels).
+  const extraLabels = detectExtraLabels(chapterEntries, folderName);
 
   for (const name of chapterEntries) {
     const chapterPath = path.join(mangaPath, name);
@@ -532,6 +544,7 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
     } catch { /* non-critical */ }
 
     const { chapter: number, chapterEnd: numberEnd, volume, volumeEnd } = parseChapterInfo(name);
+    const extraLabel = extraLabels.get(name) ?? null;
 
     const existingChapter = db.prepare(
       'SELECT id, file_mtime, page_count FROM chapters WHERE manga_id = ? AND folder_name = ?'
@@ -542,14 +555,14 @@ async function scanMangaDirectory(mangaPath, folderName, libraryId = null, { ski
 
     if (!existingChapter) {
       const r = db.prepare(`
-        INSERT INTO chapters (manga_id, folder_name, path, type, number, number_end, volume, volume_end, title, file_mtime)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(mangaId, name, chapterPath, type, number, numberEnd, volume, volumeEnd, null, currentMtime);
+        INSERT INTO chapters (manga_id, folder_name, path, type, number, number_end, volume, volume_end, extra_label, title, file_mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(mangaId, name, chapterPath, type, number, numberEnd, volume, volumeEnd, extraLabel, null, currentMtime);
       chapterId = r.lastInsertRowid;
     } else {
       chapterId = existingChapter.id;
-      db.prepare('UPDATE chapters SET path = ?, type = ?, number = ?, number_end = ?, volume = ?, volume_end = ? WHERE id = ?')
-        .run(chapterPath, type, number, numberEnd, volume, volumeEnd, chapterId);
+      db.prepare('UPDATE chapters SET path = ?, type = ?, number = ?, number_end = ?, volume = ?, volume_end = ?, extra_label = ? WHERE id = ?')
+        .run(chapterPath, type, number, numberEnd, volume, volumeEnd, extraLabel, chapterId);
 
       if (
         currentMtime !== null &&

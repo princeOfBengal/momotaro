@@ -326,7 +326,14 @@ The scanner is rooted at `scanMangaFromDisk(mangaId)`:
   `parseChapterDirName` (imported from
   [downloader.js](../client/src/api/downloader.js)).
 - For each chapter, reads `<chapterDir>/meta.json` for the page list
-  + `encrypted` flag.
+  + `encrypted` flag, plus the chapter fields (`number`, `volume`, spans,
+  `extra_label`, `title`, `folder_name`).
+- Sorts the rebuilt chapter list with `compareChapters`
+  ([client/src/utils/format.js](../client/src/utils/format.js)) — the
+  same reading order as the online chapter list, so an extra
+  (`Ch 5 · Omake`) sits right after its regular chapter. Chapters
+  downloaded before `extra_label` existed have none in `meta.json` and
+  show no tag until re-downloaded.
 - Re-derives `cover_url` by globbing `<mangaId>/cover.*` and resolving
   via `srcUrl` — the URL baked into manga.json at download time may
   refer to a previous picked-folder context.

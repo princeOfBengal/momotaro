@@ -445,6 +445,7 @@ A per-manga collection of saved pages. Users bookmark pages from the reader via 
 | POST | `/api/manga/:id/gallery` | Add a page `{ pageId }` |
 | DELETE | `/api/manga/:id/gallery/page/:pageId` | Remove by page ID (used by the reader toggle) |
 | DELETE | `/api/manga/:id/gallery/:itemId` | Remove by gallery item ID (used by the MangaDetail remove button) |
+| GET | `/api/pages/:id/thumb` | Downscaled WebP of a gallery page (see [§ Gallery thumbnails](#gallery-thumbnails)) |
 
 ### `GET /api/manga/:id/gallery`
 
@@ -462,17 +463,19 @@ Returns entries joined with `pages` and `chapters` so the UI can label each thum
       "created_at": 1713200000,
       "chapter_number": 3,
       "chapter_volume": null,
-      "chapter_folder_name": "Chapter 3"
+      "chapter_folder_name": "Chapter 3",
+      "chapter_extra_label": null,
+      "thumb_url": "/api/pages/412/thumb?v=1713199000000"
     }
   ]
 }
 ```
 
-The UI composes the chapter label from `chapter_number`, `chapter_volume`, and `chapter_folder_name` using the same logic as the chapter list (see [frontend.md](./frontend.md)).
+The UI composes the chapter label from `chapter_number`, `chapter_volume`, `chapter_extra_label` and `chapter_folder_name` using the same logic as the chapter list (see [frontend.md](./frontend.md)) — e.g. `Chapter 5 · Omake`.
 
 ### `POST /api/manga/:id/gallery`
 
-Body: `{ "pageId": <page-id> }`. The server validates via JOIN that the page belongs to the manga before inserting. Uses `INSERT OR IGNORE` on the `UNIQUE(manga_id, page_id)` constraint, so re-adding an existing page is a no-op.
+Body: `{ "pageId": <page-id> }`. The server validates via JOIN that the page belongs to the manga before inserting. Uses `INSERT OR IGNORE` on the `UNIQUE(manga_id, page_id)` constraint, so re-adding an existing page is a no-op. After inserting, the page's gallery thumbnail is generated in the background (not awaited); a failure there only means the thumb route builds it on first view.
 
 ### `DELETE` endpoints
 
@@ -481,7 +484,19 @@ Two deletion paths exist because the reader and MangaDetail have different IDs o
 - The reader only knows the current `page_id`, so it calls `/gallery/page/:pageId`.
 - The gallery UI on MangaDetail renders each item by its gallery row `id`, and calls `/gallery/:itemId`.
 
-Both return `{ data: { deleted: true } }` on success; neither is an error if the target row does not exist.
+Both return `{ data: { removed: <rows deleted, 0 or 1> } }`; neither is an error if the target row does not exist. Both also delete the page's gallery thumbnail files.
+
+### Gallery thumbnails
+
+Every gallery response (`/api/gallery/all`, `/api/manga/:id/gallery`, the `art_gallery` block of `/api/home`) carries a `thumb_url` alongside `page_image_url`. Gallery tiles render `thumb_url`; clicking a tile still opens the reader, which loads full pages as usual.
+
+`GET /api/pages/:id/thumb` serves a downscaled WebP — scaled (never up) so it covers 400×600, then cropped to at most 1600×1200 keeping the top centre, with EXIF orientation applied. Normal pages come out ~400×600, spreads ~800×600, long webtoon strips as a sharp 400 px-wide top section; roughly 30–100 KB versus 1–3 MB for a full page. Implemented in [scanner/galleryThumbs.js](../server/src/scanner/galleryThumbs.js):
+
+- **Never touches the CBZ extraction cache.** A CBZ page is read as a single zip entry via `openCbzEntryStream` (resolved through `listCbzEntries`, which sorts identically to the cache); a folder page is read straight from disk. Showing a gallery whose pages come from hundreds of evicted chapters therefore triggers no chapter extractions and evicts nothing.
+- **Generated once, on save or first view.** Stored at `THUMBNAIL_DIR/gallery/<pageId % 256 as hex>/<pageId>_<chapter file_mtime>.webp`. Concurrent requests for the same page share one generation; at most two generations run at a time so a backfill burst can't saturate a small host.
+- **Gallery pages only.** The route 404s for pages that aren't in `art_gallery`, so it can't be used to fill the disk.
+- **Immutable caching.** The URL carries `?v=<chapter file_mtime>`, so the bytes behind a URL never change. (A rescan that sees a new archive mtime currently re-indexes the chapter's pages with new IDs, which also cascades away their gallery rows; the version guards the URL regardless.) Responses are `Cache-Control: private, max-age=31536000, immutable`, and the service worker caches them in a dedicated `gallery-thumbs` CacheFirst bucket.
+- **Orphan sweep.** `sweepOrphanGalleryThumbs` deletes files whose `(page_id, file_mtime)` no longer matches an `art_gallery` row — rows removed by a manga/chapter/page cascade (including a rescan re-indexing a changed chapter) or by a config import. Runs at startup, at the end of each library scan, and after `POST /api/admin/import-config`.
 
 ---
 
@@ -489,7 +504,7 @@ Both return `{ data: { deleted: true } }` on success; neither is an error if the
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/manga/:mangaId/chapters` | List chapters for a manga |
+| GET | `/api/manga/:mangaId/chapters` | List chapters for a manga, in canonical reading order (see [scanner.md § Chapter order](./scanner.md#chapter-order)). Each row includes `extra_label` (`"Omake"`, `"Bonus"`, … or `null` — see [scanner.md § Extra-content labels](./scanner.md#extra-content-labels)). |
 | GET | `/api/chapters/:id` | Get single chapter |
 | GET | `/api/chapters/:id/pages` | List pages for a chapter (includes width/height/is_wide). Accepts `?fast=1` and `?resume_page=N` for the first-page-fast CBZ flow. |
 | POST | `/api/chapters/:id/prioritize-pages` | Priority hint for fast-mode Phase 2 — move named page indices to front of the work queue. No-op when no active fast extraction. |
@@ -597,7 +612,7 @@ Error responses specific to fast mode:
 
 Used by the chapter-level *Mark as Read* / *Mark as Unread* toggle on MangaDetail. Body: `{ "completed": true | false }`.
 
-- When `completed: true`, the chapter ID is added to `completed_chapters`. The server also advances `current_chapter_id` to the next unread chapter in reading order — but only if the current chapter is at or behind the chapter being marked (so marking chapters 1, 2, 3 in sequence leaves *Continue Reading* pointing at chapter 4). If the current chapter is already further ahead, it is left alone.
+- When `completed: true`, the chapter ID is added to `completed_chapters`. The server also advances `current_chapter_id` to the next unread chapter in reading order ([scanner.md § Chapter order](./scanner.md#chapter-order) — an extra like `Ch 5 Omake` comes right after `Ch 5`) — but only if the current chapter is at or behind the chapter being marked (so marking chapters 1, 2, 3 in sequence leaves *Continue Reading* pointing at chapter 4). If the current chapter is already further ahead, it is left alone.
 - When `completed: false`, the chapter ID is removed from `completed_chapters`; `current_chapter_id` is untouched.
 - Triggers a fire-and-forget AniList sync after the HTTP response, scoped to the requesting device.
 
@@ -1031,8 +1046,55 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/manga/:id/optimize` | Convert chapter folders to CBZ, optionally repack `.7z` archives via the system 7-Zip binary, and standardise chapter names. Triggers a `scanMangaDirectory` re-scan when finished. |
-| POST | `/api/libraries/:id/bulk-optimize` | Run the same optimisation across every manga in the library. Responds immediately; the work runs in the background. Used by the **Bulk Optimize** button in Settings → Libraries. |
+| POST | `/api/manga/:id/optimize` | **Async** — returns `202` and optimizes one manga in the background (see below). `409` if an optimize for this manga is already running. |
+| GET | `/api/manga/:id/optimize/status` | Status companion. `data.result` holds the summary below once `status` is `done`. |
+| POST | `/api/libraries/:id/bulk-optimize` | **Async** — runs the same per-manga optimize on every manga in the library, reporting `(processed, total, currentMangaName)` progress. Result: `{ total, errors }` (per-manga summaries go to the server log). Used by the **Bulk Optimize** button in Settings → Libraries, which asks for confirmation first. |
+| GET | `/api/libraries/:id/bulk-optimize/status` | Status companion for the bulk run. |
+
+### What a per-manga optimize does
+
+Implemented by `performOptimize` in [server/src/routes/optimize.js](../server/src/routes/optimize.js). Steps, in order:
+
+1. **Clean up** leftover `*.cbz.partial` files from an interrupted earlier run (see step 6).
+2. **Collect entries** — every folder of images, `.cbz` and `.zip` in the manga folder (`.zip` counts as a CBZ). Each gets a standard name from its parsed numbers plus its extra-content label: `Ch 5`, `Vol 3 Ch 15`, `Vol 17-18`, `Ch 5 Omake`. Entries with no parseable number keep their base name. (`.7z` files are not recognised as chapters by the scanner, so the 7-Zip repack path in the code is currently never reached.)
+3. **Leave some entries exactly as they are** (listed under *Skipped*):
+   - names containing an extra-content keyword whose label was suppressed as series naming (e.g. `Side Story 2` in a folder that's mostly side stories) — renaming would erase the only marker that it may be bonus content;
+   - names whose standard name wouldn't parse back to the same numbers and label.
+4. **Remove smaller duplicates** — when several entries share a standard name (two copies of `Vol 1`), the **largest copy on disk is kept** and the others are deleted; ties keep the entry already at the target name. Entries whose name contains any extra-content keyword (Omake, Bonus, Extras, Artbook, … — see [scanner.md § Extra-content labels](./scanner.md#extra-content-labels)) are never deduplicated. If a delete fails, the remaining copies fall through to the name-conflict skip.
+5. **Rename / convert** each remaining entry to `<standard name>.cbz`. Skipped instead:
+   - *Name conflict* — two entries still map to the same name;
+   - *Could not parse chapter/volume number* — an unnumbered `.cbz`/`.zip` (already in the right format);
+   - *Already exists* — the target is a different file already on disk (e.g. an unnumbered `Artbook` folder next to an existing `Artbook.cbz`). Identity is by inode, so case-only renames on case-insensitive filesystems still apply.
+6. **Pack folders safely** — a folder is written to `<name>.cbz.partial` and renamed onto the real name only once complete. Any failure removes the partial file and leaves the folder exactly as it was. If the folder can't be deleted after a successful pack (e.g. a locked file), the CBZ is kept and the failure reported as an error; the leftover folder is collapsed as a duplicate on the next run.
+7. **Rescan** the manga folder and **carry read progress** across renamed/deleted chapter rows — a deleted duplicate's progress lands on the kept copy, including when another copy's delete failed.
+
+### Metadata files in chapter folders
+
+Before a folder is packed (or deleted as a smaller duplicate), its metadata files — `*.json`, `*.xml` (incl. `ComicInfo.xml`), `*.opf`, `*.nfo` directly inside it — are moved out, so they survive and [local metadata](./scanner.md#local-metadata) keeps applying:
+
+| Situation | Where the file goes |
+|---|---|
+| Name free in the series folder | `<series>/<name>` — becomes the series-level file |
+| Same name **and** identical content already there | Nowhere — the redundant copy is removed with the folder |
+| Same name, different content (each chapter's own `ComicInfo.xml`) | `<series>/metadata/<chapter>/<name>`, original name kept (` (2)`, ` (3)` … on a further clash) |
+| From a smaller duplicate being deleted | Archived as above first, then promoted to `<series>/<name>` after all conversions if that name is still free — kept chapters get first claim, but a series whose only metadata sat in a discarded copy keeps it visible |
+
+Name checks ignore case on every platform. The archive folder is `metadata/` unless that name is taken by a chapter folder of images or a file, then `_metadata/`, `_metadata (2)/`, …; an archive folder that already exists is always reused, so it doesn't move between runs. It holds only subfolders, so the scanner never treats it as a chapter (and `findLocalMetadata` doesn't read it). If packing fails, moved files go back into the chapter folder.
+
+### Result
+
+```json
+{
+  "renamed": 12,
+  "converted": 4,
+  "duplicatesRemoved": [{ "name": "Series v01.cbz", "size": 1048576, "keptName": "Series v01 [HQ].cbz", "keptSize": 4194304 }],
+  "metadataMoved":     [{ "name": "Series c02/ComicInfo.xml", "movedTo": "metadata/Ch 2/ComicInfo.xml" }],
+  "skipped":           [{ "name": "Vol 3 Bonus.cbz", "reason": "Name conflict: multiple entries map to \"Vol 3 Bonus.cbz\"" }],
+  "errors":            [{ "name": "Series c07", "error": "Packed to \"Ch 7.cbz\", but the original folder couldn't be removed: EBUSY …" }]
+}
+```
+
+`movedTo` is relative to the series folder, `/`-separated on every platform. The MangaDetail Optimize modal renders these as counters plus per-list logs (see [frontend.md § MangaDetail](./frontend.md#mangadetail-srcpagesmangadetailjsx)).
 
 ---
 
@@ -1060,7 +1122,7 @@ Returns `{ logged_in: true }` on success. Unlike AniList, the token is shared ac
       "id": 5, "title": "...", "cover_url": "/thumbnails/...",
       "track_volumes": 0,
       "current_chapter_id": 42,
-      "current_chapter": { "id": 42, "folder_name": "...", "number": 14, "volume": null },
+      "current_chapter": { "id": 42, "folder_name": "...", "number": 14, "volume": null, "extra_label": null },
       "current_page": 5,
       "total_chapters": 120,
       "completed_count": 13,

@@ -18,7 +18,7 @@ const { getUserAniList } = require('./settings');
 const { requireAdmin } = require('../middleware/auth');
 const { thumbnailPath, ensureShardDir } = require('../scanner/thumbnailPaths');
 const { reinforceActiveCover } = require('../scanner/coverResolver');
-const { safeJsonParse, getSetting, computeAggregateScore } = require('../utils');
+const { safeJsonParse, getSetting, computeAggregateScore, chapterOrderSql } = require('../utils');
 const cbzCache = require('../scanner/cbzCache');
 const config = require('../config');
 
@@ -1629,9 +1629,7 @@ router.post('/libraries/:id/reset-metadata', requireAdmin, asyncWrapper(async (r
         SELECT c.id, c.path AS chapter_path, c.type
           FROM chapters c
          WHERE c.manga_id = ?
-         ORDER BY (CASE WHEN c.number IS NULL THEN 1 ELSE 0 END) ASC,
-                  c.number ASC,
-                  c.folder_name ASC
+         ORDER BY ${chapterOrderSql('c')}
          LIMIT 1
       `).get(manga.id);
 
@@ -1737,7 +1735,7 @@ router.get('/manga/:id/thumbnail-options', asyncWrapper(async (req, res) => {
     FROM chapters c
     LEFT JOIN pages p ON p.chapter_id = c.id AND p.page_index = 0
     WHERE c.manga_id = ?
-    ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
+    ORDER BY ${chapterOrderSql('c')}
   `).all(manga.id);
 
   res.json({
@@ -1785,7 +1783,7 @@ router.post('/manga/:id/generate-chapter-covers', asyncWrapper(async (req, res) 
     FROM chapters c
     LEFT JOIN pages p ON p.chapter_id = c.id AND p.page_index = 0
     WHERE c.manga_id = ?
-    ORDER BY COALESCE(c.number, c.volume) ASC NULLS LAST, c.folder_name ASC
+    ORDER BY ${chapterOrderSql('c')}
   `).all(manga.id);
 
   let generated = 0;

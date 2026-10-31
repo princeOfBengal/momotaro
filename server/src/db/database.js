@@ -196,6 +196,13 @@ function migrate(db) {
   addColumnIfMissing(db, 'chapters',  'number_end',  'REAL');
   addColumnIfMissing(db, 'chapters',  'volume_end',  'REAL');
   addColumnIfMissing(db, 'chapters',  'file_mtime',  'INTEGER');
+  // Canonical extra-content tag ("Omake", "Bonus", …) parsed from the entry
+  // name — see detectExtraLabel. NULL for regular chapters/volumes.
+  const hadExtraLabel = !!db.prepare(
+    "SELECT 1 FROM pragma_table_info('chapters') WHERE name = 'extra_label'"
+  ).get();
+  addColumnIfMissing(db, 'chapters',  'extra_label', 'TEXT');
+  if (!hadExtraLabel) backfillChapterExtraLabels(db);
   addColumnIfMissing(db, 'manga',     'author',            'TEXT');
   addColumnIfMissing(db, 'manga',     'doujinshi_id',      'TEXT');
   addColumnIfMissing(db, 'manga',     'mangaupdates_id',   'INTEGER');
@@ -1071,6 +1078,37 @@ function migrateSearchIndex(db) {
     `).run();
     console.log(`[DB] Backfilled manga_genres with ${changes} rows.`);
   }
+}
+
+/**
+ * One-time fill of `chapters.extra_label` when the column is first added, so
+ * existing libraries show Omake / Bonus / … tags without waiting for the next
+ * scan of each folder (which rewrites the column). `chapterParser` pulls in only
+ * fs/path/yauzl/utils, so requiring it here creates no circular load.
+ */
+function backfillChapterExtraLabels(db) {
+  const { detectExtraLabels } = require('../scanner/chapterParser');
+  const rows = db.prepare(`
+    SELECT c.id, c.manga_id, c.folder_name, m.folder_name AS manga_folder
+      FROM chapters c JOIN manga m ON m.id = c.manga_id
+  `).all();
+  const byManga = new Map();
+  for (const r of rows) {
+    if (!byManga.has(r.manga_id)) byManga.set(r.manga_id, []);
+    byManga.get(r.manga_id).push(r);
+  }
+  const upd = db.prepare('UPDATE chapters SET extra_label = ? WHERE id = ?');
+  let tagged = 0;
+  db.transaction(() => {
+    for (const chapters of byManga.values()) {
+      const labels = detectExtraLabels(chapters.map(c => c.folder_name), chapters[0].manga_folder);
+      for (const c of chapters) {
+        const label = labels.get(c.folder_name);
+        if (label) { upd.run(label, c.id); tagged++; }
+      }
+    }
+  })();
+  if (tagged > 0) console.log(`[DB] Backfilled extra_label for ${tagged} chapter(s).`);
 }
 
 /**

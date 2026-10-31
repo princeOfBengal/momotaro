@@ -3,6 +3,7 @@ const { getDb, DEFAULT_USER_ID } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
 const cbzCacheSchedule = require('../scanner/cbzCacheSchedule');
 const cbzCache = require('../scanner/cbzCache');
+const { sweepOrphanGalleryThumbs } = require('../scanner/galleryThumbs');
 const { safeJsonParse } = require('../utils');
 
 const router = express.Router();
@@ -573,6 +574,10 @@ router.post('/admin/import-config', asyncWrapper(async (req, res) => {
     if (Number.isFinite(n) && n > 0) cbzCache.setLimitBytes(n);
     cbzCacheSchedule.reschedule();
   } catch { /* non-fatal — leave previous state in place */ }
+
+  // The import replaced art_gallery wholesale; drop thumbnails for pages that
+  // are no longer in it. New entries get theirs on first view.
+  try { sweepOrphanGalleryThumbs(db); } catch { /* non-fatal */ }
 
   // Cap warnings so a huge import doesn't blow the response size.
   const MAX_WARNINGS = 50;

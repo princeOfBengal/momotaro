@@ -730,6 +730,7 @@ async function downloadChapter(job, signal) {
     number_end:         chapter.number_end ?? null,
     volume:             chapter.volume ?? null,
     volume_end:         chapter.volume_end ?? null,
+    extra_label:        chapter.extra_label ?? null,
     title:              chapter.title ?? null,
     folder_name:        chapter.folder_name ?? null,
     page_count:         pages.length,

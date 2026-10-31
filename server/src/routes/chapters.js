@@ -1,6 +1,7 @@
 const express = require('express');
 const { getDb } = require('../db/database');
 const { asyncWrapper } = require('../middleware/asyncWrapper');
+const { chapterOrderSql } = require('../utils');
 
 const router = express.Router();
 
@@ -11,7 +12,7 @@ router.get('/manga/:mangaId/chapters', asyncWrapper(async (req, res) => {
   if (!manga) return res.status(404).json({ error: 'Manga not found' });
 
   const chapters = db.prepare(
-    'SELECT * FROM chapters WHERE manga_id = ? ORDER BY number ASC NULLS LAST, folder_name ASC'
+    `SELECT * FROM chapters WHERE manga_id = ? ORDER BY ${chapterOrderSql()}`
   ).all(manga.id);
 
   res.json({ data: chapters });

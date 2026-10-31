@@ -31,6 +31,7 @@ import {
 } from './offlineStorage.js';
 import { isEncryptionEnabled, isUnlocked, maybeDecrypt } from './offlineCrypto.js';
 import { parseChapterDirName } from './downloader.js';
+import { compareChapters } from '../utils/format.js';
 
 export class OfflineUnavailableError extends Error {
   constructor(opName) {
@@ -98,6 +99,7 @@ function chapterRowToApiShape(row) {
     number_end:   row.number_end ?? null,
     volume:       row.volume ?? null,
     volume_end:   row.volume_end ?? null,
+    extra_label:  row.extra_label ?? null,
     title:        row.title ?? null,
     folder_name:  row.folder_name ?? null,
     page_count:   row.page_count ?? 0,
@@ -280,6 +282,7 @@ async function scanChapterFoldersForManga(mangaId) {
       volume_end:         meta?.volume_end ?? null,
       number:             meta?.number     ?? parsed.number    ?? null,
       number_end:         meta?.number_end ?? null,
+      extra_label:        meta?.extra_label ?? null,
       title:              meta?.title     ?? parsed.title     ?? null,
       folder_name:        meta?.folder_name ?? parsed.folder_name ?? null,
       page_count:         meta?.page_count ?? (meta?.pages?.length || null),
@@ -289,17 +292,8 @@ async function scanChapterFoldersForManga(mangaId) {
       encrypted:          !!meta?.encrypted,
     });
   }
-  // Reading order: by volume (nulls last), then number (nulls last),
-  // then folder name.
-  out.sort((a, b) => {
-    const va = a.volume ?? Number.POSITIVE_INFINITY;
-    const vb = b.volume ?? Number.POSITIVE_INFINITY;
-    if (va !== vb) return va - vb;
-    const na = a.number ?? Number.POSITIVE_INFINITY;
-    const nb = b.number ?? Number.POSITIVE_INFINITY;
-    if (na !== nb) return na - nb;
-    return String(a.folder_name || '').localeCompare(String(b.folder_name || ''), undefined, { numeric: true });
-  });
+  // Same reading order as the online chapter list (see compareChapters).
+  out.sort(compareChapters);
   return out;
 }
 

@@ -14,6 +14,14 @@ The reader is a fullscreen page viewer with three reading modes and rich gesture
 | [client/src/components/ReaderPaged.css](../client/src/components/ReaderPaged.css) | Paged reader styles (scale types, animations) |
 | [client/src/components/ReaderControls.css](../client/src/components/ReaderControls.css) | Controls bar styles |
 
+## Chapter navigation
+
+`Reader.jsx` loads the manga's chapter list and sorts it with `compareChapters` ([client/src/utils/format.js](../client/src/utils/format.js)) — the same reading order as the MangaDetail list and the offline library: `number ?? volume` ascending (unnumbered last), then regular entries before extras sharing that number, then folder name in natural order. **Next / Previous chapter** step through that list, so an extra like `Ch 5 Omake` is read right after `Ch 5`.
+
+The server uses the matching `chapterOrderSql` for its own "next chapter" decisions (e.g. advancing *Continue Reading* after a chapter is marked read) — see [scanner.md § Chapter order](./scanner.md#chapter-order). One known gap: when two entries tie on number *and* extra status (duplicate-numbered or unnumbered entries), the server compares folder names byte-wise while the client compares them naturally and case-insensitively, so those rare ties can order differently.
+
+The top bar's chapter label uses the same format as the chapter list, including the extra tag (`Chapter 5 · Omake`) — see [frontend.md § MangaDetail](./frontend.md#mangadetail-srcpagesmangadetailjsx).
+
 ## Reading Modes
 
 | Mode | Value | Description |
@@ -216,7 +224,7 @@ Directly below it sits the **Add to Art Gallery / Remove from Art Gallery** togg
 | `done` | Added! | Removed! |
 | `error` | Failed — try again | Failed — try again |
 
-`Reader.jsx` fetches `GET /api/manga/:id/gallery` once on mount into a `Set<page_id>` and uses that set to compute `isCurrentPageInGallery` for the current page. The toggle callback dispatches to `POST /api/manga/:id/gallery` (adding `{ pageId }`) or `DELETE /api/manga/:id/gallery/page/:pageId` and updates the set optimistically. The `UNIQUE(manga_id, page_id)` constraint on `art_gallery` with `INSERT OR IGNORE` makes the add path idempotent, so a double-tap never errors.
+`Reader.jsx` fetches `GET /api/manga/:id/gallery` once on mount into a `Set<page_id>` and uses that set to compute `isCurrentPageInGallery` for the current page. The toggle callback dispatches to `POST /api/manga/:id/gallery` (adding `{ pageId }`) or `DELETE /api/manga/:id/gallery/page/:pageId` and updates the set optimistically. The `UNIQUE(manga_id, page_id)` constraint on `art_gallery` with `INSERT OR IGNORE` makes the add path idempotent, so a double-tap never errors. Adding a page also starts generating its downscaled gallery thumbnail on the server in the background (one image read from the archive, no chapter extraction), so the gallery views have it ready; removing it deletes the thumbnail file.
 
 Directly below the gallery toggle sits a **Download Current Page** button which saves the current page's image to the device. It follows the same four-state cycle as the thumbnail button (`idle` / `loading` / `done` / `error`). The callback in `Reader.jsx` fetches `GET /api/pages/:id/image` as a blob and triggers a download via a temporary `<a download>` element. The filename is built from the manga title, chapter label (`v{volume}c{number}`, `v{volume}`, `c{number}`, or folder name), and the 1-based page index — unsafe filesystem characters (`\/:*?"<>|`) are replaced with underscores. The extension is taken from `page.filename`, defaulting to `.jpg`.
 

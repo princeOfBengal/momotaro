@@ -424,11 +424,15 @@ export default function Reader() {
             : (getResumePageForChapter(mangaId, chapterId) ?? 0);
 
         const pagesPromise = fastChapterOpen
-          ? api.getPagesWithMeta(chapterId, { fast: true, resumePage: initialResume })
-          : api.getPages(chapterId);
+          ? api.getPagesWithMeta(chapterId, { fast: true, resumePage: initialResume, mangaId })
+          // The window/mangaId hints are inert online (the raw getPages
+          // ignores extra args); offline `window` centres the first-resolved
+          // page window on the resume/deep-link page, and `mangaId` scopes the
+          // cold-IDB dir lookup to this series instead of the whole library.
+          : api.getPages(chapterId, { window: { start: initialResume }, mangaId });
 
         const [ch, pagesResult] = await Promise.all([
-          api.getChapter(chapterId),
+          api.getChapter(chapterId, { mangaId }),
           pagesPromise,
         ]);
         if (cancelled) return;
@@ -475,10 +479,49 @@ export default function Reader() {
                     && window.Capacitor.isNativePlatform();
       if (!isNative) return;
       import('../api/offlineApi.js')
-        .then(m => m.releasePageBlobs && m.releasePageBlobs())
+        .then(m => {
+          // Abort this chapter's in-flight background fill FIRST so it stops
+          // copying pages and stops minting blob URLs, then revoke the ones
+          // already created. Order matters: cancel then release, so a decrypt
+          // that was in flight self-revokes via the token check instead of
+          // slipping a blob past this cleanup.
+          if (m.cancelOfflinePagesFill) m.cancelOfflinePagesFill(chapterId);
+          if (m.releasePageBlobs) m.releasePageBlobs();
+        })
         .catch(() => { /* shim not loaded — fine */ });
     };
   }, [chapterId, reloadKey]);
+
+  // Offline windowed-load re-render.
+  //
+  // Offline, `getPages` resolves only a window of page URLs before returning
+  // (so the reader paints instantly) and fills the rest in the background.
+  // Those late URLs land in a plain Map that `api.pageImageUrl` reads
+  // synchronously — updating it doesn't trigger React. Subscribe to the
+  // background-fill event and bump `pages` to a new array reference so the
+  // renderers re-read the map and swap in the now-available images.
+  //
+  // Native-gated: the offline subsystem (and its Map) only exists on the
+  // Android/Electron shells, so PWA/browser sessions skip the dynamic import.
+  useEffect(() => {
+    const isNative = typeof window !== 'undefined'
+                  && window.Capacitor
+                  && typeof window.Capacitor.isNativePlatform === 'function'
+                  && window.Capacitor.isNativePlatform();
+    if (!isNative) return undefined;
+    let cancelled = false;
+    let unsub = () => {};
+    import('../api/offlineApi.js').then(m => {
+      if (cancelled || !m.onOfflinePagesResolved) return;
+      unsub = m.onOfflinePagesResolved((cid) => {
+        if (Number(cid) !== parseInt(chapterId, 10)) return;
+        // New array ref (same page objects) → child renderers re-render and
+        // re-read the URL map, without disturbing currentPage or dims.
+        setPages(prev => prev.slice());
+      });
+    }).catch(() => { /* offline shim unavailable — nothing to subscribe to */ });
+    return () => { cancelled = true; unsub(); };
+  }, [chapterId]);
 
   // Late-dim re-fetch for fast-open extractions.
   //

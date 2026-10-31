@@ -137,6 +137,46 @@ export async function srcUrl(path) {
   return Capacitor.convertFileSrc(r.fileUrl);
 }
 
+// Batched variant of `srcUrl` for an entire chapter directory. Resolves the
+// chapter folder once natively, mirrors its page files into the WebView cache
+// in a single round-trip, and returns a `{ <on-disk name>: <webview url> }`
+// map. `names` optionally restricts the copy to a subset of files (windowed
+// loading). Returns `null` when the batched native method isn't available
+// (older APK, non-native shell, or an Electron bridge that hasn't implemented
+// it) so callers can fall back to per-file `srcUrl`.
+export async function prepareChapterFiles(dirPath, names) {
+  if (!isNativeShell()) return null;
+  // Electron's in-tree bridge object exposes only the methods it implements;
+  // a missing one is a plain `undefined`, so guard before calling. (On the
+  // Android registerPlugin proxy every name is callable and a missing native
+  // method rejects instead — caught below.)
+  if (typeof OfflineFolder.prepareChapterForWebView !== 'function') return null;
+  try {
+    const arg = Array.isArray(names) && names.length
+      ? { path: dirPath, names }
+      : { path: dirPath };
+    const r = await OfflineFolder.prepareChapterForWebView(arg);
+    const files = Array.isArray(r?.files) ? r.files : [];
+    const map = {};
+    for (const f of files) {
+      if (f && f.name && f.fileUrl) map[f.name] = Capacitor.convertFileSrc(f.fileUrl);
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+// Purge one relative subtree of the WebView cache mirror (a single series
+// or chapter), leaving the rest intact. Called on delete/re-download so
+// stale copied pages don't get served. No-op on non-native shells or an
+// APK whose plugin predates the method.
+export async function clearMirror(path) {
+  if (!isNativeShell()) return;
+  if (typeof OfflineFolder.clearMirror !== 'function') return;
+  try { await OfflineFolder.clearMirror({ path }); } catch { /* best-effort */ }
+}
+
 // Wipes the cache-mirror directory the WebView reads from. Called when
 // the user picks a different folder OR clears the offline store, so
 // stale cached pages from the previous tree don't keep resolving.

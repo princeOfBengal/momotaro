@@ -38,6 +38,8 @@ import {
   listFiles   as plugListFiles,
   removePath  as plugRemovePath,
   srcUrl      as plugSrcUrl,
+  prepareChapterFiles as plugPrepareChapterFiles,
+  clearMirror as plugClearMirror,
   clearWebViewCache as plugClearWebViewCache,
   isAvailable as plugIsAvailable,
   OfflineFolderUnavailableError,
@@ -170,9 +172,28 @@ export async function srcUrl(path) {
   return plugSrcUrl(path);
 }
 
+// Batched, single-round-trip resolution of every (or a named subset of) page
+// file in a chapter directory to WebView-loadable URLs. Returns `null` when
+// the batched native path isn't available so the caller can fall back to
+// per-page `srcUrl`. Unlike `srcUrl` this doesn't throw when unconfigured —
+// it degrades to `null` so the caller keeps a single fallback branch.
+export async function prepareChapterFiles(dirPath, names) {
+  if (!isAvailable()) return null;
+  if (!(await isConfigured())) return null;
+  return plugPrepareChapterFiles(dirPath, names);
+}
+
 export async function clearWebViewCache() {
   if (!isAvailable()) return;
   return plugClearWebViewCache();
+}
+
+// Purge the WebView mirror for a single series/chapter subtree. Independent
+// of the SAF folder config (the mirror is app-private cache), so no
+// `isConfigured` gate — just skip when the shell isn't native.
+export async function clearMirror(path) {
+  if (!isAvailable()) return;
+  return plugClearMirror(path);
 }
 
 // ── Display helpers ────────────────────────────────────────────────────────

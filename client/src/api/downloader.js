@@ -46,6 +46,7 @@ import {
   writeBytes,
   writeText,
   removePath,
+  clearMirror,
   srcUrl,
   NoOfflineFolderError,
 } from './offlineStorage.js';
@@ -503,6 +504,9 @@ export function isNetworkAllowed() {
 export async function deleteSeries(mangaId) {
   if (!offlineStorageAvailable()) return;
   await removePath(mangaDir(mangaId), { recursive: true });
+  // Also purge the WebView mirror copies so a later re-download to the same
+  // path can't be served stale bytes (mirrorCopy skips on matching size).
+  try { await clearMirror(mangaDir(mangaId)); } catch { /* best-effort */ }
   await deleteOfflineManga(mangaId);
   notify();
 }
@@ -518,6 +522,10 @@ export async function deleteChapter(mangaId, chapterId) {
   const row = await getOfflineChapter(chapterId);
   const dirPath = (row && row.chapter_dir_path) || `${mangaId}/chapters/${chapterId}`;
   await removePath(dirPath, { recursive: true });
+  // Purge the chapter's WebView mirror subtree too — otherwise a restage
+  // (refreshOfflineSnapshot deletes + re-queues stale chapters) could serve
+  // the old copied pages when the new files happen to match byte-for-size.
+  try { await clearMirror(dirPath); } catch { /* best-effort */ }
   await deleteOfflineChapter(chapterId);
   notify();
 }

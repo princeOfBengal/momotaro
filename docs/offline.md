@@ -24,6 +24,7 @@ wipe. Build instructions live in [BUILD_ANDROID.md](../BUILD_ANDROID.md).
 | Detect offline state from three signals (browser event, native event, server ping) | `client/src/context/ConnectivityContext.jsx` |
 | Route every `api.*` read to a local shim when offline | `OFFLINE_ROUTED_METHODS` in `client/src/api/client.js` |
 | Render downloaded pages in `<img src>` from a SAF folder | `prepareFileForWebView` cache-copy |
+| Open a chapter without a per-page SAF tree-walk (batched, windowed) | `prepareChapterForWebView` + windowed `getPages` |
 | Survive IndexedDB wipes via filesystem-based discovery (v1.7) | `scanMangaFromDisk` in `client/src/api/offlineApi.js` |
 | Optional at-rest AES-GCM encryption of page bytes | `client/src/api/offlineCrypto.js` |
 | Wi-Fi-only setting, paused-status badge | `setNetworkAllowed` + `wifiOnly` in `ConnectivityContext` |
@@ -116,7 +117,15 @@ way to write to user-visible folders without scoped-storage gymnastics.
 | `listFiles({ path })` | `{ entries: [{ name, isDirectory }, ...] }` | The filesystem-discovery scanner's only enumeration tool. |
 | `deletePath({ path, recursive })` | — | Recursive variant walks `DocumentFile.listFiles()`. |
 | `prepareFileForWebView({ path })` | `{ fileUrl }` | Copies the SAF file into `getCacheDir()/offline-mirror/<relPath>`. The returned `file://` URL is what `Capacitor.convertFileSrc` rewrites to a WebView-loadable URL. |
-| `clearCache` | — | Wipes the offline-mirror. Triggered on folder change so stale cached pages don't keep resolving. |
+| `prepareChapterForWebView({ path, names? })` | `{ files: [{ name, fileUrl }, …] }` | **Batched** variant of the above for a whole chapter. Resolves the chapter dir once, enumerates it with a single `listFiles()`, and mirrors each page (optionally only `names`). This is the reader's hot path — see the note below. |
+| `clearMirror({ path })` | — | Purges one relative subtree of the offline-mirror (a single series or chapter). Called on delete/re-download so stale copied pages aren't served. Traversal-guarded against escaping the mirror root. |
+| `clearCache` | — | Wipes the entire offline-mirror. Triggered on folder change so stale cached pages don't keep resolving. |
+
+Every read/write method above runs on a small `ExecutorService` pool, not
+the Capacitor main thread. SAF I/O is synchronous ContentResolver IPC;
+running it inline would block the UI thread (ANR) and stall the WebView
+while the reader awaits a chapter. `PluginCall#resolve/#reject` are
+thread-safe, so the result still marshals back to the bridge correctly.
 
 The cache-copy in `prepareFileForWebView` is necessary because
 `content://` URIs from SAF can't be loaded directly by the WebView in
@@ -125,6 +134,49 @@ mirror is keyed by relative path so subsequent renders of the same page
 reuse the existing cached file (skipped when size matches). Android may
 evict the mirror under storage pressure; the worst case is a re-copy on
 next render.
+
+**Why the batched `prepareChapterForWebView` exists.** `resolveFile`
+walks a relative path segment-by-segment from the tree root via
+`DocumentFile.findFile`, and `findFile` enumerates the *entire* parent
+directory on each call. Resolving one page under
+`<mangaId>/chapters/<dir>/0001.jpg` therefore re-enumerates both the
+`chapters/` folder (every chapter in the series) and the chapter folder
+(every page). The old offline `getPages` did that for **every** page up
+front, so opening a chapter was O(pages × directory-size) ContentResolver
+round-trips — tens of seconds to minutes on a large library, which
+presented as a reader that "loads forever." Desktop/PWA never hit it
+because their `OfflineFolder` is `fs`-backed, not SAF. The batched method
+enumerates the chapter directory **once**, reuses the child `Uri`s, and
+mirrors each requested file, collapsing the walk to a single listing plus
+one stream copy per file.
+
+**Windowed `getPages`.** On top of the batched call, the offline
+`getPages` no longer resolves every page before returning. It resolves a
+small window around the entry page (`WINDOW_LOOKBACK`/`WINDOW_AHEAD` in
+[offlineApi.js](../client/src/api/offlineApi.js), centred on the reader's
+`resumePage`) so first paint is instant, then streams the remaining pages
+in the background. Because `pageImageUrl` reads a plain `Map` that React
+can't observe, the background fill fires an `onOfflinePagesResolved` event
+that the Reader subscribes to and uses to bump `pages` to a new array
+reference — the renderers re-read the map and the late pages appear. For
+encrypted chapters the background pass fetches the ciphertext back from
+the (already-mirrored) cache URL and decrypts to a `blob:` URL, avoiding a
+second SAF read.
+
+The background fill is cancellable. Each fill registers a token in
+`_activeFills` keyed by chapter id; the Reader calls `cancelOfflinePagesFill`
+on leave (before `releasePageBlobs`) so a superseded fill stops copying
+pages and stops minting decrypted blob URLs that would otherwise leak past
+the release. The next-chapter prefetch passes `windowOnly` so it warms only
+the first pages instead of mirroring a chapter that may never open.
+
+**Scoped cold-IDB scans.** When IDB is empty (post Clear-Data), a single
+chapter open used to trigger two whole-library walks — `getChapter` and
+`getManga`/`getChapters` each scanning every series folder. The Reader now
+passes the owning `mangaId` into `getChapter` / `getPages`, so the disk
+lookup is scoped to that one series; and `scanMangaFromDiskMemo` de-dupes
+the concurrent `getManga` + `getChapters` + `getChapter` burst into a
+single `scanMangaFromDisk` for the chapter being opened.
 
 ### `DownloadKeepAlive` — foreground service
 
@@ -431,6 +483,7 @@ offline-aware fallback instead. Two patterns in use:
 | 1.6.1 | 8 | Added `getAnilistStatus`, `getMangaReadingLists`, `getGallery` to `OFFLINE_ROUTED_METHODS` + matching shims so MangaDetail's mount Promise.all stops rejecting offline. |
 | 1.6.2 | 9 | `offlineApi.getManga` now reads chapters from IDB and includes them in the response (was missing — caused "No chapters found" offline). New downloads land in `Vol.X Ch.Y - Title [id]` folders. `chapter_dir_path` persisted on the IDB chapter row so delete operations resolve the right folder. |
 | 1.7 | 10 | Filesystem-as-source-of-truth. `OfflineFolder.listFiles` enumerates SAF directories. `scanMangaFromDisk` rebuilds the offline state from `manga.json` + chapter folder names + per-chapter `meta.json`. `getManga` / `getChapter` / `getPages` are IDB-first, FS-fallback, rehydrate-on-fallback. Downloads survive Clear-Data wipes. `meta.json` now carries the per-chapter `encrypted` flag so encryption flows through the FS path correctly. |
+| 1.8 | 37 | Fixed "chapter loads forever" on Android. `getPages` was resolving every page up front, each via a per-page SAF tree-walk (`DocumentFile.findFile` re-enumerates each parent directory), making chapter open O(pages × dir-size) ContentResolver round-trips. New batched `OfflineFolder.prepareChapterForWebView` resolves the chapter dir once and mirrors files in a single pass; `getPages` now resolves a window around the resume page and streams the rest in the background (`onOfflinePagesResolved` → reader re-render). All plugin SAF I/O moved off the Capacitor main thread onto an executor pool (ANR fix). |
 
 Older versions (1.0–1.4) shipped without an offline subsystem and are
 historical.

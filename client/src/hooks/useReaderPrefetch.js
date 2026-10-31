@@ -172,9 +172,14 @@ export function useReaderPrefetch({
     // Fast mode → server returns after Phase 1 (~1-3 s), Phase 2 continues
     // in the background. Legacy → server blocks until full extract completes
     // before responding (unchanged from pre-feature behaviour).
+    // `windowOnly` is inert online (raw getPages/getPagesWithMeta ignore extra
+    // opts); offline it stops the shim from background-copying the entire next
+    // chapter to the WebView mirror when we only need its first pages warmed.
+    // `mangaId` scopes the offline cold-IDB dir lookup to this series.
+    const nextMangaId = next.manga_id || allChapters[idx]?.manga_id;
     const pagesPromise = fastChapterOpen
-      ? api.getPagesWithMeta(next.id, { fast: true, prefetch: true })
-      : api.getPages(next.id);
+      ? api.getPagesWithMeta(next.id, { fast: true, prefetch: true, windowOnly: true, mangaId: nextMangaId })
+      : api.getPages(next.id, { windowOnly: true, mangaId: nextMangaId });
 
     pagesPromise.then(result => {
       if (cancelled) return;
@@ -223,11 +228,8 @@ export function useReaderPrefetch({
       // chunk on devices that never enable the setting.
       import('../api/downloader').then(({ queueChapter }) => {
         if (cancelled) return;
-        // mangaId comes from the chapter row on the server side; the
-        // reader passes it through allChapters consistently.
-        const mangaId = next.manga_id || allChapters[idx]?.manga_id;
-        if (!mangaId) return;
-        queueChapter(mangaId, next.id).catch(() => { /* best-effort */ });
+        if (!nextMangaId) return;
+        queueChapter(nextMangaId, next.id).catch(() => { /* best-effort */ });
       }).catch(() => { /* downloader unavailable on PWA — fine */ });
     }
 

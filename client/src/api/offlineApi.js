@@ -25,6 +25,7 @@ import {
   readText,
   exists as fsExists,
   listFiles,
+  prepareChapterFiles,
   isAvailable,
   isConfigured,
 } from './offlineStorage.js';
@@ -158,6 +159,52 @@ async function readJsonAt(path) {
     const text = await readText(path);
     return JSON.parse(text);
   } catch { return null; }
+}
+
+// The final path segment (`a/b/0001.jpg` → `0001.jpg`). Used to key page
+// rows against the on-disk file names the batched chapter-prepare returns.
+function basename(p) {
+  const s = String(p || '');
+  const i = s.lastIndexOf('/');
+  return i < 0 ? s : s.slice(i + 1);
+}
+
+// Everything but the final segment (`a/b/0001.jpg` → `a/b`). Recovers a
+// chapter directory from a page's stored `local_path` when the IDB chapter
+// row (which carries `chapter_dir_path`) isn't available.
+function parentPath(p) {
+  const s = String(p || '');
+  const i = s.lastIndexOf('/');
+  return i < 0 ? '' : s.slice(0, i);
+}
+
+// Windowed offline page loading. Opening a chapter offline resolves each
+// page file into a WebView-loadable URL; on Android's SAF that copy is the
+// expensive step, so we resolve only a small window around the entry page
+// before returning (instant first paint) and stream the rest in the
+// background. WINDOW_AHEAD is generous enough that normal forward reading
+// stays ahead of the background fill.
+const WINDOW_LOOKBACK = 2;
+const WINDOW_AHEAD     = 8;
+
+// De-dupe the concurrent filesystem scan that a single chapter-open triggers.
+// On a cold IDB the Reader fires `getManga` + `getChapters` (manga effect) and
+// `getChapter` + `getPages` (load effect) at essentially the same tick — each
+// previously walked disk independently. Memoising the *in-flight* scan promise
+// per manga collapses that burst into one `scanMangaFromDisk`. The entry is
+// dropped as soon as it settles so a later open re-reads disk (which may have
+// changed) rather than serving a stale scan.
+const _scanInFlight = new Map(); // mangaId(Number) → Promise<scan|null>
+
+function scanMangaFromDiskMemo(mangaId) {
+  const key = Number(mangaId);
+  const existing = _scanInFlight.get(key);
+  if (existing) return existing;
+  const p = scanMangaFromDisk(key).finally(() => {
+    if (_scanInFlight.get(key) === p) _scanInFlight.delete(key);
+  });
+  _scanInFlight.set(key, p);
+  return p;
 }
 
 // Scan `<mangaId>/manga.json` + walk `<mangaId>/chapters/` and return
@@ -295,22 +342,41 @@ async function scanPagesFromDisk(chapterDirPath, chapterId) {
 // chapter dir whose `[id]` suffix matches. Used only on the cold path
 // (IDB has no row for this chapter) — the result is cached back into
 // IDB by the caller so subsequent reads are O(1).
-async function findChapterDirPath(chapterId) {
+async function findChapterDirPath(chapterId, mangaId = null) {
   if (!isAvailable() || !(await isConfigured())) return null;
   const wantedId = Number(chapterId);
-  const topLevel = await listFiles('');
-  for (const entry of topLevel) {
-    if (!entry || !entry.isDirectory) continue;
-    const mangaId = Number(entry.name);
-    if (!Number.isFinite(mangaId)) continue;
-    const chapters = await listFiles(`${mangaId}/chapters`);
+
+  // Look inside a single manga's chapters folder — the on-disk `[id]` suffix
+  // is the match key.
+  async function scanOne(mid) {
+    const chapters = await listFiles(`${mid}/chapters`);
     for (const ch of chapters) {
       if (!ch || !ch.isDirectory) continue;
       const parsed = parseChapterDirName(ch.name);
       if (parsed && Number(parsed.id) === wantedId) {
-        return `${mangaId}/chapters/${ch.name}`;
+        return `${mid}/chapters/${ch.name}`;
       }
     }
+    return null;
+  }
+
+  // Scoped fast path: the caller (the Reader) knows which manga this chapter
+  // belongs to, so we only need to enumerate one series' chapters instead of
+  // walking the whole offline library.
+  if (mangaId != null && Number.isFinite(Number(mangaId))) {
+    const hit = await scanOne(Number(mangaId));
+    if (hit) return hit;
+    // Fall through to the full walk only if the scoped lookup missed (e.g.
+    // a stale/incorrect mangaId) so correctness never regresses.
+  }
+
+  const topLevel = await listFiles('');
+  for (const entry of topLevel) {
+    if (!entry || !entry.isDirectory) continue;
+    const mid = Number(entry.name);
+    if (!Number.isFinite(mid)) continue;
+    const hit = await scanOne(mid);
+    if (hit) return hit;
   }
   return null;
 }
@@ -367,8 +433,9 @@ async function getManga(id) {
     // an IDB wipe that the user reported.
   }
 
-  // Filesystem source of truth.
-  const scanned = await scanMangaFromDisk(id);
+  // Filesystem source of truth. Memoised so a concurrent getChapters /
+  // getChapter for the same manga on the same open shares this one scan.
+  const scanned = await scanMangaFromDiskMemo(id);
   if (scanned) {
     // Best-effort cache fill so subsequent reads are fast. Doesn't
     // block the response — the user already has the data they need.
@@ -386,33 +453,45 @@ async function getChapters(mangaId) {
   const rows = await listOfflineChaptersForManga(mangaId);
   if (rows.length > 0) return rows.map(chapterRowToApiShape);
 
-  // IDB empty for this manga — try the filesystem.
-  const scanned = await scanMangaFromDisk(mangaId);
+  // IDB empty for this manga — try the filesystem (shared scan).
+  const scanned = await scanMangaFromDiskMemo(mangaId);
   if (!scanned) return [];
   rehydrateMangaFromScan(scanned).catch(() => {});
   return scanned.chapters.map(chapterRowToApiShape).filter(Boolean);
 }
 
-async function getChapter(id) {
+async function getChapter(id, opts = {}) {
   // Fast path: IDB hit.
   const hit = await getOfflineChapter(id);
   if (hit) return chapterRowToApiShape(hit);
 
-  // Filesystem fallback: we don't know which manga the chapter belongs
-  // to without IDB, so this is best-effort — walk every manga folder
-  // looking for a chapter dir whose `[id]` suffix matches. For an
-  // offline library with hundreds of series this is slow on first miss,
-  // but rehydration after the first lookup populates IDB so it only
-  // happens once.
   if (!isAvailable() || !(await isConfigured())) {
     throw new OfflineUnavailableError(`chapter ${id} is not downloaded`);
   }
+
+  // Scoped fast path: the Reader passes the owning manga, so we scan only
+  // that series (shared with the concurrent getPages/getManga scan) instead
+  // of walking the whole offline library.
+  if (opts.mangaId != null) {
+    const scanned = await scanMangaFromDiskMemo(opts.mangaId);
+    const match = scanned && (scanned.chapters || []).find(c => Number(c.id) === Number(id));
+    if (match) {
+      rehydrateMangaFromScan(scanned).catch(() => {});
+      return chapterRowToApiShape(match);
+    }
+    // Fall through to the full walk if the scoped lookup missed (stale id).
+  }
+
+  // Filesystem fallback without a known manga — walk every manga folder
+  // looking for a chapter dir whose `[id]` suffix matches. Slow on first
+  // miss for a large library, but rehydration populates IDB so it only
+  // happens once.
   const topLevel = await listFiles('');
   for (const entry of topLevel) {
     if (!entry || !entry.isDirectory) continue;
     const mangaId = Number(entry.name);
     if (!Number.isFinite(mangaId)) continue;
-    const scanned = await scanMangaFromDisk(mangaId);
+    const scanned = await scanMangaFromDiskMemo(mangaId);
     if (!scanned) continue;
     const match = (scanned.chapters || []).find(c => Number(c.id) === Number(id));
     if (match) {
@@ -423,7 +502,7 @@ async function getChapter(id) {
   throw new OfflineUnavailableError(`chapter ${id} is not downloaded`);
 }
 
-async function getPages(chapterId) {
+async function getPages(chapterId, opts = {}) {
   let [rows, chapter] = await Promise.all([
     getOfflinePagesByChapter(chapterId),
     getOfflineChapter(chapterId),
@@ -437,9 +516,10 @@ async function getPages(chapterId) {
     let chapterDirPath = chapter && chapter.chapter_dir_path;
     if (!chapterDirPath) {
       // We don't have an IDB row at all, so we don't know the dir path.
-      // Locate it by walking — slow but bounded; only runs the first
-      // time a chapter is opened post-wipe.
-      chapterDirPath = await findChapterDirPath(chapterId);
+      // Locate it by listing — scoped to the owning manga when the Reader
+      // passed it (opts.mangaId), otherwise a bounded full-library walk.
+      // Only runs the first time a chapter is opened post-wipe.
+      chapterDirPath = await findChapterDirPath(chapterId, opts.mangaId);
     }
     if (chapterDirPath) {
       const { pages: scanPages, encrypted } = await scanPagesFromDisk(chapterDirPath, chapterId);
@@ -468,33 +548,172 @@ async function getPages(chapterId) {
   // A library where some chapters were downloaded before the user
   // enabled encryption and others after will have a mix; we route each
   // chapter independently.
-  //
-  // Two URL resolution paths:
-  //   - Plaintext: `srcUrl` returns a Capacitor file:// URL via
-  //     convertFileSrc — the WebView loads it like any other image. Fast.
-  //   - Encrypted: read the on-disk ciphertext, decrypt, wrap as a
-  //     `blob:` URL. The reader keeps a per-chapter URL map; we revoke
-  //     these in `releasePageBlobs()` when the reader unmounts.
   const chapterEncrypted = !!(chapter && chapter.encrypted);
 
-  const resolved = await Promise.all(rows.map(async r => {
-    const local = chapterEncrypted
-      ? await decryptToBlobUrl(r.local_path, r.filename)
-      : await srcUrl(r.local_path);
-    rememberPageUrl(r.page_id, local);
-    return {
-      id:         r.page_id,
-      page_index: r.page_index,
-      filename:   r.filename,
-      width:      r.width ?? null,
-      height:     r.height ?? null,
-      is_wide:    r.width != null && r.height != null && r.width > 0 && r.height > 0
-                  ? r.width > r.height
-                  : null,
-      _local_src: local,
-    };
+  // Page metadata is returned to the reader immediately. The actual
+  // WebView URL for each page is resolved into the shared pageId→url map
+  // (which `pageImageUrl` reads synchronously) — a window's worth before we
+  // return, the rest in the background.
+  const pageObjs = rows.map(r => ({
+    id:         r.page_id,
+    page_index: r.page_index,
+    filename:   r.filename,
+    width:      r.width ?? null,
+    height:     r.height ?? null,
+    is_wide:    r.width != null && r.height != null && r.width > 0 && r.height > 0
+                ? r.width > r.height
+                : null,
+    _local_src: '',
   }));
-  return resolved;
+  const objById = new Map(pageObjs.map(o => [Number(o.id), o]));
+
+  // Resolve the chapter directory once so page URLs can be produced with a
+  // single batched native round-trip instead of one SAF tree-walk per page.
+  const chapterDir = (chapter && chapter.chapter_dir_path)
+    || (rows[0] && parentPath(rows[0].local_path))
+    || null;
+
+  // Resolve a subset of page rows to WebView URLs via the batched native
+  // call, populating the shared map. Returns false when the batched path
+  // isn't available so the caller falls back to per-page `srcUrl`. `token`
+  // (background fill only) lets the caller abort mid-flight when the reader
+  // leaves the chapter — so we stop copying and don't leak decrypted blobs.
+  async function resolveBatch(subset, abortToken) {
+    if (subset.length === 0) return true;
+    if (abortToken && abortToken.cancelled) return true;
+    const names = subset.map(r => basename(r.local_path));
+    const urlByName = await prepareChapterFiles(chapterDir, names);
+    if (!urlByName) return false;
+    if (abortToken && abortToken.cancelled) return true;
+    await Promise.all(subset.map(async r => {
+      if (abortToken && abortToken.cancelled) return;
+      const fileUrl = urlByName[basename(r.local_path)];
+      if (!fileUrl) return;
+      // Plaintext: the mirror URL is the image itself. Encrypted: the mirror
+      // holds ciphertext — fetch it back (fast, local) and decrypt to a blob.
+      const local = chapterEncrypted
+        ? await decryptUrlToBlobUrl(fileUrl, r.filename)
+        : fileUrl;
+      // If the fill was cancelled while this page's bytes were decrypting,
+      // drop the just-created blob rather than leaking it past the reader's
+      // releasePageBlobs() (which already ran on leave).
+      if (abortToken && abortToken.cancelled) {
+        if (chapterEncrypted && local) {
+          try { URL.revokeObjectURL(local); } catch { /* already gone */ }
+          _activeBlobUrls.delete(local);
+        }
+        return;
+      }
+      rememberPageUrl(r.page_id, local);
+      const obj = objById.get(Number(r.page_id));
+      if (obj) obj._local_src = local;
+    }));
+    return true;
+  }
+
+  // Split into an initial window (resolved before returning → instant first
+  // paint) and the remainder (resolved in the background).
+  const start = clampWindowStart(opts, rows.length);
+  const from  = Math.max(0, start - WINDOW_LOOKBACK);
+  const to    = Math.min(rows.length, start + WINDOW_AHEAD);
+  const windowRows = rows.slice(from, to);
+  const restRows   = rows.filter((_, i) => i < from || i >= to);
+
+  // Register the cancellable token BEFORE resolving anything. The window
+  // resolve can itself take a second or two on SAF, so a user who opens a
+  // chapter and immediately backs out must be able to abort the whole
+  // operation — not just the background fill. Supersede any earlier fill for
+  // the same chapter.
+  const cid = Number(chapterId);
+  const prior = _activeFills.get(cid);
+  if (prior) prior.cancelled = true;
+  const token = { cancelled: false };
+  _activeFills.set(cid, token);
+  const releaseToken = () => { if (_activeFills.get(cid) === token) _activeFills.delete(cid); };
+
+  const batched = chapterDir ? await resolveBatch(windowRows, token) : false;
+
+  // `windowOnly` skips the background fill (next-chapter prefetch only needs
+  // the first pages warmed, not the whole maybe-never-opened chapter). A
+  // cancelled token means the reader already left during the window resolve —
+  // don't start a background fill for an abandoned chapter.
+  if (batched && restRows.length > 0 && !opts.windowOnly && !token.cancelled) {
+    // Fire-and-forget. When it finishes, notify subscribers (the Reader) so
+    // they re-render and `pageImageUrl` picks up the URLs for pages outside
+    // the initial window.
+    (async () => {
+      try { await resolveBatch(restRows, token); }
+      catch { /* best-effort — window already painted */ }
+      finally {
+        releaseToken();
+        if (!token.cancelled) emitPagesResolved(chapterId);
+      }
+    })();
+  } else if (!batched) {
+    // Fallback: per-page resolution for every page. Fast on the desktop
+    // (Electron) fs; slow but correct on an Android build whose plugin
+    // predates the batched method. Awaited (no background), but still
+    // token-guarded so a mid-load navigate-away stops the remaining work.
+    try {
+      await Promise.all(rows.map(async r => {
+        if (token.cancelled) return;
+        const local = chapterEncrypted
+          ? await decryptToBlobUrl(r.local_path, r.filename)
+          : await srcUrl(r.local_path);
+        rememberPageUrl(r.page_id, local);
+        const obj = objById.get(Number(r.page_id));
+        if (obj) obj._local_src = local;
+      }));
+    } finally {
+      releaseToken();
+    }
+  } else {
+    // Batched, but nothing to fill in the background (window-only, no
+    // remainder, or already cancelled) — drop the token now.
+    releaseToken();
+  }
+
+  return pageObjs;
+}
+
+// Clamp the caller-supplied window start to a valid page index. `opts.window`
+// carries `{ start }` (the reader's resume/deep-link page); anything missing
+// or out of range collapses to the first page.
+function clampWindowStart(opts, len) {
+  if (len <= 0) return 0;
+  const s = Number.isInteger(opts?.window?.start) ? opts.window.start : 0;
+  return Math.max(0, Math.min(s, len - 1));
+}
+
+// ── Background fill lifecycle ─────────────────────────────────────────────
+// In-flight background fills, keyed by chapter id. The Reader trips the token
+// via `cancelOfflinePagesFill` when it leaves a chapter so a superseded fill
+// stops copying pages and stops minting decrypted blob URLs that would
+// otherwise leak past the reader's `releasePageBlobs()`.
+const _activeFills = new Map(); // chapterId(Number) → { cancelled: boolean }
+
+export function cancelOfflinePagesFill(chapterId) {
+  const token = _activeFills.get(Number(chapterId));
+  if (token) token.cancelled = true;
+}
+
+// ── Background-resolution notification ────────────────────────────────────
+// `getPages` resolves an initial window synchronously and the rest in the
+// background. Because `pageImageUrl` reads a plain Map (not React state),
+// the reader wouldn't re-render when late URLs land — so it subscribes here
+// and bumps its own state when a chapter's background fill completes.
+const _pagesResolvedListeners = new Set();
+
+export function onOfflinePagesResolved(listener) {
+  _pagesResolvedListeners.add(listener);
+  return () => _pagesResolvedListeners.delete(listener);
+}
+
+function emitPagesResolved(chapterId) {
+  const cid = Number(chapterId);
+  for (const fn of _pagesResolvedListeners) {
+    try { fn(cid); } catch { /* one subscriber's error shouldn't break others */ }
+  }
 }
 
 // In-flight blob URLs created during the most-recent `getPages` call.
@@ -515,6 +734,25 @@ async function decryptToBlobUrl(relPath, filename) {
     // Decrypt failure (wrong key, corrupted file, etc.) — return an
     // empty string; the <img> will render the broken-image icon and the
     // user sees something is wrong without crashing the reader.
+    return '';
+  }
+}
+
+// Same as `decryptToBlobUrl` but reads the ciphertext back from the WebView
+// cache mirror URL produced by the batched chapter-prepare, instead of doing
+// a fresh SAF read. The mirror copy already happened natively in one pass, so
+// this fetch is a fast local read — no per-page ContentResolver tree-walk.
+async function decryptUrlToBlobUrl(fileUrl, filename) {
+  try {
+    const resp = await fetch(fileUrl);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const ciphertext = new Uint8Array(await resp.arrayBuffer());
+    const plain = await maybeDecrypt(ciphertext);
+    const blob  = new Blob([plain], { type: guessMimeFromFilename(filename) });
+    const url   = URL.createObjectURL(blob);
+    _activeBlobUrls.add(url);
+    return url;
+  } catch (e) {
     return '';
   }
 }
@@ -621,8 +859,18 @@ async function getHome() {
 // array length. Reader.jsx's downstream logic only branches on
 // `extracting`, so this keeps the fast-open code path correct offline
 // without dragging the CBZ machinery into the offline subsystem.
-async function getPagesWithMeta(chapterId /* , opts */) {
-  const pages = await getPages(chapterId);
+async function getPagesWithMeta(chapterId, opts = {}) {
+  // The Reader forwards its resume/deep-link page as `resumePage`; use it as
+  // the window start so the pages the user lands on are the ones resolved
+  // first, not always page 0.
+  const window = Number.isInteger(opts.resumePage) && opts.resumePage >= 0
+    ? { start: opts.resumePage }
+    : undefined;
+  const pages = await getPages(chapterId, {
+    window,
+    windowOnly: !!opts.windowOnly,
+    mangaId: opts.mangaId,
+  });
   return { data: pages, extracting: false, total_pages: pages.length };
 }
 

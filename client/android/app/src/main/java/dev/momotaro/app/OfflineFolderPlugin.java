@@ -23,6 +23,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Bridges the JS offline-storage layer to Android's Storage Access Framework.
@@ -54,6 +58,17 @@ public class OfflineFolderPlugin extends Plugin {
 
     public static final String PREFS_NAME    = "momotaro_offline_folder";
     public static final String KEY_TREE_URI  = "tree_uri";
+
+    // SAF/DocumentFile ops go through ContentResolver, which does synchronous
+    // IPC and is slow for deeply-nested paths. Capacitor dispatches plugin
+    // methods on the main thread by default, so running that I/O inline would
+    // block the UI thread (ANR risk) and stall the WebView while the reader
+    // waits on `prepareChapter*`. Every read/write op below is submitted to
+    // this pool instead; PluginCall#resolve/#reject are thread-safe, so the
+    // result is marshalled back to the bridge from the worker thread. The pool
+    // is small because SAF I/O is IPC-bound, not CPU-bound, and unbounded
+    // concurrency would just thrash the ContentResolver.
+    private final ExecutorService io = Executors.newFixedThreadPool(4);
 
     @PluginMethod
     public void getStatus(PluginCall call) {
@@ -149,15 +164,17 @@ public class OfflineFolderPlugin extends Plugin {
     /** Idempotent mkdir-p for a relative `a/b/c` path under the tree URI. */
     @PluginMethod
     public void ensureDir(PluginCall call) {
-        String relPath = call.getString("path", "");
-        try {
-            DocumentFile dir = resolveOrCreateDir(relPath);
-            JSObject ret = new JSObject();
-            ret.put("uri", dir.getUri().toString());
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("ensureDir failed: " + e.getMessage(), e);
-        }
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            try {
+                DocumentFile dir = resolveOrCreateDir(relPath);
+                JSObject ret = new JSObject();
+                ret.put("uri", dir.getUri().toString());
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("ensureDir failed: " + e.getMessage(), e);
+            }
+        });
     }
 
     /**
@@ -169,55 +186,59 @@ public class OfflineFolderPlugin extends Plugin {
      */
     @PluginMethod
     public void writeFile(PluginCall call) {
-        String relPath = call.getString("path", "");
-        String b64     = call.getString("data", "");
-        if (relPath == null || relPath.isEmpty()) {
-            call.reject("path required");
-            return;
-        }
-        try {
-            byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
-            DocumentFile parent = resolveOrCreateDir(parentOf(relPath));
-            String fname = basename(relPath);
-            DocumentFile file = parent.findFile(fname);
-            if (file != null) file.delete();
-            // mimeType is irrelevant for raw byte storage; we use the
-            // extension's MIME hint where possible so other apps that
-            // browse the folder show the right thumbnails.
-            file = parent.createFile(mimeFor(fname), fname);
-            if (file == null) throw new Exception("createFile returned null for " + fname);
-            try (OutputStream os = getContext().getContentResolver().openOutputStream(file.getUri(), "w")) {
-                if (os == null) throw new Exception("openOutputStream returned null");
-                os.write(bytes);
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            String b64     = call.getString("data", "");
+            if (relPath == null || relPath.isEmpty()) {
+                call.reject("path required");
+                return;
             }
-            call.resolve();
-        } catch (Exception e) {
-            call.reject("writeFile failed: " + e.getMessage(), e);
-        }
+            try {
+                byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
+                DocumentFile parent = resolveOrCreateDir(parentOf(relPath));
+                String fname = basename(relPath);
+                DocumentFile file = parent.findFile(fname);
+                if (file != null) file.delete();
+                // mimeType is irrelevant for raw byte storage; we use the
+                // extension's MIME hint where possible so other apps that
+                // browse the folder show the right thumbnails.
+                file = parent.createFile(mimeFor(fname), fname);
+                if (file == null) throw new Exception("createFile returned null for " + fname);
+                try (OutputStream os = getContext().getContentResolver().openOutputStream(file.getUri(), "w")) {
+                    if (os == null) throw new Exception("openOutputStream returned null");
+                    os.write(bytes);
+                }
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("writeFile failed: " + e.getMessage(), e);
+            }
+        });
     }
 
     /** Read `path` and return its contents as base64. Small files only. */
     @PluginMethod
     public void readFile(PluginCall call) {
-        String relPath = call.getString("path", "");
-        try {
-            DocumentFile file = resolveFile(relPath);
-            if (file == null) { call.reject("file not found: " + relPath); return; }
-            byte[] bytes;
-            try (InputStream is = getContext().getContentResolver().openInputStream(file.getUri())) {
-                if (is == null) throw new Exception("openInputStream returned null");
-                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
-                byte[] chunk = new byte[16384];
-                int n;
-                while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
-                bytes = buf.toByteArray();
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            try {
+                DocumentFile file = resolveFile(relPath);
+                if (file == null) { call.reject("file not found: " + relPath); return; }
+                byte[] bytes;
+                try (InputStream is = getContext().getContentResolver().openInputStream(file.getUri())) {
+                    if (is == null) throw new Exception("openInputStream returned null");
+                    java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[16384];
+                    int n;
+                    while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
+                    bytes = buf.toByteArray();
+                }
+                JSObject ret = new JSObject();
+                ret.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("readFile failed: " + e.getMessage(), e);
             }
-            JSObject ret = new JSObject();
-            ret.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("readFile failed: " + e.getMessage(), e);
-        }
+        });
     }
 
     /**
@@ -234,33 +255,44 @@ public class OfflineFolderPlugin extends Plugin {
      */
     @PluginMethod
     public void listFiles(PluginCall call) {
-        String relPath = call.getString("path", "");
-        try {
-            DocumentFile dir = resolveFile(relPath);
-            JSArray entries = new JSArray();
-            if (dir != null && dir.isDirectory()) {
-                for (DocumentFile child : dir.listFiles()) {
-                    JSObject entry = new JSObject();
-                    entry.put("name",        child.getName());
-                    entry.put("isDirectory", child.isDirectory());
-                    entries.put(entry);
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            try {
+                DocumentFile dir = resolveFile(relPath);
+                JSArray entries = new JSArray();
+                if (dir != null && dir.isDirectory()) {
+                    for (DocumentFile child : dir.listFiles()) {
+                        JSObject entry = new JSObject();
+                        entry.put("name",        child.getName());
+                        entry.put("isDirectory", child.isDirectory());
+                        entries.put(entry);
+                    }
                 }
+                JSObject ret = new JSObject();
+                ret.put("entries", entries);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("listFiles failed: " + e.getMessage(), e);
             }
-            JSObject ret = new JSObject();
-            ret.put("entries", entries);
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("listFiles failed: " + e.getMessage(), e);
-        }
+        });
     }
 
     @PluginMethod
     public void exists(PluginCall call) {
-        String relPath = call.getString("path", "");
-        DocumentFile file = resolveFile(relPath);
-        JSObject ret = new JSObject();
-        ret.put("exists", file != null && file.exists());
-        call.resolve(ret);
+        io.execute(() -> {
+            // Wrap the whole body: an exception escaping the executor runnable
+            // would leave the PluginCall unsettled, hanging the JS promise
+            // forever — the exact failure mode the offline reader must avoid.
+            try {
+                String relPath = call.getString("path", "");
+                DocumentFile file = resolveFile(relPath);
+                JSObject ret = new JSObject();
+                ret.put("exists", file != null && file.exists());
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("exists failed: " + e.getMessage(), e);
+            }
+        });
     }
 
     /**
@@ -270,20 +302,22 @@ public class OfflineFolderPlugin extends Plugin {
      */
     @PluginMethod
     public void deletePath(PluginCall call) {
-        String relPath = call.getString("path", "");
-        boolean recursive = call.getBoolean("recursive", false);
-        try {
-            DocumentFile node = resolveFile(relPath);
-            if (node == null) { call.resolve(); return; }
-            if (node.isDirectory() && recursive) {
-                deleteTree(node);
-            } else {
-                node.delete();
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            boolean recursive = call.getBoolean("recursive", false);
+            try {
+                DocumentFile node = resolveFile(relPath);
+                if (node == null) { call.resolve(); return; }
+                if (node.isDirectory() && recursive) {
+                    deleteTree(node);
+                } else {
+                    node.delete();
+                }
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("deletePath failed: " + e.getMessage(), e);
             }
-            call.resolve();
-        } catch (Exception e) {
-            call.reject("deletePath failed: " + e.getMessage(), e);
-        }
+        });
     }
 
     /**
@@ -297,36 +331,123 @@ public class OfflineFolderPlugin extends Plugin {
      */
     @PluginMethod
     public void prepareFileForWebView(PluginCall call) {
-        String relPath = call.getString("path", "");
-        try {
-            DocumentFile file = resolveFile(relPath);
-            if (file == null) { call.reject("file not found: " + relPath); return; }
+        io.execute(() -> {
+            String relPath = call.getString("path", "");
+            try {
+                DocumentFile file = resolveFile(relPath);
+                if (file == null) { call.reject("file not found: " + relPath); return; }
 
-            // Mirror the relative path under our private cache dir so the
-            // mapping is deterministic and a stale cached copy is just
-            // overwritten next time.
-            File cacheRoot = new File(getContext().getCacheDir(), "offline-mirror");
-            File outFile   = new File(cacheRoot, relPath);
-            File parent    = outFile.getParentFile();
-            if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                // Mirror the relative path under our private cache dir so the
+                // mapping is deterministic and a stale cached copy is just
+                // overwritten next time.
+                File cacheRoot = new File(getContext().getCacheDir(), "offline-mirror");
+                File outFile   = new File(cacheRoot, relPath);
+                mirrorCopy(file, outFile);
+                JSObject ret = new JSObject();
+                ret.put("fileUrl", Uri.fromFile(outFile).toString());
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("prepareFileForWebView failed: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * Batched variant of {@link #prepareFileForWebView} for a whole chapter.
+     * Resolves the chapter directory ONCE and enumerates its children in a
+     * single {@link DocumentFile#listFiles()} call, then mirrors each page
+     * file into the WebView cache. This is the hot path for opening a
+     * downloaded chapter offline.
+     *
+     * The per-file {@code prepareFileForWebView} re-walks the SAF tree from the
+     * tree root via {@code DocumentFile.findFile} for every page — and
+     * {@code findFile} enumerates the entire parent directory on each call. On
+     * a series with many chapters and a chapter with many pages that is
+     * O(pages × directory-size) ContentResolver round-trips, which stalls the
+     * reader for tens of seconds to minutes. Listing the directory once and
+     * reusing the returned child {@code Uri}s collapses that to a single
+     * enumeration plus one stream copy per file.
+     *
+     * Params:
+     *   path  — the chapter directory, relative to the tree URI.
+     *   names — optional array of on-disk file names to restrict the copy to
+     *           (used for windowed loading: prepare the visible window first,
+     *           then the rest in the background). Absent → all files.
+     *
+     * Returns { files: [{ name, fileUrl }, ...] } for the files that were
+     * requested and exist. Subdirectories are skipped.
+     */
+    @PluginMethod
+    public void prepareChapterForWebView(PluginCall call) {
+        io.execute(() -> {
+            String dirPath = call.getString("path", "");
+            JSArray namesArr = call.getArray("names", null);
+            try {
+                DocumentFile dir = resolveFile(dirPath);
+                if (dir == null || !dir.isDirectory()) {
+                    call.reject("chapter dir not found: " + dirPath);
+                    return;
+                }
+                Set<String> want = null;
+                if (namesArr != null) {
+                    want = new HashSet<>();
+                    for (int i = 0; i < namesArr.length(); i++) {
+                        Object o = namesArr.opt(i);
+                        if (o != null) want.add(String.valueOf(o));
+                    }
+                }
+                File cacheRoot = new File(getContext().getCacheDir(), "offline-mirror");
+                File cacheDir  = new File(cacheRoot, dirPath);
+                JSArray files = new JSArray();
+                for (DocumentFile child : dir.listFiles()) {
+                    if (child == null || child.isDirectory()) continue;
+                    String name = child.getName();
+                    if (name == null) continue;
+                    if (want != null && !want.contains(name)) continue;
+                    File outFile = new File(cacheDir, name);
+                    mirrorCopy(child, outFile);
+                    JSObject entry = new JSObject();
+                    entry.put("name",    name);
+                    entry.put("fileUrl", Uri.fromFile(outFile).toString());
+                    files.put(entry);
+                }
+                JSObject ret = new JSObject();
+                ret.put("files", files);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("prepareChapterForWebView failed: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * Copy a SAF {@link DocumentFile} into the private-cache mirror at
+     * {@code outFile}, creating parent dirs as needed. Skips the copy when a
+     * cached file of the same byte length already exists — the offline store
+     * is content-addressed by path, so a size match means the bytes are the
+     * ones we wrote at download time.
+     */
+    private void mirrorCopy(DocumentFile src, File outFile) throws Exception {
+        File parent = outFile.getParentFile();
+        if (parent != null && !parent.exists()) {
+            // Don't trust mkdirs()'s boolean: it returns false when a
+            // concurrent worker (e.g. the current chapter's background fill
+            // racing the next chapter's prefetch, both under the same
+            // .../chapters ancestor) created the directory between our
+            // exists() check and this call. Re-check existence instead.
+            parent.mkdirs();
+            if (!parent.exists()) {
                 throw new Exception("could not create cache dir: " + parent.getAbsolutePath());
             }
-
-            long srcSize = file.length();
-            if (!outFile.exists() || outFile.length() != srcSize) {
-                try (InputStream  is = getContext().getContentResolver().openInputStream(file.getUri());
-                     FileOutputStream fos = new FileOutputStream(outFile)) {
-                    if (is == null) throw new Exception("openInputStream returned null");
-                    byte[] chunk = new byte[16384];
-                    int n;
-                    while ((n = is.read(chunk)) > 0) fos.write(chunk, 0, n);
-                }
-            }
-            JSObject ret = new JSObject();
-            ret.put("fileUrl", Uri.fromFile(outFile).toString());
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("prepareFileForWebView failed: " + e.getMessage(), e);
+        }
+        long srcSize = src.length();
+        if (outFile.exists() && outFile.length() == srcSize) return;
+        try (InputStream is = getContext().getContentResolver().openInputStream(src.getUri());
+             FileOutputStream fos = new FileOutputStream(outFile)) {
+            if (is == null) throw new Exception("openInputStream returned null");
+            byte[] chunk = new byte[65536];
+            int n;
+            while ((n = is.read(chunk)) > 0) fos.write(chunk, 0, n);
         }
     }
 
@@ -340,6 +461,42 @@ public class OfflineFolderPlugin extends Plugin {
         File cacheRoot = new File(getContext().getCacheDir(), "offline-mirror");
         if (cacheRoot.exists()) deleteJavaFile(cacheRoot);
         call.resolve();
+    }
+
+    /**
+     * Purge one relative subtree of the offline-mirror cache — the scoped
+     * counterpart to {@link #clearCache}. Called when a chapter or series is
+     * deleted so its already-copied page images don't linger and get served
+     * stale on a same-path, same-byte-size re-download (mirrorCopy skips the
+     * copy when the cached file's length matches the source).
+     *
+     * `path` is the SAF-relative path (`<mangaId>` or
+     * `<mangaId>/chapters/<dir>`); the mirror mirrors that layout under
+     * `getCacheDir()/offline-mirror/`. A missing subtree resolves silently.
+     */
+    @PluginMethod
+    public void clearMirror(PluginCall call) {
+        io.execute(() -> {
+            try {
+                String relPath = call.getString("path", "");
+                if (relPath == null || relPath.isEmpty()) { call.resolve(); return; }
+                File cacheRoot = new File(getContext().getCacheDir(), "offline-mirror");
+                File target    = new File(cacheRoot, relPath);
+                // Defence-in-depth against a traversal path (`../…`) escaping
+                // the mirror root and deleting arbitrary cache files.
+                String rootCanon   = cacheRoot.getCanonicalPath();
+                String targetCanon = target.getCanonicalPath();
+                if (!targetCanon.equals(rootCanon)
+                    && !targetCanon.startsWith(rootCanon + File.separator)) {
+                    call.reject("clearMirror: path escapes mirror root");
+                    return;
+                }
+                if (target.exists()) deleteJavaFile(target);
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("clearMirror failed: " + e.getMessage(), e);
+            }
+        });
     }
 
     // ── Internals ──────────────────────────────────────────────────────────
